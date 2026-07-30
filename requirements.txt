@@ -7,6 +7,10 @@ pydantic==2.9.2
 pydantic-settings==2.6.1
 redis==5.0.8
 numpy==2.1.2
+# CP-SAT for the cutting engine's exact endgame (src/cutting/exact.py). Pinned
+# hard: a solver upgrade can return a different (still optimal) layout, and the
+# optimizer payload is cached by input hash — bump ENGINE_VERSION with the pin.
+ortools==9.14.6206
 Pillow==10.4.0
 sqlalchemy==2.0.25
 alembic==1.13.1

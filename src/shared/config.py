@@ -127,6 +127,25 @@ class Config:
 
     OPT_RESULT_TTL_SECONDS = env.int("OPT_RESULT_TTL_SECONDS", 259200)
 
+    # Board-count search budget (src/cutting/search.py). Counted in candidate
+    # fills per board / improvement iterations — never wall clock — so results
+    # stay deterministic and cacheable. Both feed the optimization hash: change
+    # them and cached results are recomputed.
+    OPT_TRIES_PER_BOARD = env.int("OPT_TRIES_PER_BOARD", 48)
+    OPT_SEARCH_ITERATIONS = env.int("OPT_SEARCH_ITERATIONS", 40)
+
+    # CP-SAT exact endgame (src/cutting/exact.py). The heuristics measurably
+    # fail to close packs above ~94%, which is exactly where a board is won or
+    # lost; a solver decides those few states exactly. Budgeted in solver CALLS
+    # and OR-Tools "deterministic time" (a work unit, not seconds) so the result
+    # never depends on machine load — the payload is cached by input hash. These
+    # also feed that hash: change them and cached results are recomputed.
+    # OPT_EXACT_ENABLED=false falls back to the pure-heuristic search.
+    OPT_EXACT_ENABLED = env.bool("OPT_EXACT_ENABLED", True)
+    OPT_EXACT_MAX_PIECES = env.int("OPT_EXACT_MAX_PIECES", 120)
+    OPT_EXACT_MAX_CALLS = env.int("OPT_EXACT_MAX_CALLS", 40)
+    OPT_EXACT_DETERMINISTIC_TIME = env.float("OPT_EXACT_DETERMINISTIC_TIME", 6.0)
+
     # Order attachments (anexos): PDFs/screenshots stored on local disk under
     # ATTACHMENTS_DIR (one subfolder per order). Only their metadata lives in
     # Postgres; the bytes stay on the filesystem (a Docker volume in prod).

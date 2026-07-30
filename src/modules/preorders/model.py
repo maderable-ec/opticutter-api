@@ -2,7 +2,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Optional
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Index, String, text
+from sqlalchemy import JSON, DateTime, ForeignKey, Index, Integer, String, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.shared.database import Base
@@ -97,6 +97,11 @@ class PreOrderModel(TimestampMixin, AuditMixin, Base):
     strategy: Mapped[str] = mapped_column(
         String(32), default="default", server_default="default"
     )
+
+    # Alternative-solution seed ("Generar otra alternativa"): like ``strategy``
+    # it affects the recompute's geometry and hash, so it's kept for every read
+    # to reproduce the chosen layout and inherited by the order on confirmation.
+    variant: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
 
     source: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     notes: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)

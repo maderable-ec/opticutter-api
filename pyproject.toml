@@ -33,6 +33,8 @@ python_functions = "test_*"
 markers = [
     "unit: unit test without DB (mock/pure functions); does not require PostgreSQL",
     "integration: integration test against real PostgreSQL",
+    "slow: benchmark-grade test (full search budget); exclude with -m 'not slow' for the fast loop",
+    "benchmark: parity vs the commercial program; the exact numbers depend on which OR-Tools BUILD runs (see tests/unit/test_cutting_search.py). Excluded from CI; run it against the production build with `make benchmark`",
 ]
 addopts = [
     "-v",

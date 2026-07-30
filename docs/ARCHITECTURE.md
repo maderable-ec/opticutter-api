@@ -45,10 +45,13 @@ src/
 │   ├── analytics/               Read-only reporting
 │   └── system/                  Health / readiness endpoints
 ├── cutting/                    Pure domain — NO framework imports
-│   ├── models.py                Rectangle, Piece, PlacedPiece, Material, CuttingLayout
+│   ├── models.py                Rectangle, Piece, PlacedPiece, Material, BinSpec, CuttingLayout
 │   ├── enums.py                 SplitRule, PackingStrategy
 │   ├── parameters.py            CuttingParameters (dataclass)
-│   └── optimizer.py             GuillotineOptimizer, MultiSheetGuillotineOptimizer
+│   ├── packer.py                GuillotineOptimizer — packs ONE bin
+│   ├── constructors.py          Candidate bin fills (greedy portfolio, strip patterns)
+│   ├── exact.py                 CP-SAT endgame: exact 2-stage fill of one bin (OR-Tools)
+│   └── search.py                optimize_bins — board count as an explicit cost objective
 main.py                         Creates the app, registers routers + middleware + handlers
 alembic/                        Migrations (env.py imports Base and every module's model)
 ```
@@ -171,12 +174,24 @@ def get_client(client_id: int, svc: ClientService = Depends(client_service)):
 
 ### `cutting/` — the optimizer domain
 
-Pure dataclasses (`Piece`, `Material`, `CuttingLayout`, ...) and the
-guillotine optimizers. `optimizations` orchestrates this domain: it picks the
-sort order and free-rectangle selection strategy based on `PackingStrategy`,
-runs the packer per material, and raises `EntityNotFoundError` if a
-requirement references an unknown catalog board instead of silently dropping
-it.
+Pure dataclasses (`Piece`, `Material`, `BinSpec`, `CuttingLayout`, ...) and the
+guillotine engine, layered: `packer.py` fills one bin, `constructors.py`
+generates candidate fills of one bin, `exact.py` solves one bin exactly with
+CP-SAT, and `search.py` (`optimize_bins`) chooses the cheapest *set* of bins —
+board count is an explicit cost objective, not an emergent side effect, which is
+what lets a half board be targeted on purpose.
+
+`optimizations` orchestrates this domain: it resolves materials into `BinSpec`s
+(including the half-board sibling), passes the `PackingStrategy` and the search
+budgets, and raises `EntityNotFoundError` if a requirement references an unknown
+catalog board instead of silently dropping it.
+
+OR-Tools is the one heavyweight dependency here and it is **optional at
+runtime**: if `ortools` can't be imported, `exact.py` returns `None` everywhere
+and the engine falls back to its heuristic search. Results stay deterministic
+either way — the optimizer payload is cached by a hash of its inputs, and that
+hash includes the engine version, the search budgets and whether the solver is
+available.
 
 ## API contract
 

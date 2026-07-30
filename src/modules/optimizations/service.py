@@ -1,3 +1,4 @@
+import dataclasses
 import hashlib
 import json
 from collections import Counter, defaultdict
@@ -7,15 +8,18 @@ from fastapi import Depends
 from sqlalchemy.orm import Session
 
 from src.cutting import (
+    ENGINE_VERSION,
+    BinSpec,
     CuttingLayout,
     CuttingParameters,
-    Material,
-    MultiSheetGuillotineOptimizer,
+    ExactConfig,
     PackingStrategy,
     Piece,
+    SearchBudget,
+    exact_available,
+    optimize_bins,
 )
 from src.modules.clients.model import ClientModel
-from src.modules.optimizations.half_boards import apply_half_boards
 from src.modules.optimizations.labels import edge_banding_notation
 from src.modules.optimizations.materials import MaterialResolver, ResolvedMaterial
 from src.modules.optimizations.patterns import group_layouts
@@ -35,6 +39,7 @@ from src.modules.products.model import ProductModel, ProductType
 from src.modules.products.service import ProductService
 from src.modules.settings.service import SettingsService
 from src.shared.cache import cache
+from src.shared.config import config
 from src.shared.database import get_db
 from src.shared.exceptions import (
     BusinessRuleError,
@@ -47,6 +52,22 @@ from src.shared.exceptions import (
 # width↔height, so we fix this convention to draw the edge band on the correct
 # physical side of the already-rotated piece.
 _CW_ROTATION = {"top": "right", "right": "bottom", "bottom": "left", "left": "top"}
+
+
+def _exact_config() -> ExactConfig:
+    """Runtime settings of the CP-SAT endgame, as the search will actually see them.
+
+    ``enabled`` folds in whether OR-Tools is importable at all, so the value that
+    salts the cache hash describes the geometry this process can really produce:
+    a deployment without the solver never serves — nor poisons — the cache
+    entries of one that has it.
+    """
+    return ExactConfig(
+        enabled=config.OPT_EXACT_ENABLED and exact_available(),
+        max_pieces=config.OPT_EXACT_MAX_PIECES,
+        max_calls=config.OPT_EXACT_MAX_CALLS,
+        deterministic_time=config.OPT_EXACT_DETERMINISTIC_TIME,
+    )
 
 
 class OptimizationService:
@@ -91,6 +112,7 @@ class OptimizationService:
             client=client,
             optimization_hash=optimization_hash,
             strategy=payload.get("strategy", OptimizationStrategy.default.value),
+            variant=payload.get("variant", 0),
             total_boards_used=payload["total_boards_used"],
             total_boards_cost=payload["total_boards_cost"],
             total_edge_banding_cost=payload.get("total_edge_banding_cost", 0.0),
@@ -167,10 +189,16 @@ class OptimizationService:
             return cached, optimization_hash
 
         strategy = STRATEGY_TO_PACKING[request.strategy]
+        exact_config = _exact_config()
         results = []
         for key, reqs in requirements_by_key.items():
             pieces, edge_map, net_map = self._build_pieces(reqs)
             offcuts = pools.get(key)
+            budget = SearchBudget.scaled(
+                len(pieces),
+                tries_per_board=config.OPT_TRIES_PER_BOARD,
+                iterations=config.OPT_SEARCH_ITERATIONS,
+            )
             if offcuts:
                 # Pool: pack across the catalog board + its finite offcuts.
                 layouts = optimize_pool(
@@ -179,6 +207,10 @@ class OptimizationService:
                     offcuts=offcuts,
                     cutting_params=cutting_params,
                     strategy=strategy,
+                    half_spec=self._half_spec(resolved[key], half_board_markup_pct),
+                    budget=budget,
+                    seed=request.variant,
+                    exact_config=exact_config,
                 )
             else:
                 layouts = self._optimize(
@@ -186,14 +218,12 @@ class OptimizationService:
                     material=resolved[key],
                     cutting_params=cutting_params,
                     strategy=strategy,
+                    half_board_markup_pct=half_board_markup_pct,
+                    budget=budget,
+                    seed=request.variant,
+                    exact_config=exact_config,
                 )[0]
             results.append((edge_map, net_map, layouts))
-
-        # Half-board billing: catalog sheets whose content fits on a half board are
-        # replaced by the half (width/2, cost/2 + markup) before the payload is assembled.
-        apply_half_boards(
-            results, resolved, cutting_params, strategy, half_board_markup_pct
-        )
 
         payload = self._build_result_payload(
             request, results, resolved, eb_products, waste_factor
@@ -272,6 +302,14 @@ class OptimizationService:
                 "edge_banding_waste_factor": waste_factor,
                 "half_board_markup_pct": half_board_markup_pct,
                 "strategy": request.strategy.value,
+                # Anything that changes the produced geometry must invalidate
+                # cached results: the engine version, the search budget knobs
+                # and the alternative-solution seed.
+                "engine_version": ENGINE_VERSION,
+                "tries_per_board": config.OPT_TRIES_PER_BOARD,
+                "search_iterations": config.OPT_SEARCH_ITERATIONS,
+                "exact": dataclasses.asdict(_exact_config()),
+                "variant": request.variant,
             },
             "edge_prices": edge_prices,
         }
@@ -287,42 +325,82 @@ class OptimizationService:
             requirements_by_key[req.material_key].append(req)
         return requirements_by_key
 
+    @staticmethod
+    def _half_spec(
+        material: ResolvedMaterial, half_board_markup_pct: float
+    ) -> Optional[BinSpec]:
+        """Half-board bin for a catalog material (``None`` for inline sources).
+
+        The business sells half catalog boards split lengthwise: same length,
+        width/2, charged ``price/2 * (1 + markup)``. Handing it to the search as
+        a cheaper sibling bin makes the half board an optimization objective
+        instead of a post-hoc billing check.
+        """
+        if not material.is_catalog:
+            return None
+        return BinSpec(
+            key=material.key,
+            width=material.width / 2.0,
+            height=material.height,
+            thickness=material.thickness,
+            cost_per_unit=round(
+                material.cost_per_unit / 2.0 * (1 + half_board_markup_pct), 2
+            ),
+            half_board=True,
+        )
+
     def _optimize(
         self,
         pieces: List[Piece],
         material: ResolvedMaterial,
         cutting_params: CuttingParameters,
         strategy: PackingStrategy = PackingStrategy.MAX_EFFICIENCY,
+        half_board_markup_pct: float = 0.0,
+        budget: SearchBudget = None,
+        seed: int = 0,
         max_sheets: int = 100,
         min_rect_size: float = 0.1,
+        exact_config: ExactConfig = None,
     ) -> Tuple[List[CuttingLayout], List[Piece]]:
         """Optimizes the cutting layout for a resolved material (any source).
 
         Receives domain pieces already expanded with a unique id (see
         ``_build_pieces``): each physical instance arrives with ``quantity=1`` so
         the optimizer preserves the id as-is and per-piece edge-banding attribution
-        doesn't depend on ambiguous labels. ``strategy`` defines the packing profile
-        (max efficiency vs. long offcuts); the split rule is derived from it.
+        doesn't depend on ambiguous labels. ``strategy`` defines the packing
+        profile (max efficiency runs the board-count search; long offcuts keeps
+        the single geometric pass). Catalog materials contribute a half-board
+        sibling bin, so the cost objective decides when half a board suffices.
+        ``seed`` is the request ``variant``: it reorders the search exploration
+        to produce alternative solutions on demand.
         """
         if not pieces:
             raise ValidationError("La lista de piezas no puede estar vacía")
 
-        domain_material = Material(
-            id=material.key,
-            width=material.width,
-            height=material.height,
-            thickness=material.thickness,
-            cost_per_unit=material.cost_per_unit,
-        )
+        bins = [
+            BinSpec(
+                key=material.key,
+                width=material.width,
+                height=material.height,
+                thickness=material.thickness,
+                cost_per_unit=material.cost_per_unit,
+            )
+        ]
+        half = self._half_spec(material, half_board_markup_pct)
+        if half is not None:
+            bins.append(half)
 
-        optimizer = MultiSheetGuillotineOptimizer(
-            material_template=domain_material,
+        return optimize_bins(
+            pieces,
+            bins,
             cutting_params=cutting_params,
             strategy=strategy,
-            max_sheets=max_sheets,
+            budget=budget,
+            seed=seed,
             min_rect_size=min_rect_size,
+            max_sheets=max_sheets,
+            exact_config=exact_config,
         )
-        return optimizer.optimize(pieces)
 
     def _build_pieces(
         self, reqs: List[Requirement]
@@ -630,6 +708,7 @@ class OptimizationService:
         )
         return {
             "strategy": request.strategy.value,
+            "variant": request.variant,
             "total_boards_used": total_boards_used,
             "total_boards_cost": total_boards_cost,
             "total_edge_banding_cost": total_edge_banding_cost,

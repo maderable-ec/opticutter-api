@@ -8,7 +8,9 @@ from src.cutting.enums import (
     PackingStrategy,
     SplitRule,
 )
+from src.cutting.exact import is_available as exact_available
 from src.cutting.models import (
+    BinSpec,
     Cut,
     CuttingLayout,
     Material,
@@ -16,14 +18,24 @@ from src.cutting.models import (
     PlacedPiece,
     Rectangle,
 )
-from src.cutting.optimizer import GuillotineOptimizer, MultiSheetGuillotineOptimizer
+from src.cutting.packer import GuillotineOptimizer
 from src.cutting.parameters import CuttingParameters
+from src.cutting.search import (
+    ENGINE_VERSION,
+    ExactConfig,
+    MultiSheetGuillotineOptimizer,
+    SearchBudget,
+    optimize_bins,
+)
 
 __all__ = [
+    "ENGINE_VERSION",
     "PACKING_STRATEGY_SPLIT_RULE",
+    "BinSpec",
     "Cut",
     "CuttingLayout",
     "CuttingParameters",
+    "ExactConfig",
     "GuillotineOptimizer",
     "Material",
     "MultiSheetGuillotineOptimizer",
@@ -31,5 +43,8 @@ __all__ = [
     "Piece",
     "PlacedPiece",
     "Rectangle",
+    "SearchBudget",
     "SplitRule",
+    "exact_available",
+    "optimize_bins",
 ]

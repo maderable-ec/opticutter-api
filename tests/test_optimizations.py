@@ -560,62 +560,57 @@ def test_material_resolver_resolves_each_source(db_session):
 # --- Half boards (billed at half price) -----------------------------------
 
 
-def _full_layouts(pieces, width=1220, height=2440, cost=45.5):
-    """Optimizes ``pieces`` over a full board and returns the layouts."""
-    from src.cutting import (
-        CuttingParameters,
-        Material,
-        MultiSheetGuillotineOptimizer,
-        PackingStrategy,
-    )
-
-    template = Material(
-        id="b1", width=width, height=height, thickness=18, cost_per_unit=cost
-    )
-    optimizer = MultiSheetGuillotineOptimizer(
-        material_template=template,
-        cutting_params=CuttingParameters(kerf=5),
-        strategy=PackingStrategy.MAX_EFFICIENCY,
-    )
-    return optimizer.optimize(pieces)[0]
-
-
-def _resolved(source="catalog", product_id=1, width=1220, height=2440, cost=45.5):
+def _resolved_material(
+    source="catalog", product_id=1, width=1220, height=2440, cost=45.5
+):
     from src.modules.optimizations.materials import ResolvedMaterial
 
-    return {
-        "b1": ResolvedMaterial(
-            key="b1",
-            width=width,
-            height=height,
-            thickness=18,
-            cost_per_unit=cost,
-            source=source,
-            product_id=product_id,
-            code="MEL18",
-            name="Melamina",
-        )
-    }
-
-
-def test_apply_half_boards_downgrades_fitting_board():
-    """A catalog sheet whose content fits in half becomes a half board."""
-    from src.cutting import CuttingParameters, PackingStrategy, Piece
-    from src.modules.optimizations.half_boards import apply_half_boards
-
-    layouts = _full_layouts([Piece(id="p1", width=300, height=300)])
-    results = [({}, {}, layouts)]
-    apply_half_boards(
-        results,
-        _resolved(),
-        CuttingParameters(kerf=5),
-        PackingStrategy.MAX_EFFICIENCY,
-        half_board_markup_pct=0.10,
+    return ResolvedMaterial(
+        key="b1",
+        width=width,
+        height=height,
+        thickness=18,
+        cost_per_unit=cost,
+        source=source,
+        product_id=product_id,
+        code="MEL18",
+        name="Melamina",
     )
 
-    out = results[0][2]
-    assert len(out) == 1
-    board = out[0]
+
+def _bins_for(rm, markup=0.10):
+    """Full bin + half sibling (when catalog), as the service builds them."""
+    from src.cutting import BinSpec
+    from src.modules.optimizations.service import OptimizationService
+
+    bins = [
+        BinSpec(
+            key=rm.key,
+            width=rm.width,
+            height=rm.height,
+            thickness=rm.thickness,
+            cost_per_unit=rm.cost_per_unit,
+        )
+    ]
+    half = OptimizationService._half_spec(rm, markup)
+    if half is not None:
+        bins.append(half)
+    return bins
+
+
+def test_half_bin_downgrades_fitting_board():
+    """A catalog job whose content fits in half is billed as a half board."""
+    from src.cutting import CuttingParameters, Piece, optimize_bins
+
+    layouts, unplaced = optimize_bins(
+        [Piece(id="p1", width=300, height=300)],
+        _bins_for(_resolved_material()),
+        cutting_params=CuttingParameters(kerf=5),
+    )
+
+    assert unplaced == []
+    assert len(layouts) == 1
+    board = layouts[0]
     assert board.material.half_board is True
     assert board.material.width == 610  # width/2, length unchanged
     assert board.material.height == 2440
@@ -623,65 +618,56 @@ def test_apply_half_boards_downgrades_fitting_board():
     assert len(board.placed_pieces) == 1  # no pieces are lost
 
 
-def test_apply_half_boards_keeps_wide_board_full():
+def test_half_bin_keeps_wide_board_full():
     """A piece wider than half (on both axes) keeps the board full."""
-    from src.cutting import CuttingParameters, PackingStrategy, Piece
-    from src.modules.optimizations.half_boards import apply_half_boards
+    from src.cutting import CuttingParameters, Piece, optimize_bins
 
     # 700x800: both sides > 610, doesn't fit in a half (610 wide).
-    layouts = _full_layouts([Piece(id="p1", width=700, height=800)])
-    results = [({}, {}, layouts)]
-    apply_half_boards(
-        results,
-        _resolved(),
-        CuttingParameters(kerf=5),
-        PackingStrategy.MAX_EFFICIENCY,
-        half_board_markup_pct=0.10,
+    layouts, _ = optimize_bins(
+        [Piece(id="p1", width=700, height=800)],
+        _bins_for(_resolved_material()),
+        cutting_params=CuttingParameters(kerf=5),
     )
 
-    board = results[0][2][0]
+    board = layouts[0]
     assert board.material.half_board is False
     assert board.material.width == 1220
     assert board.material.cost_per_unit == 45.5
 
 
-def test_apply_half_boards_skips_non_catalog():
+def test_half_bin_skips_non_catalog():
     """Offcuts/manual never become half even if content fits (priced at full cost)."""
-    from src.cutting import CuttingParameters, PackingStrategy, Piece
-    from src.modules.optimizations.half_boards import apply_half_boards
+    from src.cutting import CuttingParameters, Piece, optimize_bins
+    from src.modules.optimizations.service import OptimizationService
 
-    layouts = _full_layouts([Piece(id="p1", width=300, height=300)])
-    results = [({}, {}, layouts)]
-    apply_half_boards(
-        results,
-        _resolved(source="manual", product_id=None),
-        CuttingParameters(kerf=5),
-        PackingStrategy.MAX_EFFICIENCY,
-        half_board_markup_pct=0.10,
+    manual = _resolved_material(source="manual", product_id=None)
+    assert OptimizationService._half_spec(manual, 0.10) is None
+
+    layouts, _ = optimize_bins(
+        [Piece(id="p1", width=300, height=300)],
+        _bins_for(manual),
+        cutting_params=CuttingParameters(kerf=5),
     )
 
-    board = results[0][2][0]
+    board = layouts[0]
     assert board.material.half_board is False
     assert board.material.width == 1220
 
 
-def test_apply_half_boards_applies_configurable_markup():
+def test_half_bin_applies_configurable_markup():
     """The markup formula is price/2 * (1 + pct), independent of the default value."""
-    from src.cutting import CuttingParameters, PackingStrategy, Piece
-    from src.modules.optimizations.half_boards import apply_half_boards
+    from src.cutting import CuttingParameters, Piece, optimize_bins
+    from src.modules.optimizations.service import OptimizationService
 
-    layouts = _full_layouts([Piece(id="p1", width=300, height=300)])
-    results = [({}, {}, layouts)]
-    apply_half_boards(
-        results,
-        _resolved(),
-        CuttingParameters(kerf=5),
-        PackingStrategy.MAX_EFFICIENCY,
-        half_board_markup_pct=0.20,
+    half = OptimizationService._half_spec(_resolved_material(), 0.20)
+    assert half.cost_per_unit == round(45.5 / 2 * 1.20, 2) == 27.3
+
+    layouts, _ = optimize_bins(
+        [Piece(id="p1", width=300, height=300)],
+        _bins_for(_resolved_material(), markup=0.20),
+        cutting_params=CuttingParameters(kerf=5),
     )
-
-    board = results[0][2][0]
-    assert board.material.cost_per_unit == round(45.5 / 2 * 1.20, 2) == 27.3
+    assert layouts[0].material.cost_per_unit == 27.3
 
 
 def test_optimize_charges_half_board_for_sparse_job(client):

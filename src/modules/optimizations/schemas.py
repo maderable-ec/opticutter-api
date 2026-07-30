@@ -347,6 +347,17 @@ class OptimizeRequest(CamelModel):
             "geometry and hash (unlike clientId/priceTierCode)."
         ),
     )
+    variant: int = Field(
+        default=0,
+        ge=0,
+        le=1000,
+        description=(
+            "Alternative-solution seed. 0 = canonical solution; each increment "
+            "reorders the search exploration to produce a genuinely different "
+            "layout when alternatives exist. DOES affect geometry and hash, so "
+            "every variant is cached and deterministic on its own."
+        ),
+    )
 
     @model_validator(mode="after")
     def _validate_material_refs(self) -> "OptimizeRequest":
@@ -505,6 +516,10 @@ class OptimizeResponse(CamelModel):
     strategy: OptimizationStrategy = Field(
         default=OptimizationStrategy.default,
         description="Packing heuristic applied to this optimization",
+    )
+    variant: int = Field(
+        default=0,
+        description="Alternative-solution seed this result was computed with",
     )
     total_boards_used: int = Field(..., description="Total number of boards used")
     total_boards_cost: float = Field(..., description="Total cost of boards used")

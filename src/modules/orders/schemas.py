@@ -49,6 +49,15 @@ class OrderCreate(CamelModel):
             "(default | longOffcuts). Inherited from the pre-order on confirmation."
         ),
     )
+    variant: int = Field(
+        default=0,
+        ge=0,
+        le=1000,
+        description=(
+            "Alternative-solution seed to use when recomputing and freezing the "
+            "snapshot. Inherited from the pre-order on confirmation."
+        ),
+    )
     notes: Optional[str] = Field(default=None, max_length=512)
     source: Optional[str] = Field(default="web", max_length=32)
     status: Literal[OrderStatus.confirmed] = Field(

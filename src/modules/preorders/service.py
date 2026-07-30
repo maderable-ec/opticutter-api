@@ -121,6 +121,7 @@ class PreOrderService(BranchScopedMixin):
             ],
             price_tier_code=tier["code"],
             strategy=data.strategy.value,
+            variant=data.variant,
             source=data.source,
             notes=data.notes,
             created_at=now,
@@ -168,6 +169,8 @@ class PreOrderService(BranchScopedMixin):
             preorder.price_tier_code = tier["code"]
         if data.strategy is not None:
             preorder.strategy = data.strategy.value
+        if data.variant is not None:
+            preorder.variant = data.variant
         if "notes" in fields:
             preorder.notes = data.notes
         if "source" in fields:
@@ -213,6 +216,7 @@ class PreOrderService(BranchScopedMixin):
             client_id=preorder.client_id,
             price_tier_code=preorder.price_tier_code,
             strategy=preorder.strategy,
+            variant=preorder.variant or 0,
         )
 
     def compute_payload(self, preorder: PreOrderModel) -> Tuple[dict, str]:

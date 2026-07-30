@@ -48,6 +48,15 @@ class PreOrderCreate(CamelModel):
             "Affects geometry; inherited by the order upon confirmation."
         ),
     )
+    variant: int = Field(
+        default=0,
+        ge=0,
+        le=1000,
+        description=(
+            "Alternative-solution seed remembered for the recompute; like "
+            "strategy it affects geometry and is inherited by the order."
+        ),
+    )
     notes: Optional[str] = Field(default=None, max_length=512)
     source: Optional[str] = Field(default="web", max_length=32)
     branch_id: Optional[int] = Field(
@@ -69,6 +78,7 @@ class PreOrderUpdate(CamelModel):
     client_id: Optional[int] = None
     price_tier_code: Optional[str] = Field(default=None, max_length=32)
     strategy: Optional[OptimizationStrategy] = Field(default=None)
+    variant: Optional[int] = Field(default=None, ge=0, le=1000)
     notes: Optional[str] = Field(default=None, max_length=512)
     source: Optional[str] = Field(default=None, max_length=32)
 
@@ -106,6 +116,9 @@ class PreOrderResponse(CamelModel):
     strategy: OptimizationStrategy = Field(
         default=OptimizationStrategy.default,
         description="Packing heuristic remembered for the recompute",
+    )
+    variant: int = Field(
+        default=0, description="Alternative-solution seed remembered for the recompute"
     )
     notes: Optional[str] = None
     client_note: Optional[str] = Field(

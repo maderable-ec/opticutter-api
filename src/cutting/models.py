@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 
 @dataclass
@@ -133,6 +133,40 @@ class Material:
 
     def __repr__(self) -> str:
         return f"Material(id={self.id}, w={self.width}, h={self.height}, t={self.thickness})"
+
+
+@dataclass(frozen=True)
+class BinSpec:
+    """A sheet type the search may open: geometry + cost + supply.
+
+    ``count=None`` means infinite supply (catalog boards); a finite ``count``
+    models offcuts. A half board shares the parent's ``key`` (the material
+    identity) and differs only in ``width``/``cost_per_unit``/``half_board`` —
+    the search treats it as a cheaper alternative bin for the same material and
+    the cost objective decides when it pays off.
+    """
+
+    key: str
+    width: float
+    height: float
+    thickness: float
+    cost_per_unit: float = 0.0
+    count: Optional[int] = None
+    half_board: bool = False
+
+    @property
+    def area(self) -> float:
+        return self.width * self.height
+
+    def to_material(self) -> Material:
+        return Material(
+            id=self.key,
+            width=self.width,
+            height=self.height,
+            thickness=self.thickness,
+            cost_per_unit=self.cost_per_unit,
+            half_board=self.half_board,
+        )
 
 
 @dataclass
