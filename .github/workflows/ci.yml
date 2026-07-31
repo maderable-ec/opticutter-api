@@ -85,8 +85,12 @@ jobs:
       # not just `-m unit`.
       #
       # `benchmark` is excluded on purpose: those tests pin the exact board
-      # count of the audit cut lists, and CP-SAT's choice among equally optimal
-      # packings is only reproducible for a given OR-Tools BUILD — the runner's
-      # manylinux x86_64 wheel and a developer's macOS arm64 wheel legitimately
-      # disagree. `make benchmark` runs them against the production build.
+      # count of the audit cut lists against the commercial program — a
+      # commercial claim, only meaningful for the build that ships — and they
+      # take ~2 min. `make benchmark` runs them against that build (linux/amd64).
+      # They are NOT excluded for being build-dependent: CP-SAT's arbitrary pick
+      # among equally optimal packings used to leak into the layout (arm64 and
+      # x86_64 disagreed on pre-order 21 at kerf 5), but canonical
+      # reconstruction fixed that, and a 12-way tie-break sweep now guards it.
+      # A red benchmark today is a real regression, not a platform difference.
       - run: pytest -q -m "not benchmark"

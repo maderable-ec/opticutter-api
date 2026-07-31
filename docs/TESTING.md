@@ -14,14 +14,21 @@ is `integration`. No manual annotation needed.
 Two markers are applied by hand, both on the cutting engine's benchmarks:
 `slow` (full search budget — seconds per test) and **`benchmark`**, which is
 the one CI deselects. A `benchmark` test pins the exact board count of an audit
-cut list, and that number depends on which **OR-Tools binary** runs: CP-SAT
-picks arbitrarily among equally optimal packings, and the pick is a property of
-the build, not of the pinned version (measured: macOS arm64 and manylinux
-x86_64 disagree on pre-order 21 at kerf 5). Only one build's numbers are
-commercially meaningful — the one that ships — so `make benchmark` runs them
-against a `linux/amd64` image. Anything that must hold on *every* build (layout
-validity, nothing left unplaced, never worse than the heuristics alone) goes in
-an unmarked test that runs everywhere.
+cut list against the commercial reference — a commercial claim, and only
+meaningful for the build that ships, so `make benchmark` runs them against a
+`linux/amd64` image. Anything that must hold on *every* build (layout validity,
+nothing left unplaced, never worse than the heuristics alone) goes in an
+unmarked test that runs everywhere.
+
+Those numbers used to be **build-dependent**: CP-SAT picks arbitrarily among
+equally optimal packings, the pick is a property of the binary rather than of
+the pinned version, and macOS arm64 and manylinux x86_64 disagreed on pre-order
+21 at kerf 5 (5 boards vs 6). The engine no longer inherits that pick —
+`exact._build_fill` reconstructs a canonical layout from the solver's answer —
+and `test_preorder_21_at_kerf_5_survives_any_solver_tie_break` guards it by
+perturbing the solver's tie-break 12 ways. Parity now holds on both builds.
+Cut length can still differ between tied optima; it is the last tiebreak of the
+search objective, so it changes the diagram, never the bill.
 
 ## Commands
 
@@ -37,11 +44,11 @@ DATABASE_URL=postgresql://cutter:cutter@localhost:5433/cutter_test_db \
 # Integration only
 pytest -m integration
 
-# Everything CI runs (the parity benchmarks are build-dependent, see above)
+# Everything CI runs (the parity benchmarks are slow and opt-in, see above)
 pytest -q -m "not benchmark"
 
 # The parity benchmarks, against the build that ships (linux/amd64, emulated on
-# Apple Silicon). Red until the engine picks tied optima the same way on every build.
+# Apple Silicon). Includes the 12-way solver tie-break sweep; ~2 min.
 make benchmark
 ```
 

@@ -30,14 +30,24 @@ OR-Tools build. Because a solver upgrade can change which solution comes back,
 ``ortools`` is pinned in ``requirements.txt`` and ``ENGINE_VERSION`` in
 ``search.py`` must be bumped whenever that pin moves.
 
-"For a given build" is the exact scope of that guarantee, and the gap is
-*measured*, not theoretical: on one audit cut list (pre-order 21 at kerf 5) the
-macOS arm64 wheel and the manylinux x86_64 wheel of the SAME pinned version
-return different — equally optimal — densest first boards, and the engine ends
-at 5 boards on one and 6 on the other. Wherever the caller must pick one of
-several tied optima, the pick is a property of the binary. Anything downstream
-that depends on *which* optimum came back is therefore build-dependent; see
-``tests/unit/test_cutting_search.py`` for how the benchmarks handle it.
+"For a given build" is the scope of what the *solver* guarantees, and the gap
+was measured, not theoretical: on one audit cut list (pre-order 21 at kerf 5)
+the macOS arm64 wheel and the manylinux x86_64 wheel of the SAME pinned version
+returned different — equally optimal — densest first boards, and the engine
+ended at 5 boards on one and 6 on the other.
+
+So the reconstruction below does not trust the answer's *form*, only its
+content. Two things CP-SAT reports are arbitrary rather than meaningful: the
+column index (equal-width columns are interchangeable) and ``widths[k]``, which
+the model only bounds from below, so a 425mm column can come back declared
+505mm. ``_build_fill`` re-derives both from the pieces themselves and attaches
+concrete instances only afterwards, which collapses tied optima onto one
+canonical layout and makes the engine's output build-independent in everything
+the search optimizes on — pieces consumed and waste. Total cut length can still
+differ between tied optima; it is the last tiebreak in the search's objective,
+so it changes the diagram, never the bill. See
+``tests/unit/test_cutting_exact.py`` for the invariants and
+``tests/unit/test_cutting_search.py`` for the end-to-end sweep.
 
 ``ortools`` is imported defensively: without it every entry point returns
 ``None`` and the engine degrades to the pure-heuristic Phase 1 behavior.
@@ -272,7 +282,6 @@ def solve_bin(
         groups=groups,
         options_by_type=options_by_type,
         counts=counts,
-        widths=widths,
         opened=opened,
         geo=geo,
         spec=spec,
@@ -290,7 +299,6 @@ def _build_fill(
     groups: Sequence[Tuple[PieceType, List[Piece]]],
     options_by_type: Sequence[Sequence[_Orientation]],
     counts,
-    widths,
     opened,
     geo: _Geometry,
     spec: BinSpec,
@@ -305,23 +313,46 @@ def _build_fill(
     Coordinates advance in *scaled integer* units and convert to millimetres
     only at the end, so the rounding slack (pieces up, bin down) always widens
     gaps: every separation is >= kerf by construction.
+
+    Reconstruction is deliberately **canonical**: everything the solver reports
+    that is arbitrary rather than meaningful gets re-derived from the content,
+    so equally-optimal answers from different builds collapse to one layout.
+    See the module docstring for why that matters.
     """
-    columns: List[Tuple[int, List[Tuple[int, int, bool, Piece]]]] = []
-    cursors = [0] * len(groups)
+    # Columns are read out as type-level TEMPLATES first, because two things the
+    # solver hands back are arbitrary rather than meaningful: the column index
+    # (equal-width columns are interchangeable) and the value of ``widths[k]``
+    # (the model only bounds it from below, so a 425mm column may come back
+    # declared 505mm). Both are re-derived canonically here — the width from the
+    # widest row, the order from the content — so that two OR-Tools builds
+    # returning different-but-equally-optimal answers still lay out identically.
+    templates: List[Tuple[int, Tuple[Tuple[int, int, bool, int], ...]]] = []
     for k in range(n_cols):
         if not solver.Value(opened[k]):
             continue
-        width = solver.Value(widths[k])
-        rows: List[Tuple[int, int, bool, Piece]] = []
-        for t_idx, (_t, pieces) in enumerate(groups):
+        rows: List[Tuple[int, int, bool, int]] = []
+        for t_idx in range(len(groups)):
             for o_idx, (across, along, rotated) in enumerate(options_by_type[t_idx]):
-                for _ in range(solver.Value(counts[t_idx][k][o_idx])):
-                    rows.append((along, across, rotated, pieces[cursors[t_idx]]))
-                    cursors[t_idx] += 1
-        if width <= 0 or not rows:
+                rows.extend(
+                    [(along, across, rotated, t_idx)]
+                    * solver.Value(counts[t_idx][k][o_idx])
+                )
+        if not rows:
             continue
-        rows.sort(key=lambda row: (-row[0], -row[1], row[3].id))
-        columns.append((width, rows))
+        rows.sort(key=lambda row: (-row[0], -row[1], row[3], row[2]))
+        templates.append((max(row[1] for row in rows), tuple(rows)))
+    templates.sort(key=lambda item: (-item[0], item[1]))
+
+    # Concrete instances are attached only now, walking the canonical order, so
+    # a piece's id depends on the layout and never on the solver's column order.
+    columns: List[Tuple[int, List[Tuple[int, int, bool, Piece]]]] = []
+    cursors = [0] * len(groups)
+    for width, rows in templates:
+        bound: List[Tuple[int, int, bool, Piece]] = []
+        for along, across, rotated, t_idx in rows:
+            bound.append((along, across, rotated, groups[t_idx][1][cursors[t_idx]]))
+            cursors[t_idx] += 1
+        columns.append((width, bound))
 
     if not columns:
         return None

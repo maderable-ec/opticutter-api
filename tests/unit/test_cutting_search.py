@@ -16,22 +16,31 @@ endgame (Phase 2, ``cutting/exact.py``) closed the remaining gap. 21 at 5 boards
 is the area lower bound, so it is provably optimal, not merely equal to the
 reference.
 
-**One of those results is BUILD-dependent, and the tests say so.** Pre-order 21
-at kerf 5 hangs on a single call: ``_Searcher.exact_best_fill`` asks CP-SAT for
-the densest possible first board (``solve_bin(require_all=False)``, maximizing
-area). Many packings tie at that maximum; which one comes back is arbitrary and
-reproducible only *for a given OR-Tools binary* (``exact.py`` says as much).
-When the pick is the "wrong" one the residual changes and nothing downstream
-recovers — measured: not a bigger call budget, not a wider beam, not LNS. And it
-is not hypothetical: with ``ortools==9.14.6206``, the macOS arm64 wheel packs 5
-boards while the manylinux x86_64 wheel — the build that ships and the one CI
-runs — packs 6. Every other case here agrees on both builds.
+**Pre-order 21 at kerf 5 used to be BUILD-dependent**, and the tests still carry
+the machinery that proves it no longer is. That result hangs on
+``_Searcher.exact_best_fill``, which asks CP-SAT for the densest possible first
+board (``solve_bin(require_all=False)``, maximizing area). Many packings tie at
+that maximum, and which one comes back is arbitrary — reproducible only *for a
+given OR-Tools binary*. With ``ortools==9.14.6206`` the macOS arm64 wheel packed
+5 boards while the manylinux x86_64 wheel (the build that ships, and the one CI
+runs) packed 6, because the layout inherited the binary's arbitrary pick and
+nothing downstream recovered it: not a bigger call budget, not a wider beam, not
+LNS.
 
-So the kerf-5 pre-order 21 case is split in two: a contract that holds on ANY
-build (it must never be worse than the heuristics alone) runs everywhere, and
-the parity number itself is marked ``benchmark``, excluded from CI and measured
-against the production build with ``make benchmark``. Making that number
-build-independent is engine work, not a test tweak.
+The fix was to stop inheriting it. ``exact._build_fill`` now reconstructs a
+canonical layout from the solver's answer — column widths tightened to their
+content, columns ordered by it, instances attached only afterwards — so tied
+optima collapse to one layout. Parity now holds on both builds, and
+``test_preorder_21_at_kerf_5_survives_any_solver_tie_break`` keeps it honest by
+perturbing the tie-break 12 ways; ``tests/unit/test_cutting_exact.py`` pins the
+reconstruction invariants themselves.
+
+What is still *not* canonical: two tied optima can differ in total cut length
+(the pieces consumed and the waste no longer vary — measured). Cut length is the
+last tiebreak of ``_Solution.objective()``, reached only when cost, board count
+and waste are all equal, so it can pick a different-looking diagram for the same
+bill. Parity numbers stay marked ``benchmark`` and are measured against the
+production build with ``make benchmark``; CI runs ``-m "not benchmark"``.
 """
 
 import json
@@ -159,11 +168,11 @@ def test_preorder_21_reaches_the_area_lower_bound_at_kerf_5():
     The heuristic search alone billed 5 full + 1 half here (321.90); the exact
     endgame is what closes the tail into the fifth board.
 
-    BUILD-DEPENDENT (``benchmark``, excluded from CI): with ortools 9.14.6206
-    this passes on macOS arm64 and fails with 6 boards / 321.90 on the
-    manylinux x86_64 build that ships. Run it with ``make benchmark``, which
-    measures the production build. Making it hold on every build is engine
-    work — the module docstring says where.
+    This number used to hold only on macOS arm64 — the manylinux x86_64 build
+    that ships billed 6 boards — because the layout inherited whichever tied
+    optimum the binary happened to return. Canonical reconstruction removed that
+    dependence and it now holds on both builds; ``make benchmark`` measures it
+    against the production one. The sweep below is what keeps it that way.
     """
     layouts, unplaced = optimize_bins(
         _pieces(PREORDER_21), [FULL, HALF], cutting_params=PARAMS_KERF5
@@ -173,6 +182,39 @@ def test_preorder_21_reaches_the_area_lower_bound_at_kerf_5():
     cost = sum(layout.material.cost_per_unit for layout in layouts)
     assert len(layouts) == 5
     assert cost == pytest.approx(290.0)
+
+
+@pytest.mark.slow
+@pytest.mark.benchmark
+@pytest.mark.parametrize("offset", range(12))
+def test_preorder_21_at_kerf_5_survives_any_solver_tie_break(offset, monkeypatch):
+    """Parity does not depend on WHICH tied optimum CP-SAT returns.
+
+    Offsetting ``random_seed`` on every solver call is the local proxy for
+    running a different OR-Tools build: both change the arbitrary pick among
+    equally-optimal answers, and offsets 3 and 6 used to reproduce exactly the
+    6-board result the linux/amd64 wheel gave. Requiring 5 boards on *all* of
+    them is the honest acceptance criterion — one green build proves nothing.
+    """
+    from ortools.sat.python import cp_model
+
+    original = cp_model.CpSolver.Solve
+
+    def perturbed(self, model, *args, **kwargs):
+        self.parameters.random_seed = self.parameters.random_seed + offset
+        return original(self, model, *args, **kwargs)
+
+    monkeypatch.setattr(cp_model.CpSolver, "Solve", perturbed)
+
+    layouts, unplaced = optimize_bins(
+        _pieces(PREORDER_21), [FULL, HALF], cutting_params=PARAMS_KERF5
+    )
+    assert unplaced == []
+    assert_valid_layouts(layouts, unplaced, PARAMS_KERF5, _total_instances(PREORDER_21))
+    assert len(layouts) == 5
+    assert sum(layout.material.cost_per_unit for layout in layouts) == pytest.approx(
+        290.0
+    )
 
 
 @pytest.mark.slow

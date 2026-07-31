@@ -34,7 +34,7 @@ markers = [
     "unit: unit test without DB (mock/pure functions); does not require PostgreSQL",
     "integration: integration test against real PostgreSQL",
     "slow: benchmark-grade test (full search budget); exclude with -m 'not slow' for the fast loop",
-    "benchmark: parity vs the commercial program; the exact numbers depend on which OR-Tools BUILD runs (see tests/unit/test_cutting_search.py). Excluded from CI; run it against the production build with `make benchmark`",
+    "benchmark: parity vs the commercial program; the exact board counts are a commercial claim, only meaningful for the build that ships (see tests/unit/test_cutting_search.py). Excluded from CI because it is slow (~2 min); run it against the production build with `make benchmark`",
 ]
 addopts = [
     "-v",
