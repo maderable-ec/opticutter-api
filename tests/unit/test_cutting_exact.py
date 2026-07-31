@@ -108,6 +108,67 @@ def test_exact_is_deterministic():
     assert run() == run()
 
 
+# A pool with several equally-optimal 2-stage packings: columns of equal width
+# that can be permuted, and same-height pieces that can swap between columns.
+# Measured: before the reconstruction was canonicalized, six seed offsets
+# produced six different layouts of this pool.
+TIE_PRONE = [(500, 900, 6), (500, 600, 4), (300, 900, 3)]
+
+
+def _tie_prone_pool():
+    return expand_pieces(
+        [
+            Piece(id=f"t{i}", width=w, height=h, quantity=q, can_rotate=False)
+            for i, (w, h, q) in enumerate(TIE_PRONE)
+        ]
+    )
+
+
+@pytest.mark.parametrize("offset", range(6))
+def test_exact_layout_is_canonical_whatever_tied_optimum_comes_back(
+    monkeypatch, offset
+):
+    """Tight, ordered columns on every tie-break — the build-independence fix.
+
+    Perturbing ``random_seed`` stands in for running a different OR-Tools
+    *build*: both change which of many equally-optimal answers the solver hands
+    back. Two things it reports are arbitrary rather than meaningful — the
+    column index, and ``widths[k]``, which the model only bounds from below, so
+    a 425mm column could come back declared 505mm. Reconstruction re-derives
+    both from the content, and that has to hold under any tie-break: on
+    pre-order 21 at kerf 5 this leak cost a whole board on the build that ships
+    (see ``tests/unit/test_cutting_search.py``).
+    """
+    from ortools.sat.python import cp_model
+
+    original = cp_model.CpSolver.Solve
+
+    def perturbed(self, model, *args, **kwargs):
+        self.parameters.random_seed = self.parameters.random_seed + offset
+        return original(self, model, *args, **kwargs)
+
+    monkeypatch.setattr(cp_model.CpSolver, "Solve", perturbed)
+
+    pool = _tie_prone_pool()
+    fill = solve_bin(pool, BOARD, PARAMS, require_all=False, transposed=False)
+    assert fill is not None
+    assert_valid_fill(fill, PARAMS, len(fill.placed))
+
+    columns = {}
+    for pp in fill.placed:
+        columns.setdefault(round(pp.x, 6), []).append(pp)
+    xs = sorted(columns)
+
+    # No phantom slack: a column is exactly as wide as its widest piece, so
+    # consecutive columns sit exactly one kerf apart.
+    widths = [max(pp.width for pp in columns[x]) for x in xs]
+    for x, width, next_x in zip(xs, widths, xs[1:]):
+        assert next_x == pytest.approx(x + width + PARAMS.kerf)
+
+    # Equal-width columns are interchangeable, so the order has to be pinned.
+    assert widths == sorted(widths, reverse=True)
+
+
 def test_exact_respects_a_narrower_bin():
     """The half board is a different bin, not a scaled one: it must be honored."""
     half = BinSpec(

@@ -66,9 +66,11 @@ from src.cutting.parameters import CuttingParameters
 
 # Bump whenever the search produces different geometry for the same inputs, so
 # the orchestrator can salt its cache hash and never serve stale layouts.
-# 3 = CP-SAT exact endgame (``exact.py``); also bump this when the pinned
-# ortools version moves, since a solver upgrade can return a different solution.
-ENGINE_VERSION = 3
+# 3 = CP-SAT exact endgame (``exact.py``); 4 = canonical reconstruction of the
+# solver's answer, which changes exact-built layouts (tighter columns) and makes
+# them build-independent. Also bump this when the pinned ortools version moves,
+# since a solver upgrade can return a different solution.
+ENGINE_VERSION = 4
 
 # A half bin is only worth opening near the end of a job: gate it by remaining
 # area so early states don't waste decodes on fills the cost objective would
