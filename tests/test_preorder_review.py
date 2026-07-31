@@ -129,6 +129,51 @@ def test_public_review_detail_is_sanitized(client):
         assert leaked not in data
 
 
+def test_public_review_exposes_the_cutting_layout(client):
+    """The client sees how their boards get cut, not just what they're billed."""
+    pre = _setup_preorder(client)
+    link = _generate_link(client, pre["id"])
+
+    data = client.get(f"/api/v1/public/review/{link['token']}").json()["data"]
+
+    groups = data["layoutGroups"]
+    assert groups, "the diagram needs at least one cutting pattern"
+    # Grouping dedupes by pattern, so the sheet count is the sum of the groups'.
+    assert sum(g["count"] for g in groups) == data["totalBoardsUsed"]
+    assert data["totalPieces"] == sum(p["quantity"] for p in data["pieces"])
+
+    group = groups[0]
+    assert group["sheet"]["materialName"]
+    assert group["sheet"]["width"] > 0 and group["sheet"]["height"] > 0
+    assert len(group["placedPieces"]) == group["piecesCount"]
+
+    piece = group["placedPieces"][0]
+    # ``pieceId`` is the label the client typed, so the diagram can name pieces.
+    assert piece["pieceId"]
+    for key in ("x", "y", "width", "height", "originalWidth", "originalHeight"):
+        assert isinstance(piece[key], (int, float))
+
+
+def test_public_review_layout_hides_production_internals(client):
+    """The geometry is projected, not forwarded: no catalog ids, no saw paths."""
+    pre = _setup_preorder(client)
+    link = _generate_link(client, pre["id"])
+
+    resp = client.get(f"/api/v1/public/review/{link['token']}")
+    group = resp.json()["data"]["layoutGroups"][0]
+
+    # ``materialKey`` is the seller's internal handle; ``cuts`` is saw travel.
+    assert "materialKey" not in group
+    assert "materialKey" not in group["sheet"]
+    for leaked in ("cuts", "statistics", "patternId"):
+        assert leaked not in group
+    for piece in group["placedPieces"]:
+        edges = piece.get("edges")
+        if edges:
+            for leaked in ("productId", "code", "product_id"):
+                assert leaked not in edges
+
+
 def test_public_review_shows_the_commercial_reference(client):
     """The client sees the same reference that's printed on the proforma PDF."""
     c = _create_client(client)

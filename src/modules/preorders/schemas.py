@@ -10,6 +10,7 @@ from src.modules.optimizations.schemas import (
     MaterialInput,
     OptimizationStrategy,
     OptimizeResponse,
+    Remainder,
     Requirement,
 )
 from src.modules.preorders.model import PreOrderStatus, ReviewLinkStatus
@@ -229,6 +230,76 @@ class ReviewPieceResponse(CamelModel):
     edges: Optional[dict] = None
 
 
+class ReviewPieceEdges(CamelModel):
+    """Edge banding of a drawn piece, without the catalog identifiers.
+
+    ``sides`` are the *geometric* sides of the piece as placed (post-rotation),
+    so the diagram can paint the bands where they physically go.
+    """
+
+    sides: List[str] = Field(
+        default_factory=list, description="Banded sides: top | bottom | left | right"
+    )
+    color: Optional[str] = None
+    band_type: Optional[str] = Field(
+        default=None, description="Canonical band type (Suave/Duro)"
+    )
+    notation: Optional[str] = Field(
+        default=None, description="Workshop notation, e.g. '2L1C CS'"
+    )
+
+
+class ReviewPlacedPiece(CamelModel):
+    """A piece as laid out on the sheet, for the client-facing diagram.
+
+    ``piece_id`` is the human label the client themselves typed (optionally
+    suffixed ``#N`` when the label has several physical instances), so the
+    diagram can name the piece without any extra field.
+    """
+
+    piece_id: str
+    x: float
+    y: float
+    width: float = Field(..., description="Width on the sheet (after rotation)")
+    height: float = Field(..., description="Height on the sheet (after rotation)")
+    rotated: bool
+    original_width: float = Field(..., description="Requested width (before rotation)")
+    original_height: float = Field(
+        ..., description="Requested height (before rotation)"
+    )
+    edges: Optional[ReviewPieceEdges] = None
+
+
+class ReviewSheet(CamelModel):
+    """The physical board a pattern is cut from, named rather than keyed."""
+
+    material_name: Optional[str] = Field(
+        default=None, description="Display name of the board (never the internal key)"
+    )
+    width: float
+    height: float
+    thickness: float
+    half_board: bool = False
+
+
+class ReviewLayoutGroup(CamelModel):
+    """One cutting pattern, plus how many sheets are cut that way.
+
+    Deliberately omits the guillotine ``cuts`` (saw travel is production
+    information) and the efficiency/waste statistics: the client is shown how
+    their pieces are laid out, not how well the shop nested them.
+    """
+
+    count: int = Field(..., description="Number of sheets cut with this pattern")
+    sheet_numbers: List[int] = Field(default_factory=list)
+    sheet: ReviewSheet
+    placed_pieces: List[ReviewPlacedPiece] = Field(default_factory=list)
+    remainders: List[Remainder] = Field(
+        default_factory=list, description="Leftover rectangles on the sheet"
+    )
+    pieces_count: int = Field(..., description="Pieces placed on one sheet")
+
+
 class ReviewPreOrderResponse(CamelModel):
     """Sanitized public view of the pre-order: what the client sees on the link.
 
@@ -267,6 +338,9 @@ class ReviewPreOrderResponse(CamelModel):
     )
     total: float = Field(..., description="Subtotal minus discount plus services")
     total_boards_used: int
+    total_pieces: int = Field(
+        default=0, description="Total physical pieces across the cut list"
+    )
     created_at: datetime
     sent_at: Optional[datetime] = None
     confirmed_at: Optional[datetime] = None
@@ -274,3 +348,7 @@ class ReviewPreOrderResponse(CamelModel):
     lines: List[ReviewLineResponse] = Field(default_factory=list)
     additional_services: List[ReviewServiceResponse] = Field(default_factory=list)
     pieces: List[ReviewPieceResponse] = Field(default_factory=list)
+    layout_groups: List[ReviewLayoutGroup] = Field(
+        default_factory=list,
+        description="Cutting patterns of the live optimization, for the diagram",
+    )
