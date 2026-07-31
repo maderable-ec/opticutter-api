@@ -136,5 +136,10 @@ by a deterministic hash of the request.
 ## Notes
 
 - If Redis is unavailable, the service keeps operating, just without caching.
-- The packing algorithm is a heuristic chosen for simplicity and speed over
-  provably optimal packing.
+- The packing engine minimizes **material cost**, not just piece placement: a
+  beam search over board partitions, local-search repair, and an OR-Tools CP-SAT
+  solver that decides the tight last board exactly. It often proves optimality
+  (matching the area lower bound) and stops there; otherwise it returns the best
+  solution found within a deterministic budget.
+- `ortools` is optional at runtime — without it the engine falls back to its
+  heuristic search, at some cost in board count.

@@ -11,6 +11,18 @@ Marking is **automatic by path** (the `pytest_collection_modifyitems` hook in
 `tests/conftest.py`): anything under `tests/unit/` is `unit`; everything else
 is `integration`. No manual annotation needed.
 
+Two markers are applied by hand, both on the cutting engine's benchmarks:
+`slow` (full search budget — seconds per test) and **`benchmark`**, which is
+the one CI deselects. A `benchmark` test pins the exact board count of an audit
+cut list, and that number depends on which **OR-Tools binary** runs: CP-SAT
+picks arbitrarily among equally optimal packings, and the pick is a property of
+the build, not of the pinned version (measured: macOS arm64 and manylinux
+x86_64 disagree on pre-order 21 at kerf 5). Only one build's numbers are
+commercially meaningful — the one that ships — so `make benchmark` runs them
+against a `linux/amd64` image. Anything that must hold on *every* build (layout
+validity, nothing left unplaced, never worse than the heuristics alone) goes in
+an unmarked test that runs everywhere.
+
 ## Commands
 
 ```bash
@@ -24,6 +36,13 @@ DATABASE_URL=postgresql://cutter:cutter@localhost:5433/cutter_test_db \
 
 # Integration only
 pytest -m integration
+
+# Everything CI runs (the parity benchmarks are build-dependent, see above)
+pytest -q -m "not benchmark"
+
+# The parity benchmarks, against the build that ships (linux/amd64, emulated on
+# Apple Silicon). Red until the engine picks tied optima the same way on every build.
+make benchmark
 ```
 
 Notes:

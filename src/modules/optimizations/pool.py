@@ -19,9 +19,15 @@ Three fill orders (see ``PoolFillOrder``):
 from typing import List, Optional, Tuple
 
 from src.cutting.enums import PackingStrategy
-from src.cutting.models import CuttingLayout, Material, Piece
-from src.cutting.optimizer import GuillotineOptimizer, MultiSheetGuillotineOptimizer
+from src.cutting.models import BinSpec, CuttingLayout, Material, Piece
+from src.cutting.packer import GuillotineOptimizer
 from src.cutting.parameters import CuttingParameters
+from src.cutting.search import (
+    ExactConfig,
+    SearchBudget,
+    downgrade_layout_to_half,
+    optimize_bins,
+)
 from src.modules.optimizations.materials import ResolvedMaterial
 from src.modules.optimizations.schemas import PoolFillOrder
 
@@ -107,18 +113,36 @@ def _fill_catalog(
     strategy: PackingStrategy,
     min_rect_size: float,
     max_sheets: int,
+    budget: Optional[SearchBudget] = None,
+    seed: int = 0,
+    exact_config: Optional[ExactConfig] = None,
 ) -> Tuple[List[CuttingLayout], List[Piece]]:
-    """Packs the remainder onto catalog boards (repeated template)."""
+    """Packs the remainder onto catalog boards via the board-count search.
+
+    Full boards only: the half-board downgrade happens once, on the final
+    selection (see ``optimize_pool``), so the ``catalog_first`` probing keeps
+    counting whole catalog sheets.
+    """
     if not pieces or max_sheets <= 0:
         return [], pieces
-    optimizer = MultiSheetGuillotineOptimizer(
-        material_template=_domain_material(primary),
+    spec = BinSpec(
+        key=primary.key,
+        width=primary.width,
+        height=primary.height,
+        thickness=primary.thickness,
+        cost_per_unit=primary.cost_per_unit,
+    )
+    return optimize_bins(
+        pieces,
+        [spec],
         cutting_params=cutting_params,
         strategy=strategy,
-        max_sheets=max_sheets,
+        budget=budget,
+        seed=seed,
         min_rect_size=min_rect_size,
+        max_sheets=max_sheets,
+        exact_config=exact_config,
     )
-    return optimizer.optimize(pieces)
 
 
 def _offcuts_first(
@@ -129,12 +153,23 @@ def _offcuts_first(
     strategy: PackingStrategy,
     min_rect_size: float,
     max_sheets: int,
+    budget: Optional[SearchBudget] = None,
+    seed: int = 0,
+    exact_config: Optional[ExactConfig] = None,
 ) -> List[CuttingLayout]:
     offcut_layouts, remaining = _fill_offcuts(
         offcuts, pieces, cutting_params, strategy, min_rect_size
     )
     catalog_layouts, _ = _fill_catalog(
-        primary, remaining, cutting_params, strategy, min_rect_size, max_sheets
+        primary,
+        remaining,
+        cutting_params,
+        strategy,
+        min_rect_size,
+        max_sheets,
+        budget,
+        seed,
+        exact_config,
     )
     return offcut_layouts + catalog_layouts
 
@@ -147,6 +182,9 @@ def _catalog_first(
     strategy: PackingStrategy,
     min_rect_size: float,
     max_sheets: int,
+    budget: Optional[SearchBudget] = None,
+    seed: int = 0,
+    exact_config: Optional[ExactConfig] = None,
 ) -> List[CuttingLayout]:
     """Fewest catalog boards such that the offcuts absorb the residual.
 
@@ -157,13 +195,29 @@ def _catalog_first(
     solution is guaranteed.
     """
     catalog_only, _ = _fill_catalog(
-        primary, pieces, cutting_params, strategy, min_rect_size, max_sheets
+        primary,
+        pieces,
+        cutting_params,
+        strategy,
+        min_rect_size,
+        max_sheets,
+        budget,
+        seed,
+        exact_config,
     )
     nc = len(catalog_only)
 
     for k in range(nc + 1):
         catalog_layouts, remaining = _fill_catalog(
-            primary, pieces, cutting_params, strategy, min_rect_size, k
+            primary,
+            pieces,
+            cutting_params,
+            strategy,
+            min_rect_size,
+            k,
+            budget,
+            seed,
+            exact_config,
         )
         offcut_layouts, remaining = _fill_offcuts(
             offcuts, remaining, cutting_params, strategy, min_rect_size
@@ -184,6 +238,34 @@ def _catalog_waste_score(
     return (catalog_waste, len(catalog), len(layouts))
 
 
+def _apply_half_downgrade(
+    layouts: List[CuttingLayout],
+    half_spec: Optional[BinSpec],
+    cutting_params: CuttingParameters,
+    seed: int,
+    min_rect_size: float,
+    exact_config: Optional[ExactConfig] = None,
+) -> List[CuttingLayout]:
+    """Swaps catalog sheets whose content fits the half board (billing parity)."""
+    if half_spec is None:
+        return layouts
+    out: List[CuttingLayout] = []
+    for layout in layouts:
+        if layout.material.id == half_spec.key and not layout.material.half_board:
+            half = downgrade_layout_to_half(
+                layout,
+                half_spec,
+                cutting_params=cutting_params,
+                seed=seed,
+                min_rect_size=min_rect_size,
+                exact_config=exact_config,
+            )
+            out.append(half or layout)
+        else:
+            out.append(layout)
+    return out
+
+
 def optimize_pool(
     pieces: List[Piece],
     primary: ResolvedMaterial,
@@ -192,20 +274,36 @@ def optimize_pool(
     strategy: PackingStrategy = PackingStrategy.MAX_EFFICIENCY,
     min_rect_size: float = 0.1,
     max_sheets: int = 100,
+    half_spec: Optional[BinSpec] = None,
+    budget: Optional[SearchBudget] = None,
+    seed: int = 0,
+    exact_config: Optional[ExactConfig] = None,
 ) -> List[CuttingLayout]:
     """Packs ``pieces`` across the catalog board + its finite offcuts.
 
     Returns the combined single-material layouts (offcut sheets + catalog sheets).
     The fill order comes from ``primary.fill_order``; ``auto`` keeps whichever of
     ``offcuts_first``/``catalog_first`` wastes least catalog area (deterministic).
+    ``half_spec`` (catalog materials only) enables the final half-board
+    downgrade on the purchased sheets.
     """
     if not pieces:
         return []
     if not offcuts:
-        catalog_layouts, _ = _fill_catalog(
-            primary, pieces, cutting_params, strategy, min_rect_size, max_sheets
+        layouts, _ = _fill_catalog(
+            primary,
+            pieces,
+            cutting_params,
+            strategy,
+            min_rect_size,
+            max_sheets,
+            budget,
+            seed,
+            exact_config,
         )
-        return catalog_layouts
+        return _apply_half_downgrade(
+            layouts, half_spec, cutting_params, seed, min_rect_size, exact_config
+        )
 
     order = primary.fill_order
     args = (
@@ -216,12 +314,18 @@ def optimize_pool(
         strategy,
         min_rect_size,
         max_sheets,
+        budget,
+        seed,
+        exact_config,
     )
 
     if order == PoolFillOrder.offcuts_first:
-        return _offcuts_first(*args)
-    if order == PoolFillOrder.catalog_first:
-        return _catalog_first(*args)
-
-    candidates = [_offcuts_first(*args), _catalog_first(*args)]
-    return min(candidates, key=lambda ls: _catalog_waste_score(ls, primary.key))
+        layouts = _offcuts_first(*args)
+    elif order == PoolFillOrder.catalog_first:
+        layouts = _catalog_first(*args)
+    else:
+        candidates = [_offcuts_first(*args), _catalog_first(*args)]
+        layouts = min(candidates, key=lambda ls: _catalog_waste_score(ls, primary.key))
+    return _apply_half_downgrade(
+        layouts, half_spec, cutting_params, seed, min_rect_size, exact_config
+    )

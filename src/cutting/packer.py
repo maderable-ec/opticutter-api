@@ -1,3 +1,11 @@
+"""Single-bin guillotine packer: the placement primitive every constructor reuses.
+
+``GuillotineOptimizer`` packs one sheet. The multi-sheet orchestration (board
+count as an objective, half boards, finite bins) lives in ``search.py``; the
+candidate-fill generators live in ``constructors.py``. Both compose this class,
+so geometry, kerf, trims and the cut list have a single implementation.
+"""
+
 from typing import List, Tuple
 
 from src.cutting.enums import (
@@ -26,6 +34,28 @@ def _sort_pieces(pieces: List[Piece], strategy: PackingStrategy) -> List[Piece]:
     if strategy == PackingStrategy.LONG_OFFCUTS:
         return sorted(pieces, key=lambda p: (-p.priority, -p.height, -p.width))
     return sorted(pieces, key=lambda p: (-p.priority, -p.area))
+
+
+def expand_pieces(pieces: List[Piece]) -> List[Piece]:
+    """Expands ``quantity > 1`` pieces into single instances with unique ids.
+
+    ``#`` is a reserved instance separator: it doesn't collide with labels
+    ending in ``_<n>`` (see ``base_label``).
+    """
+    expanded: List[Piece] = []
+    for piece in pieces:
+        for i in range(piece.quantity):
+            expanded.append(
+                Piece(
+                    id=f"{piece.id}#{i + 1}" if piece.quantity > 1 else piece.id,
+                    width=piece.width,
+                    height=piece.height,
+                    quantity=1,
+                    can_rotate=piece.can_rotate,
+                    priority=piece.priority,
+                )
+            )
+    return expanded
 
 
 class GuillotineOptimizer:
@@ -78,26 +108,25 @@ class GuillotineOptimizer:
         self.placed_pieces: List[PlacedPiece] = []
         self.cuts: List[Cut] = []
 
-    def optimize(self, pieces: List[Piece]) -> Tuple[List[PlacedPiece], List[Piece]]:
+    def optimize(
+        self, pieces: List[Piece], presorted: bool = False
+    ) -> Tuple[List[PlacedPiece], List[Piece]]:
+        """Places the pieces; ``presorted`` keeps the caller's order verbatim.
+
+        The search constructors decide the placement order themselves (it's one
+        of the portfolio dimensions), so they pass ``presorted=True``; direct
+        callers keep the strategy-derived sort.
+        """
         if not pieces:
             return [], []
 
-        expanded_pieces = []
-        for piece in pieces:
-            for i in range(piece.quantity):
-                piece_copy = Piece(
-                    # ``#`` is a reserved instance separator: it doesn't collide
-                    # with labels ending in ``_<n>`` (see ``base_label``).
-                    id=f"{piece.id}#{i+1}" if piece.quantity > 1 else piece.id,
-                    width=piece.width,
-                    height=piece.height,
-                    quantity=1,
-                    can_rotate=piece.can_rotate,
-                    priority=piece.priority,
-                )
-                expanded_pieces.append(piece_copy)
+        expanded_pieces = expand_pieces(pieces)
 
-        sorted_pieces = _sort_pieces(expanded_pieces, self.strategy)
+        sorted_pieces = (
+            expanded_pieces
+            if presorted
+            else _sort_pieces(expanded_pieces, self.strategy)
+        )
 
         unplaced_pieces = []
 
@@ -130,14 +159,18 @@ class GuillotineOptimizer:
 
         for i, rect in enumerate(self.remainders):
             if rect.contains(piece.width, piece.height):
-                score = self._fit_score(rect, piece)
+                # Secondary key: leftover width after placing. On equal-area
+                # ties (same gap, either orientation) it prefers the
+                # orientation that completes a full-width band — the
+                # structure strip layouts need.
+                score = (self._fit_score(rect, piece), rect.width - piece.width)
                 if best_score is None or score < best_score:
                     best_score = score
                     best_rect_index = i
                     best_rotated = False
 
             if piece.can_rotate and rect.contains(piece.height, piece.width):
-                score = self._fit_score(rect, piece)
+                score = (self._fit_score(rect, piece), rect.width - piece.height)
                 if best_score is None or score < best_score:
                     best_score = score
                     best_rect_index = i
@@ -424,92 +457,12 @@ class GuillotineOptimizer:
 
         return new_rects
 
-
-class MultiSheetGuillotineOptimizer:
-    """Cutting optimizer using the Guillotine algorithm for multiple boards"""
-
-    def __init__(
-        self,
-        material_template: Material,
-        cutting_params: CuttingParameters = None,
-        split_rule: SplitRule = None,
-        max_sheets: int = 100,
-        min_rect_size: float = 0.1,
-        strategy: PackingStrategy = PackingStrategy.MAX_EFFICIENCY,
-    ):
-        self.material_template = material_template
-        self.strategy = strategy
-        # Explicit ``split_rule`` wins; otherwise it's derived from the strategy.
-        self.split_rule = (
-            split_rule
-            if split_rule is not None
-            else PACKING_STRATEGY_SPLIT_RULE[strategy]
+    def as_layout(self, sheet_number: int = 1) -> CuttingLayout:
+        """Snapshot of this packer's state as a ``CuttingLayout``."""
+        return CuttingLayout(
+            material=self.material,
+            placed_pieces=self.placed_pieces,
+            remainders=self.remainders,
+            sheet_number=sheet_number,
+            cuts=self.cuts,
         )
-        self.cutting_params = cutting_params or CuttingParameters()
-        self.max_sheets = max_sheets
-        self.min_rect_size = min_rect_size
-
-        self.layouts: List[CuttingLayout] = []
-
-    def optimize(self, pieces: List[Piece]) -> Tuple[List[CuttingLayout], List[Piece]]:
-        if not pieces:
-            return [], []
-
-        expanded_pieces = []
-        for piece in pieces:
-            for i in range(piece.quantity):
-                piece_copy = Piece(
-                    # ``#`` is a reserved instance separator: it doesn't collide
-                    # with labels ending in ``_<n>`` (see ``base_label``).
-                    id=f"{piece.id}#{i+1}" if piece.quantity > 1 else piece.id,
-                    width=piece.width,
-                    height=piece.height,
-                    quantity=1,
-                    can_rotate=piece.can_rotate,
-                    priority=piece.priority,
-                )
-                expanded_pieces.append(piece_copy)
-
-        remaining_pieces = _sort_pieces(expanded_pieces, self.strategy)
-
-        sheet_count = 0
-
-        while remaining_pieces and sheet_count < self.max_sheets:
-            sheet_count += 1
-
-            material = Material(
-                id=self.material_template.id,
-                width=self.material_template.width,
-                height=self.material_template.height,
-                thickness=self.material_template.thickness,
-                cost_per_unit=self.material_template.cost_per_unit,
-            )
-
-            try:
-                optimizer = GuillotineOptimizer(
-                    material=material,
-                    split_rule=self.split_rule,
-                    cutting_params=self.cutting_params,
-                    min_rect_size=self.min_rect_size,
-                    strategy=self.strategy,
-                )
-            except ValueError as e:
-                print(f"Error creating optimizer: {e}")
-                break
-
-            placed, unplaced = optimizer.optimize(remaining_pieces)
-
-            if placed:
-                layout = CuttingLayout(
-                    material=material,
-                    placed_pieces=placed,
-                    remainders=optimizer.remainders,
-                    sheet_number=sheet_count,
-                    cuts=optimizer.cuts,
-                )
-                self.layouts.append(layout)
-                remaining_pieces = unplaced
-            else:
-                break
-
-        return self.layouts, remaining_pieces

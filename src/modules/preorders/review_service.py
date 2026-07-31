@@ -166,6 +166,7 @@ class PreOrderReviewService:
                 branch_id=preorder.branch_id,
                 price_tier_code=preorder.price_tier_code,
                 strategy=preorder.strategy,
+                variant=preorder.variant or 0,
                 notes=preorder.notes,
                 source=preorder.source,
             ),

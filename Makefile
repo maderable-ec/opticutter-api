@@ -1,5 +1,5 @@
 # Makefile for Cutter API
-.PHONY: help build start dev down tests tests-local create-test-db lint-fix lint-check install clean logs redis-cli redis-flush
+.PHONY: help build start dev down tests tests-local benchmark create-test-db lint-fix lint-check install clean logs redis-cli redis-flush
 
 # Tests ALWAYS run against a dedicated database (cutter_test_db), never
 # against the development database (cutter_db): the conftest TRUNCATEs per test.
@@ -33,11 +33,25 @@ create-test-db: ## Creates cutter_test_db if missing (idempotent, never touches 
 	@docker compose exec -T postgres psql -U cutter -d cutter_db -tc "SELECT 1 FROM pg_database WHERE datname='cutter_test_db'" | grep -q 1 || \
 		docker compose exec -T postgres psql -U cutter -d cutter_db -c "CREATE DATABASE cutter_test_db"
 
+# `-m "not benchmark"` mirrors CI exactly: the parity benchmarks depend on the
+# OR-Tools build (see the `benchmark` target below), so they belong to
+# `make benchmark`, not to the suite everyone runs on their own machine.
 tests: create-test-db ## Runs the tests (against cutter_test_db; never touches cutter_db)
-	docker compose run --no-deps --rm -e DATABASE_URL=$(DB_TEST_DOCKER) -e TEST_DATABASE_URL=$(DB_TEST_DOCKER) -e BCRYPT_ROUNDS=4 api pytest -q
+	docker compose run --no-deps --rm -e DATABASE_URL=$(DB_TEST_DOCKER) -e TEST_DATABASE_URL=$(DB_TEST_DOCKER) -e BCRYPT_ROUNDS=4 api pytest -q -m "not benchmark"
 
 tests-local: create-test-db ## Runs the tests locally (PostgreSQL on localhost:5433)
-	DATABASE_URL=$(DB_TEST_LOCAL) TEST_DATABASE_URL=$(DB_TEST_LOCAL) BCRYPT_ROUNDS=4 pytest -q
+	DATABASE_URL=$(DB_TEST_LOCAL) TEST_DATABASE_URL=$(DB_TEST_LOCAL) BCRYPT_ROUNDS=4 pytest -q -m "not benchmark"
+
+# The `benchmark` tests pin the exact board count of the audit cut lists. CP-SAT
+# picks arbitrarily among equally optimal packings, and that pick is reproducible
+# only for a given OR-Tools BUILD, so a macOS arm64 wheel and the manylinux
+# x86_64 one legitimately disagree. Only one build's numbers are commercially
+# meaningful: the one that ships (build-push.yml publishes linux/amd64), so the
+# benchmark always runs there — emulated on Apple Silicon, hence the slowness.
+benchmark: ## Runs the parity benchmarks against the production build (linux/amd64)
+	docker build --platform linux/amd64 --target dev -t cutter-benchmark .
+	docker run --rm --platform linux/amd64 -e DATABASE_URL=$(DB_TEST_DOCKER) \
+		-v "$(CURDIR)":/src cutter-benchmark pytest -m benchmark --no-cov -q -p no:cacheprovider
 
 lint-fix: ## Fixes formatting and lint errors
 	source .venv/bin/activate && ruff check --fix . && ruff format .
