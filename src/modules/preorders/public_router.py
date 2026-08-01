@@ -10,6 +10,7 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Request
 
+from src.modules.optimizations.service import CCW_ROTATION
 from src.modules.preorders.model import PreOrderModel, PreOrderStatus
 from src.modules.preorders.review_service import (
     PreOrderReviewService,
@@ -44,12 +45,25 @@ def _client_meta(request: Request) -> dict:
     return {"ip": ip, "user_agent": request.headers.get("user-agent")}
 
 
-def _to_review_edges(edges: Optional[dict]) -> Optional[ReviewPieceEdges]:
-    """Keeps only what the diagram draws; drops the catalog identifiers."""
+def _to_review_edges(
+    edges: Optional[dict], rotated: bool
+) -> Optional[ReviewPieceEdges]:
+    """Keeps only what the diagram draws; drops the catalog identifiers.
+
+    ``nominal_sides`` is recovered by undoing the rotation when the payload
+    predates the field: results are cached for ``OPT_RESULT_TTL_SECONDS`` and the
+    hash covers the *inputs*, so a quote already in Redis keeps its old shape and
+    would otherwise leave the client's diagram without it for days.
+    """
     if not edges:
         return None
+    geo = list(edges.get("sides") or [])
+    nominal = edges.get("nominal_sides")
+    if nominal is None:
+        nominal = [CCW_ROTATION[s] for s in geo] if rotated else list(geo)
     return ReviewPieceEdges(
-        sides=list(edges.get("sides") or []),
+        sides=geo,
+        nominal_sides=list(nominal),
         color=edges.get("color"),
         band_type=edges.get("band_type"),
         notation=edges.get("notation"),
@@ -95,7 +109,9 @@ def _to_review_layouts(payload: dict) -> List[ReviewLayoutGroup]:
                         rotated=bool(p.get("rotated", False)),
                         original_width=p.get("original_width", 0),
                         original_height=p.get("original_height", 0),
-                        edges=_to_review_edges(p.get("edges")),
+                        edges=_to_review_edges(
+                            p.get("edges"), bool(p.get("rotated", False))
+                        ),
                     )
                     for p in pieces
                 ],

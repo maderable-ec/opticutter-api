@@ -11,6 +11,7 @@ from src.modules.orders.model import OrderModel
 from src.modules.preorders.model import PreOrderModel
 from src.shared.config import config
 
+from .test_edge_banding import _create_edge_banding
 from .test_orders import _create_board, _create_client, _order_payload
 
 
@@ -152,6 +153,52 @@ def test_public_review_exposes_the_cutting_layout(client):
     assert piece["pieceId"]
     for key in ("x", "y", "width", "height", "originalWidth", "originalHeight"):
         assert isinstance(piece[key], (int, float))
+
+
+def test_public_review_layout_carries_both_edge_frames(client):
+    """A rotated piece ships its bands in both frames, and the notation stays nominal.
+
+    ``sides`` is rotated so the diagram paints the band on the right physical
+    edge; ``nominalSides`` and ``notation`` describe the piece as the client
+    ordered it. Deriving one from the other client-side is what turned a ``1L``
+    into a ``1C``.
+    """
+    c = _create_client(client)
+    b = _create_board(client)  # 2440 (height) × 1220 (width)
+    eb = _create_edge_banding(client, band_type="Soft")
+
+    # 1000 (height) × 2000 (width): only fits rotated, since 2000 > the board's 1220.
+    pre = client.post(
+        "/api/v1/preorders/",
+        json={
+            "clientId": c["id"],
+            "branchId": 1,
+            "materials": [{"key": "b1", "source": "catalog", "productId": b["id"]}],
+            "requirements": [
+                {
+                    "priority": 0,
+                    "height": 1000,
+                    "width": 2000,
+                    "quantity": 1,
+                    "materialKey": "b1",
+                    "label": "Costado",
+                    "canRotate": True,
+                    "edgeBanding": {"productId": eb["id"], "sides": ["left"]},
+                }
+            ],
+        },
+    ).json()["data"]
+    link = _generate_link(client, pre["id"])
+
+    data = client.get(f"/api/v1/public/review/{link['token']}").json()["data"]
+    piece = data["layoutGroups"][0]["placedPieces"][0]
+
+    assert piece["rotated"] is True
+    edges = piece["edges"]
+    assert edges["sides"] == ["top"]  # CW: left→top
+    assert edges["nominalSides"] == ["left"]
+    # left = a height side = long ⇒ 1L, and Soft ⇒ CS. Unchanged by the rotation.
+    assert edges["notation"] == "1L CS"
 
 
 def test_public_review_layout_hides_production_internals(client):

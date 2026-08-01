@@ -235,10 +235,16 @@ class ReviewPieceEdges(CamelModel):
 
     ``sides`` are the *geometric* sides of the piece as placed (post-rotation),
     so the diagram can paint the bands where they physically go.
+    ``nominal_sides`` are the same bands in the piece's own frame — the one
+    ``original_width``/``original_height`` and ``notation`` refer to — for
+    describing the piece as the client ordered it.
     """
 
     sides: List[str] = Field(
         default_factory=list, description="Banded sides: top | bottom | left | right"
+    )
+    nominal_sides: List[str] = Field(
+        default_factory=list, description="The same bands before rotation"
     )
     color: Optional[str] = None
     band_type: Optional[str] = Field(
