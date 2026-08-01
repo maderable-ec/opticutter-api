@@ -53,6 +53,13 @@ from src.shared.exceptions import (
 # physical side of the already-rotated piece.
 _CW_ROTATION = {"top": "right", "right": "bottom", "bottom": "left", "left": "top"}
 
+# Inverse of the above: geometric side → the piece's own (nominal) side. Derived
+# rather than written out, so the two can never disagree.
+CCW_ROTATION = {v: k for k, v in _CW_ROTATION.items()}
+
+# Canonical order the banded sides are listed in, whichever frame they're in.
+_SIDE_ORDER = ("top", "bottom", "left", "right")
+
 
 def _exact_config() -> ExactConfig:
     """Runtime settings of the CP-SAT endgame, as the search will actually see them.
@@ -463,14 +470,21 @@ class OptimizationService:
         (``_CW_ROTATION``). A pure rotation is always physically realizable, so
         asymmetric edge banding doesn't prevent rotation: the sides are simply
         swapped.
+
+        Both frames ship: ``sides`` is the drawn one (paint the band on the right
+        physical edge) and ``nominal_sides`` the piece's own (the one the
+        requested measurements and the ``L``/``C`` notation refer to). A consumer
+        that shows a piece as the client ordered it wants the latter — deriving
+        it from ``sides`` means re-implementing this rotation convention.
         """
         nominal = {s.value for s in spec.sides}
         sides = {_CW_ROTATION[s] for s in nominal} if rotated else nominal
-        geo = [s for s in ("top", "bottom", "left", "right") if s in sides]
+        geo = [s for s in _SIDE_ORDER if s in sides]
         product = eb_products.get(spec.product_id)
         attrs = (product.attributes if product else None) or {}
         return {
             "sides": geo,
+            "nominal_sides": [s for s in _SIDE_ORDER if s in nominal],
             "product_id": spec.product_id,
             "code": product.code if product else None,
             "color": attrs.get("color"),

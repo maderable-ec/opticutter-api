@@ -447,6 +447,27 @@ def test_geometric_edges_notation_is_rotation_invariant(db_session):
     assert svc._geometric_edges(spec, {}, True)["notation"] == "2L1C"
 
 
+def test_geometric_edges_keep_the_nominal_sides(db_session):
+    """``nominal_sides`` is the frame the measurements and the notation refer to.
+
+    It's what a consumer needs to describe the piece as it was ordered, so it
+    must survive rotation untouched while ``sides`` moves.
+    """
+    svc = OptimizationService(db_session)
+    spec = EdgeBandingSpec(
+        product_id=2, sides=[EdgeSide.top, EdgeSide.left, EdgeSide.right]
+    )
+    nominal = ["top", "left", "right"]
+
+    straight = svc._geometric_edges(spec, {}, False)
+    assert straight["nominal_sides"] == nominal
+    assert straight["sides"] == nominal  # not rotated: both frames coincide
+
+    turned = svc._geometric_edges(spec, {}, True)
+    assert turned["nominal_sides"] == nominal
+    assert turned["sides"] == ["top", "bottom", "right"]
+
+
 def test_asymmetric_banding_rotates_and_swaps_edges(client):
     """Asymmetric edge banding does NOT block rotation: if the piece ends up
     rotated, the edges swap to the corresponding physical side."""
