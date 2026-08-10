@@ -68,14 +68,38 @@ from src.cutting.parameters import CuttingParameters
 # the orchestrator can salt its cache hash and never serve stale layouts.
 # 3 = CP-SAT exact endgame (``exact.py``); 4 = canonical reconstruction of the
 # solver's answer, which changes exact-built layouts (tighter columns) and makes
-# them build-independent. Also bump this when the pinned ortools version moves,
-# since a solver upgrade can return a different solution.
-ENGINE_VERSION = 4
+# them build-independent; 5 = seeded restarts stop after ``_RESTART_PATIENCE``
+# fruitless rounds, so a pool whose lower bound is unreachable no longer burns
+# the whole restart budget. Also bump this when the pinned ortools version
+# moves, since a solver upgrade can return a different solution.
+ENGINE_VERSION = 5
 
 # A half bin is only worth opening near the end of a job: gate it by remaining
 # area so early states don't waste decodes on fills the cost objective would
 # discard anyway.
 _HALF_GATE = 1.25
+
+# How many consecutive seeded restarts may fail to improve the incumbent before
+# the search gives up on restarting (see ``optimize_bins``).
+#
+# **2, not 1** — and that is measured, not cautious. Pre-order 21 at kerf 4 (the
+# commercial parity fixture) gets its 5th-board win from the *second* restart:
+# the first one finds nothing, so patience=1 stops one round too early and bills
+# 6 boards / $321.90 instead of 5 / $290.00. An 80-job randomized battery did
+# NOT catch that — every job there was cost-neutral at patience=1 — so lowering
+# this again needs `make benchmark` (the P20/P21 parity fixtures), not just
+# `scripts/bench_battery.py`.
+_RESTART_PATIENCE = 2
+
+# Which opening a *restart* tries. The two main pipelines above still run both
+# flavors — that is what makes the solver strictly additive — but by the time
+# restarts begin, the heuristic opening has already been explored twice, and
+# measurement says re-running it under a fresh seed is where the time goes and
+# not where the boards come from: on the 80-job battery, dropping it costs
+# nothing on any job and removes a third of the remaining runtime. The
+# solver-seeded opening is kept because it demonstrably *does* still win boards
+# at this stage (a 62-piece pool that ends at 3 boards instead of 4).
+_RESTART_FLAVORS = (True,)
 
 _LEGACY_CONFIG = {
     PackingStrategy.MAX_EFFICIENCY: GreedyConfig(
@@ -991,14 +1015,25 @@ def optimize_bins(
                     solution = alternative
             # Seeded restarts: a different exploration order often lands a
             # different partition; keep the best. Bounded and deterministic.
-            # Both flavors run for the same reason the two pipelines above do —
-            # the solver-seeded opening and the heuristic one each find
-            # partitions the other misses — and every restart is bounded by the
-            # incumbent, so extra flavors can only help. The proven lower bound
-            # stops the whole thing early, which is why the wins are also the
-            # fastest cases.
+            # Each restart is bounded by the incumbent, so it can only help,
+            # and which openings it tries is ``_RESTART_FLAVORS``. The proven
+            # lower bound stops the whole thing early, which is why the wins
+            # are also the fastest cases.
+            #
+            # When it is NOT provable, though, that exit never fires: the area
+            # lower bound ignores geometry, so on most pools it is unreachable
+            # and the engine used to run every restart to the end for nothing.
+            # Measured on a 153-piece pool: identical cost at every budget, with
+            # the restarts adding ~30s of pure waste. Hence the patience
+            # counter below — restarts that find nothing are evidence the
+            # neighborhood is exhausted, not that the next seed will differ.
+            # It is counted in *restarts*, never in wall clock, so the search
+            # stays deterministic and the payload cache stays valid.
             restarts = min(3, budget.iterations // 10)
+            stale_restarts = 0
             for k in range(1, restarts + 1):
+                if stale_restarts >= _RESTART_PATIENCE:
+                    break
                 alt = _Searcher(
                     specs=list(bins),
                     params=params,
@@ -1009,7 +1044,8 @@ def optimize_bins(
                     exact_config=exact_config,
                     exact_budget=exact_budget,
                 )
-                for root_exact in (False, True):
+                before = solution.objective()
+                for root_exact in _RESTART_FLAVORS:
                     if solution.cost() <= lb + 1e-6:
                         break
                     improved = alt.beam(
@@ -1022,6 +1058,11 @@ def optimize_bins(
                     refined = alt.lns(solution, lb, root_exact=root_exact)
                     if refined.objective() < solution.objective():
                         solution = refined
+                # A whole restart that failed to beat the incumbent counts
+                # against the patience budget; any improvement resets it.
+                stale_restarts = (
+                    0 if solution.objective() < before else stale_restarts + 1
+                )
         solution = searcher.half_downgrade(solution)
 
     if solution is None:
