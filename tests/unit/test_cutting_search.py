@@ -356,3 +356,47 @@ def test_scaled_budget_shrinks_with_job_size():
     assert big.tries_per_board < small.tries_per_board
     assert big.iterations < small.iterations
     assert big.beam_width <= small.beam_width
+
+
+# Anchors from ``scripts/bench_battery.py``: a handful of its generated jobs,
+# pinned as cost **ceilings** rather than equalities so a future improvement
+# passes and only a regression fails. They exist because P20/P21 alone are two
+# single-material jobs of 14 piece types — they say nothing about the
+# multi-material, many-boards shape where a stopping rule actually starts
+# costing boards. The full 80-job sweep stays out of the suite (~35 min); this
+# subset is the part that lives in CI's reach.
+BATTERY_CEILINGS = [
+    (76, 480.00),
+    (26, 654.50),
+    (38, 572.40),
+    (58, 663.60),
+    (44, 428.80),
+    (39, 592.10),
+    (3, 392.00),
+    (19, 142.80),
+]
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("job_index,max_cost", BATTERY_CEILINGS)
+def test_battery_job_never_gets_more_expensive(job_index, max_cost):
+    """A generated furniture job still bills at most what it billed before."""
+    from scripts.bench_battery import PARAMS as BATTERY_PARAMS
+    from scripts.bench_battery import build_job
+
+    total = 0.0
+    for full, half, pieces in build_job(job_index, seed=20260807):
+        instances = sum(p.quantity for p in pieces)
+        layouts, unplaced = optimize_bins(
+            pieces,
+            [full, half],
+            cutting_params=BATTERY_PARAMS,
+            budget=SearchBudget.scaled(instances, tries_per_board=48, iterations=40),
+        )
+        assert unplaced == []
+        assert_valid_layouts(layouts, unplaced, BATTERY_PARAMS, instances)
+        total += sum(layout.material.cost_per_unit for layout in layouts)
+
+    assert (
+        total <= max_cost + 1e-6
+    ), f"battery job {job_index} now bills ${total:.2f}, was ${max_cost:.2f}"

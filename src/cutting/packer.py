@@ -6,6 +6,7 @@ candidate-fill generators live in ``constructors.py``. Both compose this class,
 so geometry, kerf, trims and the cut list have a single implementation.
 """
 
+from operator import attrgetter
 from typing import List, Tuple
 
 from src.cutting.enums import (
@@ -22,6 +23,9 @@ from src.cutting.models import (
     Rectangle,
 )
 from src.cutting.parameters import CuttingParameters
+
+# Sort key for the free-rectangle list; see ``_split_remainder``.
+_AREA = attrgetter("area")
 
 
 def _sort_pieces(pieces: List[Piece], strategy: PackingStrategy) -> List[Piece]:
@@ -41,7 +45,21 @@ def expand_pieces(pieces: List[Piece]) -> List[Piece]:
 
     ``#`` is a reserved instance separator: it doesn't collide with labels
     ending in ``_<n>`` (see ``base_label``).
+
+    Already-expanded pools take a fast path. ``optimize()`` calls this on every
+    candidate fill, and the search feeds it pools that were expanded once up
+    front (``_build_pieces`` emits one ``quantity=1`` instance per physical
+    piece), so the general path spent most of its time rebuilding millions of
+    ``Piece`` objects identical to its own input. Returning a shallow copy is
+    equivalent: the expansion of a list of singletons is that same list, and no
+    caller mutates the pieces.
     """
+    for piece in pieces:
+        if piece.quantity != 1:
+            break
+    else:
+        return list(pieces)
+
     expanded: List[Piece] = []
     for piece in pieces:
         for i in range(piece.quantity):
@@ -157,20 +175,35 @@ class GuillotineOptimizer:
         best_rotated = False
         best_score = None
 
+        # Hoisted out of the loop: this runs tens of millions of times per
+        # request, so every attribute lookup and method call inside it is paid
+        # per (piece, gap) pair. ``contains`` and ``_fit_score`` are inlined
+        # here for the same reason; both remain as methods for other callers.
+        piece_w = piece.width
+        piece_h = piece.height
+        piece_area = piece.area
+        can_rotate = piece.can_rotate
+        long_offcuts = self.strategy == PackingStrategy.LONG_OFFCUTS
+
         for i, rect in enumerate(self.remainders):
-            if rect.contains(piece.width, piece.height):
+            rect_w = rect.width
+            rect_h = rect.height
+            leftover = rect.area - piece_area
+            fit = (rect.x, rect.y, leftover) if long_offcuts else leftover
+
+            if rect_w >= piece_w and rect_h >= piece_h:
                 # Secondary key: leftover width after placing. On equal-area
                 # ties (same gap, either orientation) it prefers the
                 # orientation that completes a full-width band — the
                 # structure strip layouts need.
-                score = (self._fit_score(rect, piece), rect.width - piece.width)
+                score = (fit, rect_w - piece_w)
                 if best_score is None or score < best_score:
                     best_score = score
                     best_rect_index = i
                     best_rotated = False
 
-            if piece.can_rotate and rect.contains(piece.height, piece.width):
-                score = (self._fit_score(rect, piece), rect.width - piece.height)
+            if can_rotate and rect_w >= piece_h and rect_h >= piece_w:
+                score = (fit, rect_w - piece_h)
                 if best_score is None or score < best_score:
                     best_score = score
                     best_rect_index = i
@@ -234,7 +267,11 @@ class GuillotineOptimizer:
 
         self.remainders.extend(new_rects)
 
-        self.remainders.sort(key=lambda r: r.area)
+        # ``attrgetter`` rather than ``lambda r: r.area``: this sort runs after
+        # every single placement, so the key is evaluated tens of millions of
+        # times per request and a C-level getter removes that many interpreted
+        # calls. Same key, same (stable) order.
+        self.remainders.sort(key=_AREA)
 
     def _cuts_for(
         self,

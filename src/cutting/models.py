@@ -12,16 +12,18 @@ class Rectangle:
     height: float
 
     def __post_init__(self):
-        """Validates the rectangle's dimensions"""
+        """Validates the rectangle's dimensions and caches its area.
+
+        ``area`` is a plain attribute rather than a ``@property`` because the
+        packer's inner loop reads it tens of millions of times per request (gap
+        ranking and the remainder sort); dimensions never change after
+        construction, so there is nothing to invalidate.
+        """
         if self.width < 0 or self.height < 0:
             raise ValueError(
                 f"Dimensions cannot be negative: width={self.width}, height={self.height}"
             )
-
-    @property
-    def area(self) -> float:
-        """Computes the rectangle's area"""
-        return self.width * self.height
+        self.area = self.width * self.height
 
     def contains(self, width: float, height: float) -> bool:
         """Checks whether this rectangle can contain the given dimensions"""
@@ -58,18 +60,14 @@ class Piece:
     priority: int = 0
 
     def __post_init__(self):
-        """Validates the piece's dimensions"""
+        """Validates the piece's dimensions and caches its area (see ``Rectangle``)."""
         if self.width <= 0 or self.height <= 0:
             raise ValueError(
                 f"Dimensions must be positive: width={self.width}, height={self.height}"
             )
         if self.quantity < 1:
             raise ValueError(f"Quantity must be at least 1: quantity={self.quantity}")
-
-    @property
-    def area(self) -> float:
-        """Computes the piece's area"""
-        return self.width * self.height
+        self.area = self.width * self.height
 
     def __repr__(self) -> str:
         return f"Piece(id={self.id}, w={self.width}, h={self.height})"

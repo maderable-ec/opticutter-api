@@ -28,6 +28,11 @@ uploads/
 # Print job spool (rendered labels/PDFs pending pickup by a shop-floor agent)
 print_spool/
 
+# Real customer cut lists exported by the commercial optimizer, used as the
+# parity benchmark by scripts/bench_shopfiles.py. Business data — kept local.
+# scripts/bench_prod.py embeds the geometry it needs, so it runs without them.
+pruebas/
+
 # Editors and IDEs
 *~
 *.swp
