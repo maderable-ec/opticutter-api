@@ -12,6 +12,9 @@ dist/
 .pytest_cache/
 .ruff_cache/
 .coverage
+# One per optimizer worker process: coverage writes a per-process data file and
+# combining it can be skipped when the pool is torn down mid-run.
+.coverage.*
 htmlcov/
 
 # Virtual environments

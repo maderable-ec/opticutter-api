@@ -2,8 +2,11 @@
 
 import pytest
 
+from src.modules.optimizations import parallel
 from src.modules.optimizations.schemas import OptimizeRequest
 from src.modules.optimizations.service import OptimizationService
+from src.shared.cache import cache
+from src.shared.config import config
 from src.shared.exceptions import ValidationError
 
 
@@ -862,3 +865,120 @@ def test_optimize_pool_rejects_pool_key_to_non_catalog(client):
     )
     resp = client.post("/api/v1/optimize/", json=payload)
     assert resp.status_code == 422
+
+
+# --- Per-material process parallelism -------------------------------------
+# The unit tests in tests/unit/test_optimization_parallel.py cover the plumbing.
+# These cover what only the real orchestration can: that turning the feature on
+# changes nothing a caller can observe.
+
+
+@pytest.fixture
+def release_pool():
+    """A live forkserver would make pytest hang at exit."""
+    yield
+    parallel.shutdown_pool_executor()
+
+
+def _multi_material_payload(client_id, product_ids):
+    """Three materials, so the parallel path has something to overlap."""
+    return {
+        "clientId": client_id,
+        "materials": [
+            {"key": f"m{i}", "source": "catalog", "productId": pid}
+            for i, pid in enumerate(product_ids)
+        ],
+        "requirements": [
+            {
+                "priority": 0,
+                "height": 400 + 40 * i,
+                "width": 600 + 40 * i,
+                "quantity": 3 + i,
+                "materialKey": f"m{i}",
+                "label": f"Pieza{i}",
+                "canRotate": True,
+            }
+            for i in range(len(product_ids))
+        ],
+    }
+
+
+def _three_boards(client):
+    return [
+        _create_board(client, code=f"MEL{code}")["id"] for code in ("18", "15", "12")
+    ]
+
+
+def test_parallel_and_sequential_produce_identical_payloads(
+    client, db_session, monkeypatch, release_pool
+):
+    """Turning parallelism on must change nothing: same layouts, same hash.
+
+    The hash equality is what enforces that OPT_POOL_WORKERS stays out of
+    ``_compute_hash`` — a 1-worker box and a 2-worker box must share a cache
+    namespace, because they produce the same geometry.
+    """
+    created_client = _create_client(client)
+    request = OptimizeRequest.model_validate(
+        _multi_material_payload(created_client["id"], _three_boards(client))
+    )
+    svc = OptimizationService(db_session)
+
+    monkeypatch.setattr(config, "OPT_POOL_WORKERS", 1)
+    payload_seq, hash_seq = svc.compute(request)
+
+    # Mandatory, and the easiest thing to get wrong: compute() is cache-first and
+    # the isolated_cache fixture keeps one double per test, so without this the
+    # second call returns the first call's payload and the test proves nothing
+    # while staying green forever.
+    cache._client._store.clear()
+
+    monkeypatch.setattr(config, "OPT_POOL_WORKERS", 2)
+    payload_par, hash_par = svc.compute(request)
+
+    # Otherwise a broken pool would silently fall back and satisfy everything below.
+    assert parallel._executor is not None and not parallel._breaker_open()
+    assert hash_par == hash_seq
+    assert payload_par == payload_seq
+
+
+@pytest.mark.parametrize("workers", [1, 2])
+def test_layout_order_follows_material_declaration_order(
+    client, db_session, monkeypatch, release_pool, workers
+):
+    """``_build_result_payload`` flattens results in order; parallelism must not
+    reorder them just because a small material finished first."""
+    monkeypatch.setattr(config, "OPT_POOL_WORKERS", workers)
+    created_client = _create_client(client)
+    request = OptimizeRequest.model_validate(
+        _multi_material_payload(created_client["id"], _three_boards(client))
+    )
+
+    payload, _ = OptimizationService(db_session).compute(request)
+
+    grouped = []
+    for layout in payload["layouts"]:
+        key = layout["material"]["material_key"]
+        if not grouped or grouped[-1] != key:
+            grouped.append(key)
+    assert grouped == ["m0", "m1", "m2"]
+
+
+def test_optimize_endpoint_works_with_parallelism_enabled(
+    client, monkeypatch, release_pool
+):
+    """One end-to-end run through the real FastAPI stack with workers on.
+
+    The route handler is a sync ``def``, so it executes on an anyio threadpool
+    thread — which is exactly where a fork-from-a-thread problem would surface.
+    """
+    monkeypatch.setattr(config, "OPT_POOL_WORKERS", 2)
+    created_client = _create_client(client)
+    payload = _multi_material_payload(created_client["id"], _three_boards(client))
+
+    resp = client.post("/api/v1/optimize/", json=payload)
+
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert {m["materialKey"] for m in data["materialsSummary"]} == {"m0", "m1", "m2"}
+    assert data["totalBoardsUsed"] >= 3

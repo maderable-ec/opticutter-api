@@ -13,17 +13,15 @@ from src.cutting import (
     CuttingLayout,
     CuttingParameters,
     ExactConfig,
-    PackingStrategy,
     Piece,
     SearchBudget,
     exact_available,
-    optimize_bins,
 )
 from src.modules.clients.model import ClientModel
 from src.modules.optimizations.labels import edge_banding_notation
 from src.modules.optimizations.materials import MaterialResolver, ResolvedMaterial
+from src.modules.optimizations.parallel import PoolJob, run_pool_jobs
 from src.modules.optimizations.patterns import group_layouts
-from src.modules.optimizations.pool import optimize_pool
 from src.modules.optimizations.pricing import build_pricing
 from src.modules.optimizations.schemas import (
     STRATEGY_TO_PACKING,
@@ -197,40 +195,49 @@ class OptimizationService:
 
         strategy = STRATEGY_TO_PACKING[request.strategy]
         exact_config = _exact_config()
-        results = []
+
+        # The pools are independent, so the request should cost the MAX over its
+        # materials rather than the sum. Three phases, and the split is what keeps
+        # it safe: (a) build every job in the parent — cheap, pure, and the only
+        # place that may touch the DB; (b) run them, in processes or in-process;
+        # (c) recombine. Order is preserved *structurally* (one pass builds both
+        # lists, ``zip`` pairs them again) rather than restored from completion
+        # order, because ``_build_result_payload`` flattens ``results`` in order
+        # and the payload is cached under a hash of the inputs.
+        jobs: List[PoolJob] = []
+        maps: List[Tuple[Dict[str, EdgeBandingSpec], Dict[str, float]]] = []
         for key, reqs in requirements_by_key.items():
             pieces, edge_map, net_map = self._build_pieces(reqs)
-            offcuts = pools.get(key)
-            budget = SearchBudget.scaled(
-                len(pieces),
-                tries_per_board=config.OPT_TRIES_PER_BOARD,
-                iterations=config.OPT_SEARCH_ITERATIONS,
-            )
-            if offcuts:
-                # Pool: pack across the catalog board + its finite offcuts.
-                layouts = optimize_pool(
-                    pieces=pieces,
-                    primary=resolved[key],
-                    offcuts=offcuts,
+            if not pieces:
+                # Raised here so no domain error ever crosses a process boundary.
+                raise ValidationError("La lista de piezas no puede estar vacía")
+            jobs.append(
+                PoolJob(
+                    material_key=key,
+                    pieces=tuple(pieces),
+                    material=resolved[key],
+                    # Pooled offcuts: extra finite stock for this catalog board.
+                    offcuts=tuple(pools.get(key) or ()),
                     cutting_params=cutting_params,
                     strategy=strategy,
                     half_spec=self._half_spec(resolved[key], half_board_markup_pct),
-                    budget=budget,
+                    budget=SearchBudget.scaled(
+                        len(pieces),
+                        tries_per_board=config.OPT_TRIES_PER_BOARD,
+                        iterations=config.OPT_SEARCH_ITERATIONS,
+                    ),
                     seed=request.variant,
                     exact_config=exact_config,
                 )
-            else:
-                layouts = self._optimize(
-                    pieces=pieces,
-                    material=resolved[key],
-                    cutting_params=cutting_params,
-                    strategy=strategy,
-                    half_board_markup_pct=half_board_markup_pct,
-                    budget=budget,
-                    seed=request.variant,
-                    exact_config=exact_config,
-                )[0]
-            results.append((edge_map, net_map, layouts))
+            )
+            # The edge/net maps stay in the parent: cheap to build, pure, and the
+            # optimizer has no use for them.
+            maps.append((edge_map, net_map))
+
+        results = [
+            (edge_map, net_map, layouts)
+            for (edge_map, net_map), layouts in zip(maps, run_pool_jobs(jobs))
+        ]
 
         payload = self._build_result_payload(
             request, results, resolved, eb_products, waste_factor
@@ -354,59 +361,6 @@ class OptimizationService:
                 material.cost_per_unit / 2.0 * (1 + half_board_markup_pct), 2
             ),
             half_board=True,
-        )
-
-    def _optimize(
-        self,
-        pieces: List[Piece],
-        material: ResolvedMaterial,
-        cutting_params: CuttingParameters,
-        strategy: PackingStrategy = PackingStrategy.MAX_EFFICIENCY,
-        half_board_markup_pct: float = 0.0,
-        budget: SearchBudget = None,
-        seed: int = 0,
-        max_sheets: int = 100,
-        min_rect_size: float = 0.1,
-        exact_config: ExactConfig = None,
-    ) -> Tuple[List[CuttingLayout], List[Piece]]:
-        """Optimizes the cutting layout for a resolved material (any source).
-
-        Receives domain pieces already expanded with a unique id (see
-        ``_build_pieces``): each physical instance arrives with ``quantity=1`` so
-        the optimizer preserves the id as-is and per-piece edge-banding attribution
-        doesn't depend on ambiguous labels. ``strategy`` defines the packing
-        profile (max efficiency runs the board-count search; long offcuts keeps
-        the single geometric pass). Catalog materials contribute a half-board
-        sibling bin, so the cost objective decides when half a board suffices.
-        ``seed`` is the request ``variant``: it reorders the search exploration
-        to produce alternative solutions on demand.
-        """
-        if not pieces:
-            raise ValidationError("La lista de piezas no puede estar vacía")
-
-        bins = [
-            BinSpec(
-                key=material.key,
-                width=material.width,
-                height=material.height,
-                thickness=material.thickness,
-                cost_per_unit=material.cost_per_unit,
-            )
-        ]
-        half = self._half_spec(material, half_board_markup_pct)
-        if half is not None:
-            bins.append(half)
-
-        return optimize_bins(
-            pieces,
-            bins,
-            cutting_params=cutting_params,
-            strategy=strategy,
-            budget=budget,
-            seed=seed,
-            min_rect_size=min_rect_size,
-            max_sheets=max_sheets,
-            exact_config=exact_config,
         )
 
     def _build_pieces(
