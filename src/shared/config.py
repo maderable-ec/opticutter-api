@@ -146,6 +146,31 @@ class Config:
     OPT_EXACT_MAX_CALLS = env.int("OPT_EXACT_MAX_CALLS", 40)
     OPT_EXACT_DETERMINISTIC_TIME = env.float("OPT_EXACT_DETERMINISTIC_TIME", 6.0)
 
+    # How many materials of ONE request may be optimized in parallel, each in its
+    # own process (src/modules/optimizations/parallel.py). 1 disables it, and the
+    # code then takes a path byte-identical to the old sequential loop.
+    #
+    # *** DELIBERATELY ABSENT FROM THE OPTIMIZATION HASH. ***
+    # Every OPT_* knob above feeds _compute_hash because it changes the geometry
+    # the engine produces. These do not: they only change WHICH PROCESS runs an
+    # unchanged, deterministic computation. Hashing them would give a 1-worker box
+    # a different cache namespace than a 2-worker one — the same layouts stored
+    # twice, and a cold cache on every capacity change.
+    #
+    # 2, not more: measured on the shop's six real cut lists, every job has one
+    # pool that dominates and the rest fit inside its shadow, so a third worker
+    # buys exactly zero wall time (the 3rd and 4th materials of a 4-material quote
+    # cost 0.61s and 0.00s). The box has 2 vCores, shared with Postgres and Redis.
+    OPT_POOL_WORKERS = env.int("OPT_POOL_WORKERS", 2)
+    # Deadlock insurance only. The engine is budget-bounded, not clock-bounded, so
+    # this must never fire on real work: the slowest measured pool is 28s on an M1,
+    # ~74s on the VPS. On expiry the executor is torn down — a hung child would
+    # otherwise pin a core forever — and the jobs re-run in-process.
+    OPT_POOL_TIMEOUT_SECONDS = env.int("OPT_POOL_TIMEOUT_SECONDS", 300)
+    # Recycle a worker after N jobs so its high-water RSS (~256MB peak) goes back
+    # to the OS. Under forkserver a respawn costs milliseconds.
+    OPT_POOL_MAX_TASKS_PER_CHILD = env.int("OPT_POOL_MAX_TASKS_PER_CHILD", 4)
+
     # Order attachments (anexos): PDFs/screenshots stored on local disk under
     # ATTACHMENTS_DIR (one subfolder per order). Only their metadata lives in
     # Postgres; the bytes stay on the filesystem (a Docker volume in prod).

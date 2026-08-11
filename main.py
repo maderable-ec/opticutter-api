@@ -13,6 +13,10 @@ from src.modules.branches.router import router as branches_router
 from src.modules.clients.router import router as clients_router
 from src.modules.notifications.router import router as notifications_router
 from src.modules.optimization_drafts.router import router as optimization_drafts_router
+from src.modules.optimizations.parallel import (
+    shutdown_pool_executor,
+    warmup_pool_executor,
+)
 from src.modules.optimizations.router import router as optimizations_router
 from src.modules.orders.router import router as orders_router
 from src.modules.preorders.public_router import router as preorders_public_router
@@ -40,7 +44,12 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     """Application lifecycle handling"""
     logger.info("Starting FastAPI application")
+    # Pay for the forkserver and its ortools preload now, not on a customer's
+    # first quote. Best-effort by construction: the pool falls back to in-process
+    # optimization, so booting must never depend on it.
+    warmup_pool_executor()
     yield
+    shutdown_pool_executor()
     logger.info("Shutting down FastAPI application")
 
 
