@@ -42,10 +42,18 @@ def list_products(
     paging: PageParams = Depends(),
     type: Optional[ProductType] = Query(None, description="Filter by product type"),
     search: Optional[str] = Query(None, description="Search by name or code"),
+    is_active: Optional[bool] = Query(
+        None, description="Filter by active flag; omit to list both"
+    ),
     svc: ProductService = Depends(product_service),
 ):
-    """Lists products with optional type filter, search, and pagination."""
-    items, total = svc.search_paginated(search, type, paging.limit, paging.offset)
+    """Lists products with optional type/active filters, search, and pagination.
+
+    Results are ordered by name, so paging through them is stable.
+    """
+    items, total = svc.search_paginated(
+        search, type, paging.limit, paging.offset, is_active
+    )
     return page(items, total, paging.limit, paging.offset)
 
 
@@ -61,11 +69,12 @@ def get_board_edge_bandings(
     ),
     svc: ProductService = Depends(product_service),
 ):
-    """Edge bandings coordinated with a board (same design and width-by-thickness).
+    """Edge bandings coordinated with a board (same family and width-by-thickness).
 
-    Matches on the design key derived from the code (avoids false positives by
-    name) and applies the thickness→width rule. An empty ``data`` means there's
-    no coordinated edge banding for that combination.
+    Matches on the explicit ``family`` attribute shared by the board and its
+    edge bandings and applies the thickness→width rule, over active products
+    only. An empty ``data`` means there's no coordinated edge banding for that
+    combination.
     """
     return ok(svc.find_edge_bandings_for_board(board_id, band_type))
 

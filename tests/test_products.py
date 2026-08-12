@@ -109,6 +109,39 @@ def test_list_search_and_filter_by_type(client):
     assert found["meta"]["pagination"]["total"] == 1
 
 
+def test_list_is_ordered_by_name_and_pages_do_not_overlap(client):
+    """Paging is only safe with a total order: without it Postgres may repeat/skip rows."""
+    for code, name in (("C", "Cedro"), ("A", "Abeto"), ("B", "Bambu")):
+        client.post("/api/v1/products/", json=_board_payload(code=code, name=name))
+
+    listed = client.get("/api/v1/products/").json()["data"]
+    assert [p["name"] for p in listed] == ["Abeto", "Bambu", "Cedro"]
+
+    seen = []
+    for offset in range(3):
+        page = client.get(
+            "/api/v1/products/", params={"limit": 1, "offset": offset}
+        ).json()
+        assert page["meta"]["pagination"]["total"] == 3
+        seen.extend(p["name"] for p in page["data"])
+    assert seen == ["Abeto", "Bambu", "Cedro"]
+
+
+def test_list_filter_by_is_active(client):
+    client.post("/api/v1/products/", json=_board_payload(code="ON", name="Activo"))
+    off = _board_payload(code="OFF", name="Inactivo")
+    off["isActive"] = False
+    client.post("/api/v1/products/", json=off)
+
+    # Omitting the filter keeps listing both: the catalog admin manages inactive products.
+    assert client.get("/api/v1/products/").json()["meta"]["pagination"]["total"] == 2
+
+    active = client.get("/api/v1/products/", params={"is_active": True}).json()
+    assert [p["code"] for p in active["data"]] == ["ON"]
+    inactive = client.get("/api/v1/products/", params={"is_active": False}).json()
+    assert [p["code"] for p in inactive["data"]] == ["OFF"]
+
+
 def test_get_product_by_code(client):
     client.post("/api/v1/products/", json=_board_payload(code="ABC123"))
     ok = client.get("/api/v1/products/code/ABC123")
@@ -276,6 +309,18 @@ def test_edge_bandings_excludes_other_designs(client):
     bands = client.get(f"/api/v1/products/{board['id']}/edge-bandings").json()["data"]
     # BARROCO_DORADO has no coordinated edge banding seeded; BARROCO_RISTRETTO must not leak in
     assert bands == []
+
+
+def test_edge_bandings_excludes_inactive(client):
+    """A discontinued edge banding must not be offered as coordinated."""
+    _seed_cashmere_catalog(client)
+    board = client.get("/api/v1/products/code/MDP-SL-CSH-15").json()["data"]
+    soft = client.get("/api/v1/products/code/TAP-SL-CSH-045").json()["data"]
+
+    client.put(f"/api/v1/products/{soft['id']}", json={"isActive": False})
+
+    bands = client.get(f"/api/v1/products/{board['id']}/edge-bandings").json()["data"]
+    assert [b["code"] for b in bands] == ["TAP-SL-CSH-150"]
 
 
 def test_edge_bandings_invalid_band_type_returns_422(client):
