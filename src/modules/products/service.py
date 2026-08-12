@@ -61,16 +61,24 @@ class ProductService(CRUDService[ProductModel, ProductBase, ProductUpdate]):
         type: Optional[ProductType] = None,
         limit: int = 20,
         offset: int = 0,
+        is_active: Optional[bool] = None,
     ) -> Tuple[List[ProductModel], int]:
-        """Lists products filtering by type and/or text (code/name)."""
+        """Lists products filtering by type, active flag and/or text (code/name).
+
+        Ordered by ``name`` (unique, so the order is total) to make paging
+        stable: without it Postgres may repeat or skip rows across pages.
+        """
         query = self.db.query(ProductModel)
         if type is not None:
             query = query.filter(ProductModel.type == ProductType(type).value)
+        if is_active is not None:
+            query = query.filter(ProductModel.is_active.is_(is_active))
         if search:
             pattern = f"%{search}%"
             query = query.filter(
                 ProductModel.code.ilike(pattern) | ProductModel.name.ilike(pattern)
             )
+        query = query.order_by(ProductModel.name, ProductModel.id)
         return self._paginate(query, limit, offset)
 
     @staticmethod
@@ -86,9 +94,10 @@ class ProductService(CRUDService[ProductModel, ProductBase, ProductUpdate]):
         Matches on the explicit ``family`` attribute shared by the board and its
         edge bandings (user-configurable, unlike the editable ``code``) and
         applies the thickness→width rule (``BOARD_THICKNESS_TO_EDGE_WIDTH``).
-        Optionally filters by band type (``BandType``). Returns ``[]`` when the
-        board has no family, no width rule applies, or there's no match for that
-        combination (a real catalog gap, e.g. soft banding for a 36 mm board).
+        Optionally filters by band type (``BandType``). Inactive products are
+        never coordinated. Returns ``[]`` when the board has no family, no width
+        rule applies, or there's no match for that combination (a real catalog
+        gap, e.g. soft banding for a 36 mm board).
         """
         board = self.get_or_404(board_id)
         if board.type != ProductType.BOARD.value:
@@ -106,7 +115,10 @@ class ProductService(CRUDService[ProductModel, ProductBase, ProductUpdate]):
 
         candidates = (
             self.db.query(ProductModel)
-            .filter(ProductModel.type == ProductType.EDGE_BANDING.value)
+            .filter(
+                ProductModel.type == ProductType.EDGE_BANDING.value,
+                ProductModel.is_active.is_(True),
+            )
             .all()
         )
 

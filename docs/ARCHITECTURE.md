@@ -87,8 +87,10 @@ No cycles, enforced by convention:
   Add a new product type by registering a schema under `products/types/` —
   no migration needed. Only `board`-typed products feed the optimizer.
   `GET /products/{board_id}/edge-bandings` matches the edge bandings designed
-  for a given board by a shared design key derived from their codes, then
-  applies a thickness→width rule.
+  for a given board by the explicit `family` attribute they share, then applies
+  a thickness→width rule (over active products only). It is **advisory for the
+  UI**: nothing downstream requires a piece's edge banding to be coordinated,
+  so a contrasting one can be quoted deliberately.
 - **`optimizations`** — orchestrates the pure `cutting/` domain. `POST
   /optimize` is **material-source agnostic**: it takes a `materials` stock
   list (catalog boards, company/client offcuts, or manual entries, unified by
