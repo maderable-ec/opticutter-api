@@ -145,6 +145,20 @@ class Config:
     OPT_EXACT_MAX_PIECES = env.int("OPT_EXACT_MAX_PIECES", 120)
     OPT_EXACT_MAX_CALLS = env.int("OPT_EXACT_MAX_CALLS", 40)
     OPT_EXACT_DETERMINISTIC_TIME = env.float("OPT_EXACT_DETERMINISTIC_TIME", 6.0)
+    # The maximizing entry ("give me the densest opening board") gets its own,
+    # much smaller allowance: unlike the feasibility one it never terminates on a
+    # proof, so it spends whatever it is given. 0.5 makes the engine 2.5x faster
+    # with every real pool billing the same; it is a PRICED choice, not a safe
+    # minimum (see ExactConfig in cutting/search.py for what it costs and for the
+    # 3.0/6 setting that regresses nothing at all).
+    OPT_EXACT_ROOT_DETERMINISTIC_TIME = env.float(
+        "OPT_EXACT_ROOT_DETERMINISTIC_TIME", 0.5
+    )
+    # Consecutive LNS rounds whose solver-seeded sub-search fails to improve the
+    # incumbent before the run stops consulting the solver's maximizing entry
+    # altogether. Counted in rounds, never seconds, like every other stopping
+    # rule here.
+    OPT_EXACT_ROOT_PATIENCE = env.int("OPT_EXACT_ROOT_PATIENCE", 2)
 
     # How many materials of ONE request may be optimized in parallel, each in its
     # own process (src/modules/optimizations/parallel.py). 1 disables it, and the

@@ -7,6 +7,7 @@ solver es coste puro. Los pools donde pierde tableros son los que el gate no
 puede tocar.
 """
 
+import argparse
 import os
 import sys
 import time
@@ -24,13 +25,18 @@ from src.cutting import (  # noqa: E402
     optimize_bins,
 )
 
-PARAMS = CuttingParameters(
-    kerf=bench_prod.KERF,
-    top_trim=bench_prod.TRIM,
-    bottom_trim=bench_prod.TRIM,
-    left_trim=bench_prod.TRIM,
-    right_trim=bench_prod.TRIM,
-)
+
+def _params(kerf):
+    return CuttingParameters(
+        kerf=kerf,
+        top_trim=bench_prod.TRIM,
+        bottom_trim=bench_prod.TRIM,
+        left_trim=bench_prod.TRIM,
+        right_trim=bench_prod.TRIM,
+    )
+
+
+PARAMS = _params(bench_prod.KERF)
 
 
 def run(pieces, bins, budget, enabled):
@@ -54,6 +60,11 @@ def run(pieces, bins, budget, enabled):
 
 
 def main():
+    global PARAMS
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--kerf", type=float, default=bench_prod.KERF)
+    PARAMS = _params(parser.parse_args().kerf)
+    print(f"kerf={PARAMS.kerf:g}")
     print(f"{'pool':<34}{'pzs':>5}  {'CON solver':>22}  {'SIN solver':>22}   veredicto")
     print(f"{'':<34}{'':>5}  {'tab  costo    seg':>22}  {'tab  costo    seg':>22}")
     tot_on = tot_off = 0.0

@@ -34,6 +34,12 @@ Usage::
 ``--workers`` runs jobs in parallel (default: most of the box). Cost, boards and
 digest are unaffected by it; **wall times are inflated by contention**, so pass
 ``--workers 1`` when the timing numbers themselves are the point.
+
+``--kerf`` picks the blade the jobs are cut with (default 5). The shop's saw was
+confirmed at **4mm**, which is what production runs, so that is the kerf a
+baseline meant to gate a change should use. It only affects the packing: the job
+population itself is kerf-independent (pieces are clamped by the trims, not the
+blade), so a kerf-4 run and a kerf-5 run compare the same 80 jobs.
 """
 
 import argparse
@@ -58,13 +64,29 @@ from src.cutting import (  # noqa: E402
     optimize_bins,
 )
 
-# Mirrors the production defaults: MDP sheet, 5mm blade, 10mm trims, and the
-# half board the catalog sells at price/2 plus a 10% markup.
+# Mirrors the production defaults: MDP sheet, 10mm trims, and the half board the
+# catalog sells at price/2 plus a 10% markup. ``PARAMS`` keeps the historical
+# 5mm blade: it is what the generator clamps piece sizes with (kerf plays no part
+# in that) and what the pinned ceilings in ``test_cutting_search.py`` import, so
+# the job population stays fixed while ``--kerf`` moves only the packing.
 SHEET_W, SHEET_H = 2070.0, 2800.0
 HALF_MARKUP = 0.10
 PARAMS = CuttingParameters(
     kerf=5, top_trim=10, bottom_trim=10, left_trim=10, right_trim=10
 )
+
+
+def params_for(kerf: float) -> CuttingParameters:
+    """``PARAMS`` with the blade swapped (trims and sheet are fixed)."""
+    return CuttingParameters(
+        kerf=kerf,
+        top_trim=PARAMS.top_trim,
+        bottom_trim=PARAMS.bottom_trim,
+        left_trim=PARAMS.left_trim,
+        right_trim=PARAMS.right_trim,
+    )
+
+
 # Same knobs as ``config.OPT_TRIES_PER_BOARD`` / ``OPT_SEARCH_ITERATIONS``.
 TRIES_PER_BOARD = 48
 SEARCH_ITERATIONS = 40
@@ -177,9 +199,10 @@ def build_job(index: int, seed: int) -> List[Tuple[BinSpec, BinSpec, List[Piece]
     return pools
 
 
-def run_job(index: int, seed: int) -> JobResult:
+def run_job(index: int, seed: int, kerf: float = PARAMS.kerf) -> JobResult:
     """Optimizes every pool of a job and aggregates cost, boards and geometry."""
     pools = build_job(index, seed)
+    params = params_for(kerf)
     exact_config = ExactConfig()
     total_cost = 0.0
     total_boards = 0
@@ -197,7 +220,7 @@ def run_job(index: int, seed: int) -> JobResult:
         layouts, unplaced = optimize_bins(
             pieces,
             [full, half],
-            cutting_params=PARAMS,
+            cutting_params=params,
             budget=budget,
             exact_config=exact_config,
         )
@@ -224,12 +247,15 @@ def run_job(index: int, seed: int) -> JobResult:
     )
 
 
-def _run_one(args: Tuple[int, int]) -> JobResult:
+def _run_one(args: Tuple[int, int, float]) -> JobResult:
     return run_job(*args)
 
 
-def run_battery(n_jobs: int, seed: int, workers: int) -> List[JobResult]:
-    tasks = [(i, seed) for i in range(n_jobs)]
+def run_battery(n_jobs: int, seed: int, workers: int, kerf: float) -> List[JobResult]:
+    # The kerf travels in the task tuple, not in a module global: the executor
+    # re-imports this module in every child, so a global set in ``main`` would
+    # silently snap back to ``PARAMS.kerf`` in the workers.
+    tasks = [(i, seed, kerf) for i in range(n_jobs)]
     results: List[JobResult] = []
     if workers <= 1:
         for task in tasks:
@@ -253,11 +279,20 @@ def _report(result: JobResult, total: int) -> JobResult:
     return result
 
 
-def compare(current: List[JobResult], baseline_path: str) -> int:
+def compare(current: List[JobResult], baseline_path: str, kerf: float) -> int:
     """Prints the diff and returns a process exit code (non-zero = regression)."""
     with open(baseline_path) as fh:
         raw = json.load(fh)
     base = {job["job"]: job for job in raw["jobs"]}
+    # A baseline cut with another blade is a different experiment: every job
+    # would read as "moved" and the cost bar would compare two populations.
+    base_kerf = raw.get("kerf", PARAMS.kerf)
+    if abs(base_kerf - kerf) > 1e-9:
+        print(
+            f"\n  ❌ la línea base es de kerf {base_kerf:g} y esta corrida es de "
+            f"kerf {kerf:g}: no son comparables."
+        )
+        return 2
 
     worse: List[Tuple[JobResult, dict]] = []
     better: List[Tuple[JobResult, dict]] = []
@@ -333,18 +368,24 @@ def main() -> int:
     )
     parser.add_argument("--out", default=None, help="write results to this JSON file")
     parser.add_argument("--compare", default=None, help="diff against this JSON file")
+    parser.add_argument(
+        "--kerf",
+        type=float,
+        default=PARAMS.kerf,
+        help=f"blade width in mm (default {PARAMS.kerf:g}; production cuts at 4)",
+    )
     args = parser.parse_args()
 
     if args.workers > 1:
         print(
-            f"running {args.jobs} jobs on {args.workers} workers "
-            f"(times are contention-inflated; use --workers 1 for timing)\n"
+            f"running {args.jobs} jobs at kerf {args.kerf:g} on {args.workers} "
+            f"workers (times are contention-inflated; use --workers 1 for timing)\n"
         )
     else:
-        print(f"running {args.jobs} jobs serially\n")
+        print(f"running {args.jobs} jobs at kerf {args.kerf:g} serially\n")
 
     started = time.perf_counter()
-    results = run_battery(args.jobs, args.seed, args.workers)
+    results = run_battery(args.jobs, args.seed, args.workers, args.kerf)
     elapsed = time.perf_counter() - started
 
     print(
@@ -359,6 +400,7 @@ def main() -> int:
             json.dump(
                 {
                     "seed": args.seed,
+                    "kerf": args.kerf,
                     "jobs": [r.__dict__ for r in results],
                 },
                 fh,
@@ -367,7 +409,7 @@ def main() -> int:
         print(f"wrote {args.out}")
 
     if args.compare:
-        return compare(results, args.compare)
+        return compare(results, args.compare, args.kerf)
     return 0
 
 
