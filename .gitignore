@@ -36,6 +36,14 @@ print_spool/
 # scripts/bench_prod.py embeds the geometry it needs, so it runs without them.
 pruebas/
 
+# Rust build artifacts of the packing kernel (rust/). The wheel is built by
+# maturin and installed into the venv; nothing here belongs in the repo.
+rust/target/
+
+# Cost-regression baselines produced by scripts/bench_battery.py. Machine- and
+# commit-specific, and large; regenerate with --out rather than sharing.
+benchmarks/
+
 # Editors and IDEs
 *~
 *.swp

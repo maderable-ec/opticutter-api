@@ -1,0 +1,22 @@
+[package]
+name = "opticutter-core"
+version = "0.1.0"
+edition = "2021"
+# The wheel is built for the deployed target only (x86_64-unknown-linux-gnu,
+# bookworm) plus macOS arm64 for local development; nothing here is
+# target-specific.
+
+[lib]
+name = "opticutter_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.22", features = ["extension-module"] }
+
+[profile.release]
+# Geometry must come out bit-identical to the Python oracle, so no fast-math
+# and no FMA contraction. Rust does not enable either by default; `opt-level=3`
+# and LTO are safe because neither reassociates float arithmetic.
+opt-level = 3
+lto = true
+codegen-units = 1

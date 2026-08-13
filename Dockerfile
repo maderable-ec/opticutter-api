@@ -25,12 +25,50 @@ COPY requirements.txt .
 RUN pip install --upgrade pip && \
     pip install -r requirements.txt
 
-# ---- Stage 2: dev ----
+# ---- Stage 2: rustbuild ----
+# The native packing kernel (rust/): a maturin/PyO3 extension that replaces the
+# interpreted geometry of src/cutting/ (the packer, the strip constructor and
+# the gen_fills loop) with a byte-identical Rust transliteration. It is a pure
+# speedup — the Python path stays in the image as a fallback and produces the
+# same layouts — so nothing here touches ENGINE_VERSION or the cache hash.
+#
+# Its own stage on purpose: the Rust toolchain is ~1GB, and neither `dev` nor
+# `runtime` should inherit it. Only the built wheel crosses over.
+FROM builder AS rustbuild
+
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH
+
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends curl ca-certificates && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+    sh -s -- -y --profile minimal --default-toolchain 1.83.0
+
+COPY rust/ ./rust/
+
+# --compatibility linux skips auditwheel: the wheel is installed into this
+# image's own venv, never redistributed, so a manylinux tag buys nothing.
+RUN pip install maturin==1.7.8 && \
+    maturin build --release --manifest-path rust/Cargo.toml \
+        --compatibility linux --out /wheels
+
+# ---- Stage 3: venv ----
+# The production virtualenv, now carrying the native kernel.
+FROM builder AS venv
+
+COPY --from=rustbuild /wheels /wheels
+RUN pip install --no-deps /wheels/*.whl && rm -rf /wheels
+
+# ---- Stage 4: dev ----
 # Image for development/tests: adds ruff, pytest, etc. on top of the venv.
 # docker-compose builds this target (build.target: dev).
 # requirements.txt already landed in /src from the builder, so the
 # "-r requirements.txt" inside requirements_dev.txt resolves correctly.
-FROM builder AS dev
+FROM venv AS dev
 
 ENV PYTHONUNBUFFERED=1
 
@@ -42,7 +80,7 @@ EXPOSE 8000
 # Overridden by docker-compose with --reload; a sensible default lives here.
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
 
-# ---- Stage 3: runtime (production, default target) ----
+# ---- Stage 5: runtime (production, default target) ----
 FROM python:3.11-slim-bookworm AS runtime
 
 ENV PYTHONUNBUFFERED=1 \
@@ -59,8 +97,11 @@ RUN apt-get update -y && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# Copies the already-built virtualenv (production deps only, no toolchain).
-COPY --from=builder /opt/venv /opt/venv
+# Copies the already-built virtualenv (production deps + the native kernel, no
+# toolchain). The kernel lives in the venv and NOT under /src on purpose:
+# `make dev` and `make benchmark` bind-mount the repo over /src, which would
+# shadow anything built there.
+COPY --from=venv /opt/venv /opt/venv
 
 # Unprivileged user.
 RUN useradd --create-home --uid 1000 appuser

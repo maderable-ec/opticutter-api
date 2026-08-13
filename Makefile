@@ -1,5 +1,5 @@
 # Makefile for Cutter API
-.PHONY: help build start dev down tests tests-local benchmark create-test-db lint-fix lint-check install clean logs redis-cli redis-flush
+.PHONY: help build start dev down tests tests-local benchmark create-test-db lint-fix lint-check install clean logs redis-cli redis-flush rust rust-parity
 
 # Tests ALWAYS run against a dedicated database (cutter_test_db), never
 # against the development database (cutter_db): the conftest TRUNCATEs per test.
@@ -52,6 +52,20 @@ benchmark: ## Runs the parity benchmarks against the production build (linux/amd
 	docker build --platform linux/amd64 --target dev -t cutter-benchmark .
 	docker run --rm --platform linux/amd64 -e DATABASE_URL=$(DB_TEST_DOCKER) \
 		-v "$(CURDIR)":/src cutter-benchmark pytest -m benchmark --no-cov -q -p no:cacheprovider
+
+# rustup is normally installed with --no-modify-path, so cargo is not on PATH.
+# `cargo build` alone FAILS on macOS with "symbol(s) not found ... _Py_*": an
+# extension module resolves the Python symbols at load time and only maturin
+# passes the right linker flags. Always go through maturin.
+rust: ## Builds the native packing kernel (rust/) into .venv
+	PATH="$$HOME/.cargo/bin:$$PATH" VIRTUAL_ENV="$(CURDIR)/.venv" \
+		.venv/bin/maturin develop --release --manifest-path rust/Cargo.toml
+
+# The port's acceptance bar. The Python geometry is the oracle and it is cached
+# by input hash, so the bar is bit-for-bit equality, not "close enough".
+rust-parity: ## Differential Rust vs Python: constructors + full engine
+	.venv/bin/python scripts/diff_rust_parity.py
+	.venv/bin/python scripts/diff_rust_engine.py --all
 
 lint-fix: ## Fixes formatting and lint errors
 	source .venv/bin/activate && ruff check --fix . && ruff format .
