@@ -72,6 +72,8 @@ def _exact_config() -> ExactConfig:
         max_pieces=config.OPT_EXACT_MAX_PIECES,
         max_calls=config.OPT_EXACT_MAX_CALLS,
         deterministic_time=config.OPT_EXACT_DETERMINISTIC_TIME,
+        root_deterministic_time=config.OPT_EXACT_ROOT_DETERMINISTIC_TIME,
+        root_patience=config.OPT_EXACT_ROOT_PATIENCE,
     )
 
 

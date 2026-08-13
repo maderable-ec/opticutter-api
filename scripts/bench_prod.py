@@ -82,8 +82,10 @@ from src.cutting import (  # noqa: E402
 from src.cutting.search import ENGINE_VERSION  # noqa: E402
 
 # Parámetros de corte de producción (settings.kerf y los cuatro trims), fijos
-# aquí para no depender de la base: si los cambiás en la app, pasá --kerf.
-KERF = 5.0
+# aquí para no depender de la base: si se cambian en la app, pasar --kerf.
+# 4.0 desde 2026-08-13: se confirmó con el operario que la sierra corta a 4mm,
+# y medir a 5 da números que no son los de producción.
+KERF = 4.0
 TRIM = 10.0
 HALF_MARKUP = 0.10
 SHEET_W, SHEET_H = 2070.0, 2800.0
@@ -615,8 +617,8 @@ def main():
         "--kerf",
         type=float,
         default=KERF,
-        help=f"ancho de sierra en mm (default {KERF}); en los packs apretados "
-        "cambiar de 5 a 4 vale medio tablero",
+        help=f"ancho de sierra en mm (default {KERF}, la sierra real del "
+        "taller); en los packs apretados, pasar a 5 cuesta medio tablero",
     )
     parser.add_argument("--json", action="store_true", help="salida JSON cruda")
     args = parser.parse_args()

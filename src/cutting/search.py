@@ -71,9 +71,13 @@ from src.cutting.parameters import CuttingParameters
 # solver's answer, which changes exact-built layouts (tighter columns) and makes
 # them build-independent; 5 = seeded restarts stop after ``_RESTART_PATIENCE``
 # fruitless rounds, so a pool whose lower bound is unreachable no longer burns
-# the whole restart budget. Also bump this when the pinned ortools version
-# moves, since a solver upgrade can return a different solution.
-ENGINE_VERSION = 5
+# the whole restart budget; 6 = the solver is metered instead of being trusted —
+# its maximizing entry gets its own small work budget
+# (``ExactConfig.root_deterministic_time``) and stops being consulted after
+# ``root_patience`` fruitless LNS rounds, which changes which opening board the
+# beam is seeded with on tight pools. Also bump this when the pinned ortools
+# version moves, since a solver upgrade can return a different solution.
+ENGINE_VERSION = 6
 
 # A half bin is only worth opening near the end of a job: gate it by remaining
 # area so early states don't waste decodes on fills the cost objective would
@@ -157,12 +161,51 @@ class ExactConfig:
 
     ``deterministic_time`` is OR-Tools' work-based budget, not seconds: the same
     model always stops at the same point, whatever the machine is doing.
+
+    **The two entry points get different budgets, because they are different
+    problems.** ``fits_one_bin`` asks a *decision* question ("does this whole
+    tail close in one bin?"): it terminates on a proof, so it is either quick or
+    hopeless, and in practice it costs ~0.02s a call. ``exact_best_fill``
+    *optimizes* (maximize placed area) and on a real pool never proves
+    optimality, so it always runs to exhaustion — whatever budget it is handed
+    is a budget it spends. Measured at kerf 4: one ``exact_best_fill`` on a
+    98-piece pool burned **13.79s of a 15.18s run** without changing the bill.
+
+    **The defaults are a priced decision, not a safe minimum.** Measured at the
+    production kerf of 4: 0.5/2 makes the 13 real pools 2.5x faster (51.3s ->
+    20.6s, worst pool 14.4s -> 2.3s) with **every real bill identical**, both
+    solver wins included. The price shows up only in the randomized battery: 4 of
+    its 80 jobs bill more (+$107 total, +0.15%) and one bills less, which across
+    the whole population is **one extra board in 1159** plus three half-to-full
+    swaps. Pre-order 21 also stops winning its fifth board *at kerf 5* (at kerf 4
+    it keeps it). Denis took that trade on 2026-08-13 — a shop quotes with the
+    client sitting there, so 19s of compute on the worst job becoming 4s is worth
+    more than a board per thousand.
+
+    **The frontier, if it ever needs walking back.** Each bound is set by one
+    concrete job, not by a round number: battery job 16 needs
+    ``root_deterministic_time >= 3.0``, and pre-order 21 at kerf 5 needs
+    ``>= 1.0`` *and* ``root_patience >= 6``. The cheapest configuration that
+    regresses nothing anywhere is **3.0/6** (13 real pools 51.3s -> 40.2s,
+    battery cpu -21%, every bill identical) — that is the value to restore if the
+    +0.15% ever turns out to matter. Whatever is changed here, re-run **both**
+    bars: they catch different regressions, and this change had the parity
+    fixtures red while the real pools looked perfect, then the battery red while
+    the fixtures were green.
     """
 
     enabled: bool = True
     max_pieces: int = 120
     max_calls: int = 40
     deterministic_time: float = 6.0
+    # Budget of the maximizing entry (``exact_best_fill``) alone. See above: it
+    # buys a marginally denser opening board, never a proof.
+    root_deterministic_time: float = 0.5
+    # Consecutive LNS rounds whose solver-seeded sub-search fails to improve the
+    # incumbent before the run stops asking for dense openings altogether (see
+    # ``ExactBudget``). 0 disables the LNS seeding; a large value restores the
+    # old "ask until the call budget runs out" behavior.
+    root_patience: int = 2
     # Below this pool-area / bin-area ratio a failed heuristic pack means the
     # pieces genuinely don't fit, not that the greedy gave up.
     min_fill_ratio: float = 0.7
@@ -175,24 +218,49 @@ class ExactConfig:
 
 
 class ExactBudget:
-    """Call allowance + memo shared by every searcher of one ``optimize_bins`` run.
+    """Call allowance + memo + stagnation state, shared by every searcher of one
+    ``optimize_bins`` run.
 
     Seeded restarts build fresh ``_Searcher``s; a per-searcher counter would let
     them multiply the worst-case solver time by the restart count, and they all
     re-ask the same root question. One shared allowance keeps the ceiling flat;
     the memo (keyed by piece-type multiset) keeps restarts from paying twice.
     Counting calls, never seconds, keeps the whole thing deterministic.
+
+    **The stagnation cutoff.** The flat call allowance treats every solver
+    question as equally worth asking, and measurement says it is not: on the 13
+    real pools, two of them get a board out of the solver and the other eleven
+    bill exactly the same with it off, after 26-37 root asks apiece. There is no
+    known way to *predict* which pool is which — both piece count and the
+    baseline's gap to the area lower bound were tried as pre-gates and falsified
+    (the same 9.9% gap is a win on one pool and pure waste on another). So this
+    stops predicting and starts observing: rounds that consulted the solver and
+    improved nothing are evidence the neighborhood is exhausted, and after
+    ``root_patience`` of them in a row the run stops asking for dense openings.
+    Any improvement resets it. Same shape as ``_RESTART_PATIENCE``, and counted
+    in rounds for the same reason: the payload is cached by input hash, so a
+    stopping rule may never read a clock.
     """
 
-    def __init__(self, max_calls: int):
+    def __init__(self, max_calls: int, root_patience: int = 2):
         self.remaining = max_calls
         self.root_memo: Dict[tuple, Optional[BinFill]] = {}
+        self.root_patience = root_patience
+        self.root_misses = 0
 
     def take(self) -> bool:
         if self.remaining <= 0:
             return False
         self.remaining -= 1
         return True
+
+    def root_allowed(self) -> bool:
+        """Is the maximizing entry still earning its keep this run?"""
+        return self.root_misses < self.root_patience
+
+    def note_root(self, improved: bool) -> None:
+        """Records the outcome of a round that consulted the maximizing entry."""
+        self.root_misses = 0 if improved else self.root_misses + 1
 
 
 def _usable_area(spec: BinSpec, params: CuttingParameters) -> float:
@@ -352,7 +420,9 @@ class _Searcher:
         self.max_sheets = max_sheets
         self.seed = seed
         self.exact = exact_config or ExactConfig()
-        self.exact_budget = exact_budget or ExactBudget(self.exact.max_calls)
+        self.exact_budget = exact_budget or ExactBudget(
+            self.exact.max_calls, self.exact.root_patience
+        )
         self.rng = random.Random(1_000_003 * (seed + 1))
         # Exploration order of the greedy portfolio; the seed (request
         # ``variant`` or a restart offset) reshuffles it to surface
@@ -523,7 +593,9 @@ class _Searcher:
         A candidate no greedy can match on tight jobs, but paid for with real
         optimization work — hence the first-move-only usage (of the main beam
         *and* of each LNS sub-search, which is where it most often turns two
-        half-empty boards into one) and the memo shared across restarts.
+        half-empty boards into one), the memo shared across restarts, and the
+        separate ``root_deterministic_time`` allowance: this call never proves
+        anything, so it spends every unit it is given (see ``ExactConfig``).
         """
         cfg = self.exact
         if not cfg.enabled or not cfg.seed_root_fill or not exact.is_available():
@@ -544,7 +616,7 @@ class _Searcher:
                 self.params,
                 require_all=False,
                 transposed=transposed,
-                deterministic_time=cfg.deterministic_time,
+                deterministic_time=cfg.root_deterministic_time,
                 seed=abs(self.seed) % 1_000_000,
                 min_rect_size=self.min_rect_size,
             )
@@ -768,7 +840,10 @@ class _Searcher:
         ``root_exact`` lets the sub-search open the ruined pool with the
         solver's densest fill. This is where orphan absorption actually
         happens: two half-empty boards get ruined and the exact packer decides
-        whether their contents collapse into one.
+        whether their contents collapse into one — and, because every round
+        ruins a different combo, it is also where nearly every solver call of a
+        run is born. So it is here that the stagnation cutoff is applied and
+        scored (see ``ExactBudget``).
         """
         best = solution
         stale = 0
@@ -820,7 +895,13 @@ class _Searcher:
             )
             if memo_key in self._lns_failed:
                 stale += 1
+                # A replayed failure is not evidence about the solver: no call
+                # was made, so it must not count against its patience.
                 continue
+            # This is the only place a solver ask can be scored: the sub-search
+            # either beats the incumbent or it doesn't, and both the ruined pool
+            # and the answer are right here.
+            used_root = root_exact and self.exact_budget.root_allowed()
             sub = self.beam(
                 pool,
                 used_counts=counts,
@@ -828,19 +909,28 @@ class _Searcher:
                 tries=max(8, self.budget.tries_per_board // 2),
                 max_bins=len(combo),
                 upper_objective=upper,
-                root_exact=root_exact,
+                root_exact=used_root,
             )
             if sub is None:
                 self._lns_failed.add(memo_key)
                 stale += 1
+                if used_root:
+                    self.exact_budget.note_root(False)
                 continue
             candidate = _Solution(fills=kept + sub.fills, unplaced=best.unplaced)
-            if candidate.objective() < best.objective():
+            improved = candidate.objective() < best.objective()
+            if improved:
                 best = candidate
                 stale = 0
             else:
                 self._lns_failed.add(memo_key)
                 stale += 1
+            if used_root:
+                # Deliberately generous attribution: a round that used the
+                # solver and improved counts as a hit even if the winning fill
+                # came from a greedy. Erring towards keeping the solver alive is
+                # the safe direction — it costs seconds, the other costs boards.
+                self.exact_budget.note_root(improved)
         return best
 
     # ---- half-board downgrade -------------------------------------------
@@ -991,7 +1081,7 @@ def optimize_bins(
             unplaced.append(piece)
 
     exact_config = exact_config or ExactConfig()
-    exact_budget = ExactBudget(exact_config.max_calls)
+    exact_budget = ExactBudget(exact_config.max_calls, exact_config.root_patience)
     searcher = _Searcher(
         specs=list(bins),
         params=params,

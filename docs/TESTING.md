@@ -13,22 +13,32 @@ is `integration`. No manual annotation needed.
 
 Two markers are applied by hand, both on the cutting engine's benchmarks:
 `slow` (full search budget — seconds per test) and **`benchmark`**, which is
-the one CI deselects. A `benchmark` test pins the exact board count of an audit
-cut list against the commercial reference — a commercial claim, and only
-meaningful for the build that ships, so `make benchmark` runs them against a
-`linux/amd64` image. Anything that must hold on *every* build (layout validity,
-nothing left unplaced, never worse than the heuristics alone) goes in an
-unmarked test that runs everywhere.
+the one CI deselects: a `benchmark` test is one whose answer is a property of
+the **OR-Tools build**, so `make benchmark` runs it against a `linux/amd64`
+image. Anything that must hold on *every* build (layout validity, nothing left
+unplaced, never worse than the heuristics alone) goes in an unmarked test that
+runs everywhere.
 
-Those numbers used to be **build-dependent**: CP-SAT picks arbitrarily among
-equally optimal packings, the pick is a property of the binary rather than of
-the pinned version, and macOS arm64 and manylinux x86_64 disagreed on pre-order
-21 at kerf 5 (5 boards vs 6). The engine no longer inherits that pick —
-`exact._build_fill` reconstructs a canonical layout from the solver's answer —
-and `test_preorder_21_at_kerf_5_survives_any_solver_tie_break` guards it by
-perturbing the solver's tie-break 12 ways. Parity now holds on both builds.
-Cut length can still differ between tied optima; it is the last tiebreak of the
-search objective, so it changes the diagram, never the bill.
+Note where the commercial claims live: pre-order 21 at **kerf 4** (5 boards) and
+pre-order 20 at both kerfs are unmarked and run in CI, because the heuristics
+reach those numbers on their own — no solver, no build dependence. Kerf 4 is the
+shop's actual blade (confirmed 2026-08-13), which is why the board counts are
+pinned there. At kerf 5 pre-order 21 bills the heuristic ceiling since
+`ENGINE_VERSION` 6 metered the solver, a trade taken deliberately (see
+`ExactConfig` in `src/cutting/search.py`), so the only kerf-5 assertion left is
+"never worse than the heuristics".
+
+CP-SAT picks arbitrarily among equally optimal packings, and the pick is a
+property of the binary rather than of the pinned version: macOS arm64 and
+manylinux x86_64 once disagreed on pre-order 21 at kerf 5 (5 boards vs 6). The
+engine no longer inherits that pick — `exact._build_fill` reconstructs a
+canonical layout from the solver's answer — and
+`test_preorder_21_bills_the_same_under_any_solver_tie_break` guards it by
+perturbing the solver's tie-break 12 ways and requiring one single bill. It runs
+at kerf 5 on purpose: that is where the solver still decides this cut list, so a
+sweep at kerf 4 would pass without testing anything. Cut length can still differ
+between tied optima; it is the last tiebreak of the search objective, so it
+changes the diagram, never the bill.
 
 ## Commands
 
