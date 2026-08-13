@@ -286,8 +286,15 @@ class OptimizationService:
         Doesn't include ``client_id`` (the computation doesn't depend on the
         client); order dedupe does combine ``client_id`` with this hash. Computed
         over the resolved materials (source, dimensions and cost), the
-        requirements, the cutting parameters and the edge-banding prices, so the
+        requirements, the cutting parameters and the edge bandings, so the
         cache is invalidated whenever any of them changes.
+
+        The edge-banding signature covers price **and** the attributes frozen
+        into the payload (band type, design family): they don't move the
+        geometry, but they're baked into the notation the PDFs print, so a
+        catalog edit that isn't in the hash would stay invisible for a whole
+        ``OPT_RESULT_TTL_SECONDS`` — exactly during the setup pass when those
+        fields get edited.
         """
         materials = {
             key: {
@@ -303,7 +310,14 @@ class OptimizationService:
             }
             for key, rm in resolved.items()
         }
-        edge_prices = {str(pid): p.price for pid, p in eb_products.items()}
+        edge_bandings = {
+            str(pid): {
+                "price": p.price,
+                "band_type": (p.attributes or {}).get("bandType"),
+                "family": (p.attributes or {}).get("family"),
+            }
+            for pid, p in eb_products.items()
+        }
         digest_input = {
             "materials": materials,
             "requirements": [r.model_dump(mode="json") for r in request.requirements],
@@ -325,7 +339,7 @@ class OptimizationService:
                 "exact": dataclasses.asdict(_exact_config()),
                 "variant": request.variant,
             },
-            "edge_prices": edge_prices,
+            "edge_bandings": edge_bandings,
         }
         canonical = json.dumps(digest_input, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -445,10 +459,15 @@ class OptimizationService:
             # Canonical type (``Soft``/``Hard``) to differentiate the band in the
             # diagram (soft = solid, hard = hatched). ``None`` in older snapshots.
             "band_type": attrs.get("bandType"),
+            # Design family (``CSH``) so the workshop tells two banded designs
+            # apart. ``None`` when the product has no family configured.
+            "family": attrs.get("family"),
             # Workshop notation computed from the NOMINAL sides (stable under
             # rotation); ``geo`` is only used to draw the bands on the right side.
             # ``attributes`` is persisted in camelCase → ``bandType``.
-            "notation": edge_banding_notation(nominal, attrs.get("bandType")),
+            "notation": edge_banding_notation(
+                nominal, attrs.get("bandType"), attrs.get("family")
+            ),
         }
 
     def _enrich_layout_pieces(
@@ -516,6 +535,7 @@ class OptimizationService:
                     "thickness": attrs.get("thickness"),
                     "color": attrs.get("color"),
                     "band_type": attrs.get("bandType"),
+                    "family": attrs.get("family"),
                     "net_linear_m": round(net_m, 2),
                     "linear_m": billed,
                     "billed_linear_m": billed,
@@ -587,13 +607,14 @@ class OptimizationService:
         resolved: Dict[str, ResolvedMaterial],
         eb_products: Dict[int, ProductModel],
     ) -> dict:
-        """Dumps a requirement to the payload and attaches the edge-banding ``band_type``.
+        """Dumps a requirement to the payload with the edge-banding display attributes.
 
         ``product_code`` carries the material's label (catalog code, or
         name/key for inline sources) that the proforma shows in the "Tablero"
-        column. ``band_type`` lives in the product's attributes, not in the
-        ``EdgeBandingSpec``; it's injected here so the proforma can build the edge
-        notation (``2L1C CS``) without re-resolving the product at render time.
+        column. ``band_type`` and ``family`` live in the product's attributes,
+        not in the ``EdgeBandingSpec``; they're injected here so the proforma can
+        build the edge notation (``2L1C CS CSH``) without re-resolving the
+        product at render time.
         """
         rm = resolved.get(req.material_key)
         material_label = (rm.code or rm.name) if rm else None
@@ -607,6 +628,7 @@ class OptimizationService:
             attrs = (product.attributes if product else None) or {}
             # ``attributes`` is persisted in camelCase → ``bandType``.
             data["edge_banding"]["band_type"] = attrs.get("bandType")
+            data["edge_banding"]["family"] = attrs.get("family")
         return data
 
     def _build_result_payload(

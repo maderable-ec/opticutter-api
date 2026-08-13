@@ -792,8 +792,11 @@ class ProformaService:
                 0.8 * inch,
                 0.55 * inch,
                 1.25 * inch,
-                1.1 * inch,
-                CONTENT_WIDTH - 4.85 * inch,
+                # "Cantos" now carries the design family too ("2L1C CS CSH" =
+                # 58pt at 9pt Helvetica, against 12pt of cell padding), so it
+                # takes 0.15" from the flexible "Etiqueta" column for headroom.
+                1.25 * inch,
+                CONTENT_WIDTH - 5.0 * inch,
             ],
             repeatRows=1,
         )
@@ -1235,11 +1238,18 @@ def pdf_response(
 
 
 def _edge_banding_notation(req: dict) -> str:
-    """Workshop notation for a piece's edge banding (``2L1C CS``), or ``-`` if none."""
+    """Workshop notation for a piece's edge banding (``2L1C CS CSH``), or ``-`` if none.
+
+    ``band_type``/``family`` are frozen into the requirement at compute time
+    (see ``OptimizationService._dump_requirement``); snapshots predating either
+    simply render without that part.
+    """
     spec = req.get("edge_banding")
     if not spec:
         return "-"
-    text = edge_banding_notation(spec.get("sides") or [], spec.get("band_type"))
+    text = edge_banding_notation(
+        spec.get("sides") or [], spec.get("band_type"), spec.get("family")
+    )
     return text or "-"
 
 

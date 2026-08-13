@@ -103,18 +103,20 @@ CLIENTS = [
 
 # Demo boards (only created if the catalog is empty): (code, name, height, width,
 # thickness, price, family). Large dimensions so the demo cutlists fit comfortably.
-# ``family`` is the shared design key that coordinates a board with its tapacanto.
+# ``family`` is the shared design key that coordinates a board with its tapacanto,
+# and a tapacanto's family is also printed in the workshop notation ("1L CS BLN"),
+# so it's a short design code rather than a readable name.
 DEMO_BOARDS = [
-    ("D-BLN-15", "Tablero Demo Blanco 15mm", 2440, 1830, 15, 48.00, "Blanco"),
-    ("D-NGR-15", "Tablero Demo Negro 15mm", 2440, 1830, 15, 52.00, "Negro"),
-    ("D-ROB-18", "Tablero Demo Roble 18mm", 2440, 1830, 18, 64.00, "Roble"),
+    ("D-BLN-15", "Tablero Demo Blanco 15mm", 2440, 1830, 15, 48.00, "BLN"),
+    ("D-NGR-15", "Tablero Demo Negro 15mm", 2440, 1830, 15, 52.00, "NGR"),
+    ("D-ROB-18", "Tablero Demo Roble 18mm", 2440, 1830, 18, 64.00, "ROB"),
 ]
 
 # Demo edge bandings coordinated with the first two boards by shared ``family``
 # (15mm board → 19mm tapacanto): (code, name, thickness_mm, width_mm, band_type, price_per_m, family).
 DEMO_EDGE_BANDINGS = [
-    ("D-BLN-C045", "Tapacanto Demo Blanco 19mm", 0.45, 19, "Soft", 0.35, "Blanco"),
-    ("D-NGR-C045", "Tapacanto Demo Negro 19mm", 0.45, 19, "Soft", 0.35, "Negro"),
+    ("D-BLN-C045", "Tapacanto Demo Blanco 19mm", 0.45, 19, "Soft", 0.35, "BLN"),
+    ("D-NGR-C045", "Tapacanto Demo Negro 19mm", 0.45, 19, "Soft", 0.35, "NGR"),
 ]
 
 # Statuses to seed per branch.

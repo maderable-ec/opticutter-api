@@ -92,6 +92,7 @@ def make_board(
     height=2800,
     width=2070,
     name_suffix="",
+    family=None,
 ):
     rh_label = " RH" if rh else ""
     rh_text = ", resistente a la humedad" if rh else ""
@@ -111,9 +112,13 @@ def make_board(
             "width": width,
             "thickness": thickness,
             "grainDirection": grain,
-            # Shared design family: a board and its coordinated tapacanto carry the SAME value
-            # (the design name), which is how the optimizer infers the tapacanto.
-            "family": name,
+            # Shared design family: a board and its coordinated tapacanto carry the SAME value,
+            # which is how the optimizer infers the tapacanto. It's the SHORT design code
+            # (``CSH``, not "Cashmere") because the tapacanto's family is also what gets
+            # printed at the end of the workshop notation ("1L CS CSH"); the readable label
+            # lives in the tapacanto's ``color``. Defaults to the code prefix, but they're
+            # separate arguments: a variant can have its own prefix and still share a family.
+            "family": family or abbr,
         },
     }
 
@@ -131,8 +136,8 @@ def build_boards():
         for rh in (False, True):
             boards.append(
                 make_board(
-                    # Distinct short code prefix (BNS-*), but same ``name`` ("Blanco Nieve")
-                    # so it shares the family with the base boards and the Blanco tapacanto.
+                    # Distinct short code prefix (BNS-*), but the BNV ``family`` of the base
+                    # boards, so it stays coordinated with the same Blanco tapacanto.
                     "BNS",
                     "Blanco Nieve",
                     "SL",
@@ -143,6 +148,7 @@ def build_boards():
                     height=2440,
                     width=2070,
                     name_suffix=" Especial",
+                    family="BNV",
                 )
             )
     return boards
@@ -205,9 +211,12 @@ def make_edge_banding(abbr, name, cat, band_type, thickness, width):
             "bandType": band_value,
             "thickness": thickness,
             "width": width,
+            # Readable commercial label ("Roble Barroco Dorado"), the long form the
+            # short ``family`` code replaced.
             "color": label,
-            # Shared design family (the design name), matching the coordinated board's family.
-            "family": name,
+            # Shared design family, matching the coordinated board's. The SHORT code,
+            # because this is also what the workshop notation prints ("1L CS CSH").
+            "family": abbr,
         },
     }
 
