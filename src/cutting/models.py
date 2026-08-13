@@ -67,6 +67,14 @@ class Piece:
             )
         if self.quantity < 1:
             raise ValueError(f"Quantity must be at least 1: quantity={self.quantity}")
+        # Float-coerced for the same reason as ``CuttingParameters``: a piece's
+        # dimensions are echoed verbatim into ``PlacedPiece`` and from there
+        # into the serialized layout, so an int-built piece would render
+        # differently from the (f64) Rust kernel's answer for identical
+        # geometry. ``Rectangle``/``PlacedPiece``/``Cut`` need no coercion —
+        # they are always derived from these values.
+        self.width = float(self.width)
+        self.height = float(self.height)
         self.area = self.width * self.height
 
     def __repr__(self) -> str:
@@ -123,6 +131,11 @@ class Material:
             raise ValueError(
                 f"Thickness cannot be negative: thickness={self.thickness}"
             )
+        # See ``Piece``: the sheet's dimensions are rendered into every layout.
+        self.width = float(self.width)
+        self.height = float(self.height)
+        self.thickness = float(self.thickness)
+        self.cost_per_unit = float(self.cost_per_unit)
 
     @property
     def area(self) -> float:

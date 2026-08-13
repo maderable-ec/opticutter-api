@@ -80,6 +80,17 @@ jobs:
 
       - run: pip install -r requirements_dev.txt
 
+      # The native packing kernel (rust/). It is a byte-identical port of the
+      # interpreted geometry, so the suite passes with or without it — but the
+      # build that ships HAS it, so CI must exercise that path. The runner
+      # already carries a Rust toolchain; only maturin is missing.
+      - name: Build the native packing kernel
+        run: |
+          pip install maturin==1.7.8
+          maturin build --release --manifest-path rust/Cargo.toml \
+            --compatibility linux --out dist
+          pip install --no-deps dist/*.whl
+
       # No Redis service: tests/conftest.py substitutes an in-memory double.
       # pyproject.toml enforces --cov-fail-under=80, so the whole suite runs,
       # not just `-m unit`.
@@ -94,3 +105,11 @@ jobs:
       # reconstruction fixed that, and a 12-way tie-break sweep now guards it.
       # A red benchmark today is a real regression, not a platform difference.
       - run: pytest -q -m "not benchmark"
+
+      # The pure-Python geometry is the oracle and the fallback for any box
+      # without the wheel, so it cannot be allowed to rot behind the kernel.
+      # Only the cutting layer is re-run: nothing else changes with the backend.
+      - name: Re-run the cutting suite on the Python fallback
+        env:
+          OPT_ENGINE_BACKEND: python
+        run: pytest -q --no-cov tests/test_cutting.py tests/unit/test_cutting_search.py

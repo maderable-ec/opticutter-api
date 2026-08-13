@@ -46,7 +46,8 @@ import random
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from src.cutting import exact
+from src.cutting import constructors as _py_constructors
+from src.cutting import exact, rust_backend
 from src.cutting.constructors import (
     GREEDY_PORTFOLIO,
     BinFill,
@@ -359,6 +360,13 @@ class _Searcher:
         self.portfolio: List[GreedyConfig] = list(GREEDY_PORTFOLIO)
         if seed:
             self.rng.shuffle(self.portfolio)
+        # Native kernel, snapshotted so it cannot change mid-search. The
+        # geometry is identical either way (see ``rust_backend``), so this
+        # decides speed only — never the answer, and never the cache hash.
+        self.rust = rust_backend.available()
+        self._portfolio_codes = (
+            rust_backend.encode_portfolio(self.portfolio) if self.rust else ()
+        )
         # Memo of completion probes / failed LNS sub-searches, keyed by the
         # piece-type multiset (identical pools are interchangeable).
         self._probe_memo: Dict[tuple, Optional[BinFill]] = {}
@@ -376,6 +384,17 @@ class _Searcher:
 
     def gen_fills(self, pool: List[Piece], spec: BinSpec, tries: int) -> List[BinFill]:
         """Candidate fills of ``spec`` from ``pool``, deduped by piece multiset."""
+        if self.rust:
+            # Same loop, one FFI crossing instead of ~60 (see ``rust_backend``).
+            return rust_backend.gen_fills(
+                pool,
+                spec,
+                self.params,
+                self._portfolio_codes,
+                tries,
+                self.min_rect_size,
+            )
+
         fills: List[BinFill] = []
         seen = set()
         spent = 0
@@ -429,6 +448,43 @@ class _Searcher:
             push(greedy_fill(pool, spec, self.params, config, self.min_rect_size))
             spent += 1
         return fills
+
+    def _probe_fill(
+        self, pool: List[Piece], spec: BinSpec, target: int
+    ) -> Optional[BinFill]:
+        """First probe constructor that packs the WHOLE pool into one ``spec``.
+
+        The order is the contract: the first eight greedy configs of the
+        (possibly reshuffled) portfolio, then the two strip orientations.
+        Stopping at the first complete fill is equivalent to building all ten
+        and scanning — the constructors share no state — and it is most of what
+        makes the native path's single FFI crossing worth having.
+        """
+        if self.rust:
+            return rust_backend.probe_fill(
+                pool,
+                spec,
+                self.params,
+                self._portfolio_codes[:8],
+                target,
+                self.min_rect_size,
+            )
+
+        for config in self.portfolio[:8]:
+            fill = greedy_fill(pool, spec, self.params, config, self.min_rect_size)
+            if fill is not None and len(fill.placed) == target:
+                return fill
+        for horizontal in (False, True):
+            fill = strip_fill(
+                pool,
+                spec,
+                self.params,
+                horizontal=horizontal,
+                min_rect_size=self.min_rect_size,
+            )
+            if fill is not None and len(fill.placed) == target:
+                return fill
+        return None
 
     def exact_fill(self, pool: Sequence[Piece], spec: BinSpec) -> Optional[BinFill]:
         """CP-SAT attempt at closing ``pool`` into ONE ``spec``; ``None`` if skipped.
@@ -541,25 +597,7 @@ class _Searcher:
                 continue
             if best is not None and spec.cost_per_unit >= best.spec.cost_per_unit:
                 break
-            probes: List[Optional[BinFill]] = [
-                greedy_fill(pool, spec, self.params, config, self.min_rect_size)
-                for config in self.portfolio[:8]
-            ]
-            for horizontal in (False, True):
-                probes.append(
-                    strip_fill(
-                        pool,
-                        spec,
-                        self.params,
-                        horizontal=horizontal,
-                        min_rect_size=self.min_rect_size,
-                    )
-                )
-            found = None
-            for fill in probes:
-                if fill is not None and len(fill.placed) == target:
-                    found = fill
-                    break
+            found = self._probe_fill(pool, spec, target)
             if found is None:
                 # The heuristics gave up on a pool that still fits by area:
                 # exactly the >=94% pack the audit measured them failing on.
@@ -908,7 +946,8 @@ def _sequential_fill(
                 continue
             if spec.count is not None and counts.get(idx, 0) >= spec.count:
                 continue
-            fill = greedy_fill(remaining, spec, params, config, min_rect_size)
+            backend = rust_backend if rust_backend.available() else _py_constructors
+            fill = backend.greedy_fill(remaining, spec, params, config, min_rect_size)
             if fill is not None:
                 counts[idx] = counts.get(idx, 0) + 1
                 break

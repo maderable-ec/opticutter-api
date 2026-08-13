@@ -1,0 +1,17 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "opticutter-core"
+version = "0.1.0"
+description = "Guillotine packing kernel for the Cutter optimizer (Rust/PyO3)"
+requires-python = ">=3.11"
+classifiers = ["Programming Language :: Rust"]
+
+[tool.maturin]
+# The module is imported as `opticutter_core` and lives in site-packages, never
+# inside the bind-mounted source tree (`make dev` / `make benchmark` mount the
+# repo over /src and would shadow a .so built there).
+module-name = "opticutter_core"
+features = ["pyo3/extension-module"]
