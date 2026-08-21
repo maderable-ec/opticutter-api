@@ -792,7 +792,7 @@ class ProformaService:
                 0.8 * inch,
                 0.55 * inch,
                 1.25 * inch,
-                # "Cantos" now carries the design family too ("2L1C CS CSH" =
+                # "Cantos" now carries the alias too ("2L1C CS CSH" =
                 # 58pt at 9pt Helvetica, against 12pt of cell padding), so it
                 # takes 0.15" from the flexible "Etiqueta" column for headroom.
                 1.25 * inch,
@@ -1240,7 +1240,7 @@ def pdf_response(
 def _edge_banding_notation(req: dict) -> str:
     """Workshop notation for a piece's edge banding (``2L1C CS CSH``), or ``-`` if none.
 
-    ``band_type``/``family`` are frozen into the requirement at compute time
+    ``band_type``/``alias`` are frozen into the requirement at compute time
     (see ``OptimizationService._dump_requirement``); snapshots predating either
     simply render without that part.
     """
@@ -1248,7 +1248,7 @@ def _edge_banding_notation(req: dict) -> str:
     if not spec:
         return "-"
     text = edge_banding_notation(
-        spec.get("sides") or [], spec.get("band_type"), spec.get("family")
+        spec.get("sides") or [], spec.get("band_type"), spec.get("alias")
     )
     return text or "-"
 

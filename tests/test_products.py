@@ -1,5 +1,8 @@
 """Tests for the products module (multi-type catalog: CRUD + per-type validation)."""
 
+from src.modules.orders.schemas import OrderCreate
+from src.modules.orders.service import OrderService
+
 
 def _board_payload(code="MEL18", name="Melamina 18mm"):
     return {
@@ -87,6 +90,309 @@ def test_create_duplicate_name_returns_409(client):
 
 def test_get_missing_product_returns_404(client):
     assert client.get("/api/v1/products/999999").status_code == 404
+
+
+# --------------------------------------------------------------------------- #
+# subtype
+# --------------------------------------------------------------------------- #
+def test_subtype_round_trips_and_filters(client):
+    payload = _board_payload()
+    payload["attributes"]["subtype"] = "mdp"  # case-insensitive input
+    created = client.post("/api/v1/products/", json=payload).json()["data"]
+    assert created["attributes"]["subtype"] == "MDP"
+
+    other = client.post(
+        "/api/v1/products/", json=_board_payload(code="MEL15", name="Otro")
+    ).json()["data"]
+    assert other["attributes"].get("subtype") is None
+
+    matched = client.get("/api/v1/products/?subtype=mdp").json()["data"]
+    assert [p["id"] for p in matched] == [created["id"]]
+
+    empty = client.get("/api/v1/products/?subtype=osb").json()["data"]
+    assert empty == []
+
+
+def test_edge_banding_subtype_round_trips(client):
+    payload = _edge_banding_payload()
+    payload["attributes"]["subtype"] = "Canto Solido"
+    created = client.post("/api/v1/products/", json=payload).json()["data"]
+    assert created["attributes"]["subtype"] == "Canto Solido"
+
+
+# --------------------------------------------------------------------------- #
+# alias (edge banding only)
+# --------------------------------------------------------------------------- #
+def test_edge_banding_alias_is_independent_of_family(client):
+    payload = _edge_banding_payload()
+    payload["attributes"]["family"] = "Cashmere"
+    payload["attributes"]["alias"] = "CSH"
+    created = client.post("/api/v1/products/", json=payload).json()["data"]
+    assert created["attributes"]["family"] == "Cashmere"
+    assert created["attributes"]["alias"] == "CSH"
+
+
+def test_board_has_no_alias_attribute(client):
+    """``alias`` isn't a `BoardAttributes` field — sending it is silently dropped."""
+    payload = _board_payload()
+    payload["attributes"]["alias"] = "CSH"
+    created = client.post("/api/v1/products/", json=payload).json()["data"]
+    assert "alias" not in created["attributes"]
+
+
+# --------------------------------------------------------------------------- #
+# External catalog CSV sync
+# --------------------------------------------------------------------------- #
+_SYNC_HEADER = (
+    "CODIGO;ARTICULO;MARCA;TIPO;CATEGORIA;MED;GRUPO;IVA;UNI;CAJ;"
+    "P.Comp;Tot. Inv;Util%;P.venta;P.venta2;P.Venta3;OBS."
+)
+
+
+def _sync_csv(*data_rows):
+    lines = [
+        "Reporte de inventarios;;;;;;;;;;;;;;;;",
+        "Para el día jueves, 20 de agosto del 2026;;;;;;;;;;;;;;;;",
+        ";;;;;;;;;;;;;;;;",
+        _SYNC_HEADER,
+        *data_rows,
+        ";;;;;;;;;;TOTAL:;0;;;;;",
+    ]
+    return "\n".join(lines).encode("utf-8")
+
+
+_BOARD_ROW = (
+    "1033;MDP RH ROBLE BARROCO AMBAR (2.07X2.80)M-15MM;KRONOSPAN;MDP;TABLEROS;"
+    "Uni;MDP MELAMINA RH;15%;60;0;10.82;649.36;35%;14.65;13.47;13.47;CSH - Cashmere"
+)
+_EDGE_ROW = (
+    "57;TAPACANTO IBIZA 19X0.40MM;HF;TAPACANTOS;TAPACANTOS;Uni;CANTO MADERADO;"
+    "15%;100;0;0.18;18;93%;0.35;0.35;0.35;CSH - Cashmere"
+)
+_MEDIO_ROW = (
+    "9999;MDP RH IBIZA (2.15X2.44)M-15MM (MEDIO);DURATEX;MDP;TABLEROS;Uni;"
+    "MDP MELAMINA RH;15%;1;0;31.5;31.5;40%;44.13;42.39;42.39;"
+)
+
+
+def _sync(client, csv_bytes, filename="catalog.csv"):
+    return client.post(
+        "/api/v1/products/sync",
+        files={"file": (filename, csv_bytes, "text/csv")},
+    )
+
+
+def test_sync_happy_path_creates_board_and_edge_banding(client):
+    resp = _sync(client, _sync_csv(_BOARD_ROW, _EDGE_ROW))
+    assert resp.status_code == 200, resp.json()
+    data = resp.json()["data"]
+    assert data == {
+        "created": 2,
+        "updated": 0,
+        "deactivated": 0,
+        "deleted": 0,
+        "skippedMedio": 0,
+    }
+
+    listed = client.get("/api/v1/products/?search=ROBLE BARROCO").json()["data"]
+    assert len(listed) == 1
+    board = listed[0]
+    assert board["type"] == "board"
+    assert board["code"] == "1033"
+    assert board["externalCode"] == "TABLEROS:1033"
+    # P.venta (14.65) comes without IVA; the catalog stores the price with the
+    # row's own IVA rate (15%) already included: 14.65 * 1.15 = 16.8475 -> 16.85.
+    assert board["price"] == 16.85
+    assert board["attributes"]["width"] == 2070
+    assert board["attributes"]["height"] == 2800
+    assert board["attributes"]["thickness"] == 15
+    assert board["attributes"]["subtype"] == "MDP"
+    assert board["attributes"]["family"] == "Cashmere"
+    assert "alias" not in board["attributes"]
+
+    eb = client.get("/api/v1/products/?search=IBIZA").json()["data"][0]
+    assert eb["attributes"]["width"] == 19
+    assert eb["attributes"]["thickness"] == 0.40
+    assert eb["attributes"]["subtype"] == "Canto Maderado"
+    assert eb["attributes"]["family"] == "Cashmere"
+    assert eb["attributes"]["alias"] == "CSH"
+    # No band-type column in the vendor export: inferred from thickness (<1mm = Soft).
+    assert eb["attributes"]["bandType"] == "Soft"
+
+
+def test_sync_infers_hard_band_type_from_thickness(client):
+    hard_row = _EDGE_ROW.replace("19X0.40MM", "40X1.5MM")
+    _sync(client, _sync_csv(hard_row))
+    eb = client.get("/api/v1/products/?search=IBIZA").json()["data"][0]
+    assert eb["attributes"]["thickness"] == 1.5
+    assert eb["attributes"]["bandType"] == "Hard"
+
+
+def test_sync_skips_medio_row(client):
+    resp = _sync(client, _sync_csv(_MEDIO_ROW))
+    assert resp.status_code == 200
+    assert resp.json()["data"] == {
+        "created": 0,
+        "updated": 0,
+        "deactivated": 0,
+        "deleted": 0,
+        "skippedMedio": 1,
+    }
+    assert client.get("/api/v1/products/").json()["data"] == []
+
+
+def test_sync_rejects_duplicate_codigo_with_zero_writes(client):
+    dup_row = _EDGE_ROW.replace(
+        "TAPACANTO IBIZA 19X0.40MM", "TAPACANTO KALA WHITE 19X1.5MM"
+    )
+    resp = _sync(client, _sync_csv(_EDGE_ROW, dup_row))
+    assert resp.status_code == 422
+    errors = resp.json()["errors"]
+    assert any("duplicado" in e["message"] for e in errors)
+    assert client.get("/api/v1/products/").json()["data"] == []
+
+
+def test_sync_rejects_codigo_shared_between_board_and_edge_banding(client):
+    """`code` is the bare CODIGO (not namespaced by categoría), so a board and
+    an edge banding sharing the same CODIGO would collide on `code` even
+    though their `external_code`s differ ("TABLEROS:1033" vs "TAPACANTOS:1033")."""
+    clashing_edge_row = _EDGE_ROW.replace("57;", "1033;", 1)
+    resp = _sync(client, _sync_csv(_BOARD_ROW, clashing_edge_row))
+    assert resp.status_code == 422
+    errors = resp.json()["errors"]
+    assert any("duplicado" in e["message"] for e in errors)
+    assert client.get("/api/v1/products/").json()["data"] == []
+
+
+def test_sync_rejects_unparseable_dimensions_with_zero_writes(client):
+    bad_row = (
+        "2026;PLYWOOD ESTANDAR (244X122)X4MM;PELIKANO;PLYWOOD;TABLEROS;Uni;"
+        "ESTANDAR;15%;29;0;8.82;255.79;25%;11.09;11.09;11.09;"
+    )
+    resp = _sync(client, _sync_csv(_BOARD_ROW, bad_row))
+    assert resp.status_code == 422
+    errors = resp.json()["errors"]
+    assert any("medidas" in e["message"] for e in errors)
+    assert client.get("/api/v1/products/").json()["data"] == []
+
+
+def test_sync_reruns_update_instead_of_duplicating(client):
+    first = _sync(client, _sync_csv(_BOARD_ROW)).json()["data"]
+    assert first["created"] == 1
+
+    changed_row = _BOARD_ROW.replace("14.65;13.47;13.47", "20.00;19.00;19.00")
+    second = _sync(client, _sync_csv(changed_row)).json()["data"]
+    assert second == {
+        "created": 0,
+        "updated": 1,
+        "deactivated": 0,
+        "deleted": 0,
+        "skippedMedio": 0,
+    }
+
+    listed = client.get("/api/v1/products/?search=ROBLE BARROCO").json()["data"]
+    assert len(listed) == 1
+    assert listed[0]["price"] == 23.0  # 20.00 * 1.15 IVA
+
+
+_OTHER_BOARD_ROW = (
+    _BOARD_ROW.replace("1033", "9001")
+    .replace("ROBLE BARROCO AMBAR (2.07X2.80)M-15MM", "OTRO DISEÑO (1.83X2.44)M-15MM")
+    .replace("CSH - Cashmere", "")
+)
+
+
+def test_sync_deletes_unused_products_missing_from_a_later_upload(client):
+    """A synced product with no order referencing it is deleted outright,
+    not just deactivated, when it drops out of a later upload."""
+    _sync(client, _sync_csv(_BOARD_ROW, _EDGE_ROW))
+    # Only the edge-banding row appears this time; the board type isn't
+    # touched at all (no TABLEROS rows in this upload).
+    resp = _sync(client, _sync_csv(_EDGE_ROW))
+    assert resp.json()["data"] == {
+        "created": 0,
+        "updated": 1,
+        "deactivated": 0,
+        "deleted": 0,
+        "skippedMedio": 0,
+    }
+
+    # A file that DOES include the board type, but omits this specific board
+    # (never referenced by any order), deletes it outright.
+    resp = _sync(client, _sync_csv(_OTHER_BOARD_ROW))
+    assert resp.status_code == 200
+    assert resp.json()["data"]["created"] == 1
+    assert resp.json()["data"]["deactivated"] == 0
+    assert resp.json()["data"]["deleted"] == 1
+
+    assert client.get("/api/v1/products/?search=ROBLE BARROCO").json()["data"] == []
+
+
+def _mint_order_referencing(client, db_session, board_id, eb_id):
+    """Creates a real order whose cutting plan durably references ``board_id``
+    (via order_boards/order_pieces) and ``eb_id`` (via order_lines' billed
+    edge-banding), so ``_is_product_in_use`` finds it."""
+    c = client.post(
+        "/api/v1/clients/",
+        json={
+            "identifier": "0991112233",
+            "firstName": "Ada",
+            "lastName": "Lovelace",
+            "phone": "0991112233",
+        },
+    ).json()["data"]
+    return OrderService(db_session).create(
+        OrderCreate.model_validate(
+            {
+                "clientId": c["id"],
+                "branchId": 1,
+                "materials": [
+                    {"key": "b1", "source": "catalog", "productId": board_id}
+                ],
+                "requirements": [
+                    {
+                        "priority": 0,
+                        "height": 500,
+                        "width": 1000,
+                        "quantity": 1,
+                        "materialKey": "b1",
+                        "label": "Costado",
+                        "edgeBanding": {"productId": eb_id, "sides": ["left"]},
+                    }
+                ],
+            }
+        )
+    )
+
+
+def test_sync_deactivates_products_in_use_missing_from_a_later_upload(
+    client, db_session
+):
+    """A synced product an order actually references gets deactivated instead
+    of deleted, same as before this feature — the FK would reject the delete."""
+    _sync(client, _sync_csv(_BOARD_ROW, _EDGE_ROW))
+    board = client.get("/api/v1/products/?search=ROBLE BARROCO").json()["data"][0]
+    eb = client.get("/api/v1/products/?search=IBIZA").json()["data"][0]
+    _mint_order_referencing(client, db_session, board["id"], eb["id"])
+
+    resp = _sync(client, _sync_csv(_OTHER_BOARD_ROW))
+    assert resp.status_code == 200
+    assert resp.json()["data"]["deactivated"] == 1
+    assert resp.json()["data"]["deleted"] == 0
+
+    original = client.get(f"/api/v1/products/{board['id']}").json()["data"]
+    assert original["isActive"] is False
+
+
+def test_sync_never_deactivates_a_hand_created_product(client):
+    manual = client.post("/api/v1/products/", json=_board_payload()).json()["data"]
+
+    resp = _sync(client, _sync_csv(_BOARD_ROW))
+    assert resp.status_code == 200
+    assert resp.json()["data"]["deactivated"] == 0
+
+    still_active = client.get(f"/api/v1/products/{manual['id']}").json()["data"]
+    assert still_active["isActive"] is True
 
 
 def test_list_search_and_filter_by_type(client):

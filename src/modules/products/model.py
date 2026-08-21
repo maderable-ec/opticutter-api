@@ -17,7 +17,6 @@ class ProductType(str, Enum):
 
     BOARD = "board"  # melamine board (the optimizer's only input)
     EDGE_BANDING = "edge_banding"  # edge banding (future)
-    HARDWARE = "hardware"  # hardware (future)
 
 
 class ProductModel(TimestampMixin, AuditMixin, Base):
@@ -34,6 +33,11 @@ class ProductModel(TimestampMixin, AuditMixin, Base):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     type: Mapped[str] = mapped_column(String(32), index=True)
     code: Mapped[str] = mapped_column(String(32), unique=True)
+    # Set only by the external catalog sync (``products/catalog_sync.py``), as
+    # "{CATEGORIA}:{CODIGO}" (e.g. "TABLEROS:1033") — never exposed on the
+    # manual create/update schemas. Its presence is what marks a product as
+    # sync-managed vs. hand-created, which drives the sync's deactivation pass.
+    external_code: Mapped[Optional[str]] = mapped_column(String(64), unique=True)
     name: Mapped[str] = mapped_column(String(128), unique=True)
     description: Mapped[Optional[str]] = mapped_column(String(256))
     price: Mapped[float] = mapped_column(Float)

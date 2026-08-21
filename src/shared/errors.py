@@ -5,7 +5,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from src.shared.exceptions import AppError
+from src.shared.exceptions import AppError, BulkValidationError
 from src.shared.responses import ErrorDetail, ErrorResponse
 
 logger = logging.getLogger(__name__)
@@ -43,6 +43,16 @@ def register_exception_handlers(app: FastAPI) -> None:
     async def handle_app_error(request: Request, exc: AppError) -> JSONResponse:
         detail = ErrorDetail(code=exc.code, message=exc.detail, field=exc.field)
         return _error_response(exc.status_code, [detail])
+
+    @app.exception_handler(BulkValidationError)
+    async def handle_bulk_validation_error(
+        request: Request, exc: BulkValidationError
+    ) -> JSONResponse:
+        details = [
+            ErrorDetail(code=exc.code, message=e["message"], field=e.get("field"))
+            for e in exc.errors
+        ]
+        return _error_response(exc.status_code, details)
 
     @app.exception_handler(RequestValidationError)
     async def handle_validation_error(

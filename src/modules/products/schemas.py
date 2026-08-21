@@ -54,8 +54,22 @@ class ProductResponse(CamelModel):
     id: int
     type: ProductType
     code: str
+    external_code: Optional[str] = Field(
+        None,
+        description="Set by the external catalog sync; null for hand-created products",
+    )
     name: str
     description: Optional[str] = None
     price: float
     is_active: bool
     attributes: dict
+
+
+class ProductSyncResult(CamelModel):
+    """Summary of an external catalog CSV sync."""
+
+    created: int
+    updated: int
+    deactivated: int
+    deleted: int
+    skipped_medio: int

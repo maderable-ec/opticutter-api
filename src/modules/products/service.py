@@ -62,8 +62,9 @@ class ProductService(CRUDService[ProductModel, ProductBase, ProductUpdate]):
         limit: int = 20,
         offset: int = 0,
         is_active: Optional[bool] = None,
+        subtype: Optional[str] = None,
     ) -> Tuple[List[ProductModel], int]:
-        """Lists products filtering by type, active flag and/or text (code/name).
+        """Lists products filtering by type, active flag, subtype and/or text.
 
         Ordered by ``name`` (unique, so the order is total) to make paging
         stable: without it Postgres may repeat or skip rows across pages.
@@ -73,6 +74,10 @@ class ProductService(CRUDService[ProductModel, ProductBase, ProductUpdate]):
             query = query.filter(ProductModel.type == ProductType(type).value)
         if is_active is not None:
             query = query.filter(ProductModel.is_active.is_(is_active))
+        if subtype:
+            query = query.filter(
+                ProductModel.attributes["subtype"].as_string().ilike(subtype)
+            )
         if search:
             pattern = f"%{search}%"
             query = query.filter(

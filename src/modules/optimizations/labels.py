@@ -12,19 +12,19 @@ BAND_TYPE_LABEL = {"Soft": "Suave", "Hard": "Duro"}
 def edge_banding_notation(
     sides: Iterable[str],
     band_type: Optional[str] = None,
-    family: Optional[str] = None,
+    alias: Optional[str] = None,
 ) -> str:
     """Workshop notation for the banded sides: ``'2L1C CS CSH'``.
 
     Three parts, each omitted when unknown: the sides count, the edge **type**
-    (``CS``/``CD``) and the banding's design **family** (``CSH``). The family is
+    (``CS``/``CD``) and the banding's short **alias** (``CSH``). The alias is
     what tells two banded designs apart on the dispatch sheet, the only document
     without a banding summary table.
 
-    ``family`` doubles as the board↔tapacanto coordination key, so it's already
-    on the product and already user-editable — keep it short (a 3-letter design
-    code) precisely because it gets printed here. It's uppercased for the tag,
-    which is free: the coordination match is case-insensitive anyway.
+    ``alias`` is a separate, purely cosmetic field (max 20 chars) — it plays no
+    role in board↔tapacanto coordination, which still uses the product's
+    ``family`` attribute. It's uppercased for the tag, which is free: nothing
+    downstream depends on its case.
 
     Classifies by the **nominal** side measurement: ``left``/``right`` are the
     height sides (first dimension) → ``L`` (largo/long); ``top``/``bottom`` are
@@ -52,6 +52,6 @@ def edge_banding_notation(
             parts += f"{short_count}C"
     if not parts:
         return ""
-    tag = (family or "").strip().upper()
+    tag = (alias or "").strip().upper()
     suffixes = [s for s in (_BAND_TYPE_ABBR.get(band_type), tag) if s]
     return " ".join([parts, *suffixes])

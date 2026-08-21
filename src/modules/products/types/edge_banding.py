@@ -36,6 +36,30 @@ class BandType(str, Enum):
         return None
 
 
+class EdgeBandingSubtype(str, Enum):
+    """Edge banding material subtype (closed set, case-insensitive input).
+
+    Mirrors the values the external inventory system uses in its own ``GRUPO``
+    column, so the catalog sync (``products/catalog_sync.py``) can map straight
+    into this enum without a translation table.
+    """
+
+    CANTO_MADERADO = "Canto Maderado"
+    CANTO_SOLIDO = "Canto Solido"
+    CANTO_GLOSS = "Canto Gloss"
+    CANTO_MATH_SOFT = "Canto Math Soft"
+    CANTO_MADERA = "Canto Madera"
+
+    @classmethod
+    def _missing_(cls, value):
+        if isinstance(value, str):
+            norm = value.strip().lower()
+            for member in cls:
+                if member.value.lower() == norm:
+                    return member
+        return None
+
+
 class EdgeBandingAttributes(CamelModel):
     """Attributes of a PVC edge banding.
 
@@ -57,8 +81,20 @@ class EdgeBandingAttributes(CamelModel):
     length: Optional[PositiveInt] = Field(
         None, description="Roll length in mm (if applicable)"
     )
+    subtype: Optional[EdgeBandingSubtype] = Field(
+        None, description="Material subtype (Canto Maderado/Solido/Gloss/...)"
+    )
     family: Optional[str] = Field(
         None,
         max_length=64,
         description="Familia/diseño para coordinar con el tablero (debe coincidir con el tablero)",
+    )
+    alias: Optional[str] = Field(
+        None,
+        max_length=20,
+        description=(
+            "Código corto impreso en la notación de despiece/documentos. "
+            "Independiente de `family`, que sigue siendo la clave de "
+            "coordinación tablero↔tapacanto y nunca se imprime."
+        ),
     )
