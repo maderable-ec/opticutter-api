@@ -93,11 +93,11 @@ redis-flush: ## Clears the whole Redis cache (FLUSHALL)
 run-local: ## Runs the application locally (requires PostgreSQL on localhost:5433)
 	ENVIRONMENT=local DATABASE_URL=postgresql://cutter:cutter@localhost:5433/cutter_db python main.py
 
-seed-boards: ## Seeds/updates boards and edge bandings into local PostgreSQL (5433). Use reset=1 for a hard rebuild.
-	DATABASE_URL=postgresql://cutter:cutter@localhost:5433/cutter_db .venv/bin/python scripts/seed_boards.py $(if $(reset),--reset)
-
-seed-admin: ## Creates the first administrator from ADMIN_EMAIL/ADMIN_PASSWORD in .env
+seed-admin: ## Creates the first administrator from ADMIN_EMAIL in .env; prompts for the password
 	.venv/bin/python scripts/seed_admin.py
+
+seed-settings: ## Seeds branches and company/cutting settings into local PostgreSQL (5433)
+	DATABASE_URL=postgresql://cutter:cutter@localhost:5433/cutter_db .venv/bin/python scripts/seed_settings.py
 
 seed-demo: ## Seeds demo data (branches/users/clients/pre-orders/orders by status) into local PostgreSQL (5433). Use reset=1 to regenerate.
 	DATABASE_URL=postgresql://cutter:cutter@localhost:5433/cutter_db REDIS_URL=redis://localhost:6379/0 .venv/bin/python scripts/seed_demo.py $(if $(reset),--reset)
