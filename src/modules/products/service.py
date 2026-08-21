@@ -1,6 +1,7 @@
 from typing import List, Optional, Tuple
 
 from fastapi import Depends
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from src.modules.products.model import ProductModel, ProductType
@@ -58,25 +59,32 @@ class ProductService(CRUDService[ProductModel, ProductBase, ProductUpdate]):
     def search_paginated(
         self,
         search: Optional[str] = None,
-        type: Optional[ProductType] = None,
+        type: Optional[List[ProductType]] = None,
         limit: int = 20,
         offset: int = 0,
         is_active: Optional[bool] = None,
-        subtype: Optional[str] = None,
+        subtype: Optional[List[str]] = None,
     ) -> Tuple[List[ProductModel], int]:
         """Lists products filtering by type, active flag, subtype and/or text.
+
+        ``type`` and ``subtype`` each accept multiple values (OR within the
+        field, AND across fields) for a multi-select filter.
 
         Ordered by ``name`` (unique, so the order is total) to make paging
         stable: without it Postgres may repeat or skip rows across pages.
         """
         query = self.db.query(ProductModel)
-        if type is not None:
-            query = query.filter(ProductModel.type == ProductType(type).value)
+        if type:
+            query = query.filter(
+                ProductModel.type.in_([ProductType(t).value for t in type])
+            )
         if is_active is not None:
             query = query.filter(ProductModel.is_active.is_(is_active))
         if subtype:
             query = query.filter(
-                ProductModel.attributes["subtype"].as_string().ilike(subtype)
+                func.lower(ProductModel.attributes["subtype"].as_string()).in_(
+                    [s.lower() for s in subtype]
+                )
             )
         if search:
             pattern = f"%{search}%"

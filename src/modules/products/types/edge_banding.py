@@ -36,19 +36,35 @@ class BandType(str, Enum):
         return None
 
 
+# The external inventory system's own ``GRUPO`` column is in Spanish; these
+# normalize its text to the enum's canonical English value (see
+# ``EdgeBandingSubtype._missing_``), same pattern as ``BandType``'s Spanish
+# aliases.
+_EDGE_BANDING_SUBTYPE_SPANISH_ALIASES = {
+    "canto maderado": "Wood Grain",
+    "canto solido": "Solid",
+    "canto gloss": "Gloss",
+    "canto math soft": "Matte Soft",
+    "canto madera": "Wood",
+}
+
+
 class EdgeBandingSubtype(str, Enum):
     """Edge banding material subtype (closed set, case-insensitive input).
 
-    Mirrors the values the external inventory system uses in its own ``GRUPO``
-    column, so the catalog sync (``products/catalog_sync.py``) can map straight
-    into this enum without a translation table.
+    Canonical values are English. The catalog sync (``products/catalog_sync.py``)
+    feeds this enum the external inventory system's raw ``GRUPO`` text, which
+    is in Spanish (e.g. ``"Canto Maderado"``); ``_missing_`` accepts that text
+    case-insensitively via ``_EDGE_BANDING_SUBTYPE_SPANISH_ALIASES`` and
+    normalizes it to the canonical value, so the sync needs no translation
+    table of its own.
     """
 
-    CANTO_MADERADO = "Canto Maderado"
-    CANTO_SOLIDO = "Canto Solido"
-    CANTO_GLOSS = "Canto Gloss"
-    CANTO_MATH_SOFT = "Canto Math Soft"
-    CANTO_MADERA = "Canto Madera"
+    WOOD_GRAIN = "Wood Grain"
+    SOLID = "Solid"
+    GLOSS = "Gloss"
+    MATTE_SOFT = "Matte Soft"
+    WOOD = "Wood"
 
     @classmethod
     def _missing_(cls, value):
@@ -57,6 +73,8 @@ class EdgeBandingSubtype(str, Enum):
             for member in cls:
                 if member.value.lower() == norm:
                     return member
+            if norm in _EDGE_BANDING_SUBTYPE_SPANISH_ALIASES:
+                return cls(_EDGE_BANDING_SUBTYPE_SPANISH_ALIASES[norm])
         return None
 
 

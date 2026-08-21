@@ -5,25 +5,37 @@ from pydantic import Field, PositiveInt
 
 from src.shared.schemas import CamelModel
 
+# The external inventory system's own ``TIPO`` column is in Spanish for some
+# values; these normalize its text to the enum's canonical English value (see
+# ``BoardSubtype._missing_``), same pattern as ``BandType``'s Spanish aliases.
+_BOARD_SUBTYPE_SPANISH_ALIASES = {
+    "pino": "Pine",
+    "madera natural": "Natural Wood",
+    "enchapado": "Veneer",
+}
+
 
 class BoardSubtype(str, Enum):
     """Board material subtype (closed set, case-insensitive input).
 
-    Mirrors the values the external inventory system uses in its own ``TIPO``
-    column, so the catalog sync (``products/catalog_sync.py``) can map straight
-    into this enum without a translation table.
+    Canonical values are English. The catalog sync (``products/catalog_sync.py``)
+    feeds this enum the external inventory system's raw ``TIPO`` text, which is
+    partly in Spanish (e.g. ``"Pino"``, ``"Enchapado"``); ``_missing_`` accepts
+    that text case-insensitively via ``_BOARD_SUBTYPE_SPANISH_ALIASES`` and
+    normalizes it to the canonical value, so the sync needs no translation
+    table of its own.
     """
 
     MDP = "MDP"
     MDF = "MDF"
     HDF = "HDF"
     PLYWOOD = "Plywood"
-    PINO = "Pino"
-    MADERA_NATURAL = "Madera Natural"
+    PINE = "Pine"
+    NATURAL_WOOD = "Natural Wood"
     HIGH_GLOSS = "High Gloss"
     MATH_SOFT = "Math Soft"
     OSB = "OSB"
-    ENCHAPADO = "Enchapado"
+    VENEER = "Veneer"
 
     @classmethod
     def _missing_(cls, value):
@@ -32,6 +44,8 @@ class BoardSubtype(str, Enum):
             for member in cls:
                 if member.value.lower() == norm:
                     return member
+            if norm in _BOARD_SUBTYPE_SPANISH_ALIASES:
+                return cls(_BOARD_SUBTYPE_SPANISH_ALIASES[norm])
         return None
 
 

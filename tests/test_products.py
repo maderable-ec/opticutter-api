@@ -113,11 +113,37 @@ def test_subtype_round_trips_and_filters(client):
     assert empty == []
 
 
+def test_board_subtype_spanish_aliases_normalize_to_english(client):
+    """The vendor's Spanish TIPO text (e.g. from catalog_sync) must still
+    resolve, normalized to the canonical English value."""
+    payload = _board_payload(code="PIN2", name="Pino board")
+    payload["attributes"]["subtype"] = "Pino"
+    created = client.post("/api/v1/products/", json=payload).json()["data"]
+    assert created["attributes"]["subtype"] == "Pine"
+
+    payload = _board_payload(code="ENC1", name="Enchapado board")
+    payload["attributes"]["subtype"] = "Enchapado"
+    created = client.post("/api/v1/products/", json=payload).json()["data"]
+    assert created["attributes"]["subtype"] == "Veneer"
+
+
 def test_edge_banding_subtype_round_trips(client):
     payload = _edge_banding_payload()
     payload["attributes"]["subtype"] = "Canto Solido"
     created = client.post("/api/v1/products/", json=payload).json()["data"]
-    assert created["attributes"]["subtype"] == "Canto Solido"
+    assert created["attributes"]["subtype"] == "Solid"
+
+
+def test_edge_banding_subtype_spanish_aliases_normalize_to_english(client):
+    payload = _edge_banding_payload(code="TAP23", name="Tapacanto madera")
+    payload["attributes"]["subtype"] = "Canto Madera"
+    created = client.post("/api/v1/products/", json=payload).json()["data"]
+    assert created["attributes"]["subtype"] == "Wood"
+
+    payload = _edge_banding_payload(code="TAP24", name="Tapacanto gloss")
+    payload["attributes"]["subtype"] = "Canto Gloss"
+    created = client.post("/api/v1/products/", json=payload).json()["data"]
+    assert created["attributes"]["subtype"] == "Gloss"
 
 
 # --------------------------------------------------------------------------- #
@@ -213,7 +239,7 @@ def test_sync_happy_path_creates_board_and_edge_banding(client):
     eb = client.get("/api/v1/products/?search=IBIZA").json()["data"][0]
     assert eb["attributes"]["width"] == 19
     assert eb["attributes"]["thickness"] == 0.40
-    assert eb["attributes"]["subtype"] == "Canto Maderado"
+    assert eb["attributes"]["subtype"] == "Wood Grain"
     assert eb["attributes"]["family"] == "Cashmere"
     assert eb["attributes"]["alias"] == "CSH"
     # No band-type column in the vendor export: inferred from thickness (<1mm = Soft).
@@ -413,6 +439,39 @@ def test_list_search_and_filter_by_type(client):
     ).json()
     assert [p["code"] for p in found["data"]] == ["MDF15"]
     assert found["meta"]["pagination"]["total"] == 1
+
+
+def test_list_filter_by_multiple_types(client):
+    """Repeating the ``type`` param (multi-select) OR-matches within the field."""
+    client.post("/api/v1/products/", json=_board_payload(code="MEL18", name="Blanco"))
+    client.post("/api/v1/products/", json=_edge_banding_payload())
+
+    both = client.get(
+        "/api/v1/products/", params={"type": ["board", "edge_banding"]}
+    ).json()
+    assert both["meta"]["pagination"]["total"] == 2
+    assert {p["type"] for p in both["data"]} == {"board", "edge_banding"}
+
+    # A single repeated value still behaves like the old single-value filter.
+    boards = client.get("/api/v1/products/", params={"type": ["board"]}).json()
+    assert boards["meta"]["pagination"]["total"] == 1
+
+
+def test_list_filter_by_multiple_subtypes(client):
+    """Repeating the ``subtype`` param (multi-select) OR-matches within the field."""
+    mdp = _board_payload(code="MEL18", name="Blanco")
+    mdp["attributes"]["subtype"] = "MDP"
+    client.post("/api/v1/products/", json=mdp)
+
+    osb = _board_payload(code="MEL19", name="Beige")
+    osb["attributes"]["subtype"] = "OSB"
+    client.post("/api/v1/products/", json=osb)
+
+    client.post("/api/v1/products/", json=_board_payload(code="MEL20", name="Gris"))
+
+    matched = client.get("/api/v1/products/", params={"subtype": ["mdp", "osb"]}).json()
+    assert matched["meta"]["pagination"]["total"] == 2
+    assert {p["code"] for p in matched["data"]} == {"MEL18", "MEL19"}
 
 
 def test_list_is_ordered_by_name_and_pages_do_not_overlap(client):
