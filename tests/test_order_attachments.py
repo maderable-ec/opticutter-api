@@ -337,18 +337,34 @@ def _all_text(pdf_bytes):
 
 def test_consolidated_has_diagram_only_no_repeated_lists(client, db_session):
     """The despiece section is the gráfico only: the order carries the piece/board
-    lists, so the production-sheet lists must NOT reappear in the packet."""
-    order = _mint_order(client, db_session, identifier="0990000023", code="MELDIAG")
-    text = _all_text(client.get(f"/api/v1/orders/{order['id']}/consolidated").content)
+    lists, so the production-sheet lists must NOT reappear in the packet.
 
-    # Order + diagram + dispatch are all present.
+    The diagram pages carry no heading of their own either — they are bare
+    landscape sheets, one pattern each — so they are identified here by their
+    orientation and embedded image rather than by a title.
+    """
+    from pypdf import PdfReader
+
+    order = _mint_order(client, db_session, identifier="0990000023", code="MELDIAG")
+    content = client.get(f"/api/v1/orders/{order['id']}/consolidated").content
+    text = _all_text(content)
+
+    # The two documents that do carry a title are present.
     assert "ORDEN DE PEDIDO" in text
-    assert "DIAGRAMA DE DESPIECE" in text
-    assert "DISPOSICIÓN DE CORTES" in text
     assert "HOJA DE DESPACHO" in text
     # The production sheet's repeated lists are gone (they live in the order).
     assert "LISTA DE CORTE" not in text
     assert "TABLEROS A UTILIZAR" not in text
+
+    pages = PdfReader(io.BytesIO(content)).pages
+    diagram_pages = [
+        page
+        for page in pages
+        if float(page.mediabox.width) > float(page.mediabox.height)
+    ]
+    # At least one landscape sheet, and every one of them holds a diagram.
+    assert diagram_pages
+    assert all(len(page.images) for page in diagram_pages)
 
 
 def test_consolidated_pdf_includes_attachments(client, db_session):

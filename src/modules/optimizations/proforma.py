@@ -10,18 +10,21 @@ from fastapi.responses import StreamingResponse
 from pypdf import PdfReader, PdfWriter
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT, TA_RIGHT
-from reportlab.lib.pagesizes import A4
+from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 from reportlab.platypus import (
+    BaseDocTemplate,
+    Frame,
     HRFlowable,
     Image,
     KeepTogether,
+    NextPageTemplate,
     PageBreak,
+    PageTemplate,
     Paragraph,
-    SimpleDocTemplate,
     Spacer,
     Table,
     TableStyle,
@@ -77,6 +80,22 @@ PAGE_WIDTH, PAGE_HEIGHT = A4
 LEFT_MARGIN = RIGHT_MARGIN = 0.5 * inch
 CONTENT_WIDTH = PAGE_WIDTH - LEFT_MARGIN - RIGHT_MARGIN
 
+TOP_MARGIN = 0.4 * inch
+BOTTOM_MARGIN = 0.45 * inch
+
+# Cut diagrams print on landscape sheets: the PNG is already drawn with the board
+# rotated 90 degrees (see ``visualization.generate_layout_image``), so a portrait
+# page leaves ~60% of the paper blank. Landscape gives the same diagram ~2.2x the
+# area without spending an extra sheet.
+LANDSCAPE_SIZE = landscape(A4)
+LAND_WIDTH, LAND_HEIGHT = LANDSCAPE_SIZE
+LAND_CONTENT_WIDTH = LAND_WIDTH - LEFT_MARGIN - RIGHT_MARGIN
+# ``Frame`` insets its content by 6pt on every side (reportlab's default, which
+# ``SimpleDocTemplate`` also used), so the height a flowable can actually claim is
+# 12pt short of the margin box.
+FRAME_PADDING = 6
+LAND_FRAME_HEIGHT = LAND_HEIGHT - TOP_MARGIN - BOTTOM_MARGIN - 2 * FRAME_PADDING
+
 ASSETS_DIR = Path(__file__).parent / "assets"
 LOGO_PATH = ASSETS_DIR / "header.jpg"
 WATERMARK_PATH = ASSETS_DIR / "watermark.jpg"
@@ -105,7 +124,7 @@ def _scaled_image(path: Path, width: float) -> Image:
     return Image(str(path), width=width, height=height)
 
 
-def _draw_watermark(canvas) -> None:
+def _draw_watermark(canvas, page_width: float, page_height: float) -> None:
     """Faint centered watermark (drawn underneath the content)."""
     reader = ImageReader(str(WATERMARK_PATH))
     img_width, img_height = reader.getSize()
@@ -113,19 +132,19 @@ def _draw_watermark(canvas) -> None:
     wm_height = wm_width * img_height / img_width
     canvas.drawImage(
         reader,
-        (PAGE_WIDTH - wm_width) / 2,
-        (PAGE_HEIGHT - wm_height) / 2,
+        (page_width - wm_width) / 2,
+        (page_height - wm_height) / 2,
         width=wm_width,
         height=wm_height,
         mask="auto",
     )
 
 
-def _draw_footer_accent(canvas) -> None:
+def _draw_footer_accent(canvas, page_width: float) -> None:
     """Angular orange band with a black notch on the bottom edge (letterhead style)."""
     band_h = 12
     slant = 20
-    x0 = PAGE_WIDTH * 0.52
+    x0 = page_width * 0.52
 
     canvas.setFillColor(BRAND_BLACK)
     notch = canvas.beginPath()
@@ -139,18 +158,24 @@ def _draw_footer_accent(canvas) -> None:
     canvas.setFillColor(BRAND_ORANGE)
     band = canvas.beginPath()
     band.moveTo(x0, 0)
-    band.lineTo(PAGE_WIDTH, 0)
-    band.lineTo(PAGE_WIDTH, band_h)
+    band.lineTo(page_width, 0)
+    band.lineTo(page_width, band_h)
     band.lineTo(x0 + slant, band_h)
     band.close()
     canvas.drawPath(band, fill=1, stroke=0)
 
 
-def _draw_page_decoration(canvas, doc) -> None:
-    """Watermark, footer accent and generation/page line on every sheet."""
-    canvas.saveState()
-    _draw_watermark(canvas)
-    _draw_footer_accent(canvas)
+def _page_size(doc) -> tuple:
+    """Size of the page being drawn, not of the document default.
+
+    A document mixes orientations (portrait lists, landscape diagrams), so every
+    footer/watermark position has to come from the *active* page template.
+    """
+    return getattr(doc.pageTemplate, "pagesize", None) or doc.pagesize
+
+
+def _draw_footer_line(canvas, page_width: float) -> None:
+    """Generation date on the left, page number on the right margin."""
     canvas.setFont("Helvetica", 8)
     canvas.setFillColor(colors.grey)
     canvas.drawString(
@@ -159,10 +184,19 @@ def _draw_page_decoration(canvas, doc) -> None:
         f"Generado el {datetime.now().strftime('%d/%m/%Y %H:%M')}",
     )
     canvas.drawRightString(
-        PAGE_WIDTH - RIGHT_MARGIN,
+        page_width - RIGHT_MARGIN,
         0.35 * inch,
         f"Página {canvas.getPageNumber()}",
     )
+
+
+def _draw_page_decoration(canvas, doc) -> None:
+    """Watermark, footer accent and generation/page line on every sheet."""
+    page_width, page_height = _page_size(doc)
+    canvas.saveState()
+    _draw_watermark(canvas, page_width, page_height)
+    _draw_footer_accent(canvas, page_width)
+    _draw_footer_line(canvas, page_width)
     canvas.restoreState()
 
 
@@ -171,37 +205,71 @@ def _draw_page_decoration_plain(canvas, doc) -> None:
 
     No watermark or footer band (the workshop sheet is black and white).
     """
+    page_width, _ = _page_size(doc)
     canvas.saveState()
-    canvas.setFont("Helvetica", 8)
-    canvas.setFillColor(colors.grey)
-    canvas.drawString(
-        LEFT_MARGIN,
-        0.35 * inch,
-        f"Generado el {datetime.now().strftime('%d/%m/%Y %H:%M')}",
-    )
-    canvas.drawRightString(
-        PAGE_WIDTH - RIGHT_MARGIN,
-        0.35 * inch,
-        f"Página {canvas.getPageNumber()}",
-    )
+    _draw_footer_line(canvas, page_width)
     canvas.restoreState()
 
 
-def _new_doc(
-    buffer: io.BytesIO,
-    top: float = 0.4 * inch,
-    bottom: float = 0.45 * inch,
-) -> SimpleDocTemplate:
-    """A4 document for Cutter, with compact margins to save paper. The horizontal
-    margin stays fixed so table widths don't need recalculating."""
-    return SimpleDocTemplate(
-        buffer,
-        pagesize=A4,
-        topMargin=top,
-        bottomMargin=bottom,
-        leftMargin=LEFT_MARGIN,
-        rightMargin=RIGHT_MARGIN,
-    )
+class _CutterDoc(BaseDocTemplate):
+    """A4 document with two page templates: ``portrait`` for the lists and
+    ``landscape`` for the cut diagrams.
+
+    Compact margins to save paper; the horizontal margin stays fixed so table
+    widths don't need recalculating. A story switches orientation by emitting
+    ``NextPageTemplate("landscape")`` before a ``PageBreak`` — the switch sticks
+    for every following page (``BaseDocTemplate`` only changes template when one
+    is explicitly queued), which is why the diagram section never reverts.
+    """
+
+    def __init__(
+        self,
+        buffer: io.BytesIO,
+        on_page,
+        top: float = TOP_MARGIN,
+        bottom: float = BOTTOM_MARGIN,
+        start_landscape: bool = False,
+    ):
+        super().__init__(
+            buffer,
+            pagesize=LANDSCAPE_SIZE if start_landscape else A4,
+            topMargin=top,
+            bottomMargin=bottom,
+            leftMargin=LEFT_MARGIN,
+            rightMargin=RIGHT_MARGIN,
+        )
+        portrait = PageTemplate(
+            id="portrait",
+            pagesize=A4,
+            onPage=on_page,
+            frames=[
+                Frame(
+                    LEFT_MARGIN,
+                    bottom,
+                    CONTENT_WIDTH,
+                    PAGE_HEIGHT - top - bottom,
+                    id="portrait_frame",
+                )
+            ],
+        )
+        landscape_tpl = PageTemplate(
+            id="landscape",
+            pagesize=LANDSCAPE_SIZE,
+            onPage=on_page,
+            frames=[
+                Frame(
+                    LEFT_MARGIN,
+                    bottom,
+                    LAND_CONTENT_WIDTH,
+                    LAND_HEIGHT - top - bottom,
+                    id="landscape_frame",
+                )
+            ],
+        )
+        # The build starts on ``pageTemplates[0]``.
+        self.addPageTemplates(
+            [landscape_tpl, portrait] if start_landscape else [portrait, landscape_tpl]
+        )
 
 
 class ProformaService:
@@ -222,7 +290,7 @@ class ProformaService:
         sheet and would otherwise be duplicated here.
         """
         buffer = io.BytesIO()
-        doc = _new_doc(buffer)
+        doc = _CutterDoc(buffer, _draw_page_decoration)
 
         styles = getSampleStyleSheet()
         heading_style = _heading_style(styles)
@@ -256,12 +324,6 @@ class ProformaService:
             story.append(Spacer(1, 0.15 * inch))
             story.extend(payment_block)
 
-        if include_diagram:
-            story.append(PageBreak())
-            story.extend(_section("DISPOSICIÓN DE CORTES", heading_style))
-            story.append(Spacer(1, 0.08 * inch))
-            story.extend(ProformaService._build_layout_pages(carrier))
-
         story.append(Spacer(1, 0.18 * inch))
         # Validity only applies to quotes (pre-order / live optimization); an
         # already-confirmed order doesn't carry it (``carrier.validity_days`` is ``None``).
@@ -283,11 +345,20 @@ class ProformaService:
             )
         )
 
-        doc.build(
-            story,
-            onFirstPage=_draw_page_decoration,
-            onLaterPages=_draw_page_decoration,
-        )
+        if include_diagram:
+            # The diagrams go on landscape sheets and stay there until the end of
+            # the document, so the note above has to be emitted before the switch.
+            story.append(NextPageTemplate("landscape"))
+            story.append(PageBreak())
+            story.extend(
+                ProformaService._build_layout_pages(
+                    carrier,
+                    frame_width=LAND_CONTENT_WIDTH,
+                    max_height=LAND_FRAME_HEIGHT,
+                )
+            )
+
+        doc.build(story)
         buffer.seek(0)
         return buffer
 
@@ -297,7 +368,7 @@ class ProformaService:
         list and layout WITHOUT prices. Makes the most of the paper (compact
         margins and spacing) and differentiates the edge-banding type (soft/hard)."""
         buffer = io.BytesIO()
-        doc = _new_doc(buffer)
+        doc = _CutterDoc(buffer, _draw_page_decoration_plain)
         pal = MONO_PALETTE
         pad = 4
 
@@ -339,18 +410,18 @@ class ProformaService:
         )
         story.append(ProformaService._build_cut_summary_table(carrier, pal, pad))
 
+        story.append(NextPageTemplate("landscape"))
         story.append(PageBreak())
         story.extend(
-            _section("DISPOSICIÓN DE CORTES", heading_style, pal, space_after=4)
+            ProformaService._build_layout_pages(
+                carrier,
+                mono=True,
+                frame_width=LAND_CONTENT_WIDTH,
+                max_height=LAND_FRAME_HEIGHT,
+            )
         )
-        story.append(Spacer(1, 0.08 * inch))
-        story.extend(ProformaService._build_layout_pages(carrier, mono=True))
 
-        doc.build(
-            story,
-            onFirstPage=_draw_page_decoration_plain,
-            onLaterPages=_draw_page_decoration_plain,
-        )
+        doc.build(story)
         buffer.seek(0)
         return buffer
 
@@ -363,30 +434,20 @@ class ProformaService:
         visual layout (``DISPOSICIÓN DE CORTES``) under a compact identifying header.
         """
         buffer = io.BytesIO()
-        doc = _new_doc(buffer)
-        pal = MONO_PALETTE
+        # Every page of this document is a diagram, so it is landscape throughout
+        # and carries no header at all: it only ever travels inside the
+        # consolidated packet, where the ORDEN DE PEDIDO already identifies the
+        # job, and a header would shrink the first diagram for nothing.
+        doc = _CutterDoc(buffer, _draw_page_decoration_plain, start_landscape=True)
 
-        styles = getSampleStyleSheet()
-        heading_style = _heading_style(styles)
+        story = ProformaService._build_layout_pages(
+            carrier,
+            mono=True,
+            frame_width=LAND_CONTENT_WIDTH,
+            max_height=LAND_FRAME_HEIGHT,
+        )
 
-        story = []
-        story.extend(
-            ProformaService._build_production_header(
-                carrier, styles, pal, title="DIAGRAMA DE DESPIECE"
-            )
-        )
-        story.append(Spacer(1, 0.12 * inch))
-        story.extend(
-            _section("DISPOSICIÓN DE CORTES", heading_style, pal, space_after=4)
-        )
-        story.append(Spacer(1, 0.08 * inch))
-        story.extend(ProformaService._build_layout_pages(carrier, mono=True))
-
-        doc.build(
-            story,
-            onFirstPage=_draw_page_decoration_plain,
-            onLaterPages=_draw_page_decoration_plain,
-        )
+        doc.build(story)
         buffer.seek(0)
         return buffer
 
@@ -396,7 +457,7 @@ class ProformaService:
         piece detail WITHOUT prices, board count, liability disclaimer note and
         signature block (delivered-by / received-in-good-order)."""
         buffer = io.BytesIO()
-        doc = _new_doc(buffer)
+        doc = _CutterDoc(buffer, _draw_page_decoration)
 
         styles = getSampleStyleSheet()
         heading_style = _heading_style(styles)
@@ -460,11 +521,7 @@ class ProformaService:
             )
         )
 
-        doc.build(
-            story,
-            onFirstPage=_draw_page_decoration,
-            onLaterPages=_draw_page_decoration,
-        )
+        doc.build(story)
         buffer.seek(0)
         return buffer
 
@@ -664,6 +721,7 @@ class ProformaService:
         styles,
         palette: Palette = MONO_PALETTE,
         title: str = "HOJA DE PRODUCCIÓN",
+        content_width: float = CONTENT_WIDTH,
     ) -> List:
         """Compact workshop header: title + No./date/client, no logo or
         letterhead. The client name goes here (the sheet has no CLIENT section).
@@ -708,7 +766,7 @@ class ProformaService:
                     ],
                 ]
             ],
-            colWidths=[CONTENT_WIDTH * 0.5, CONTENT_WIDTH * 0.5],
+            colWidths=[content_width * 0.5, content_width * 0.5],
         )
         header.setStyle(
             TableStyle(
@@ -1122,8 +1180,22 @@ class ProformaService:
         return table
 
     @staticmethod
-    def _build_layout_pages(carrier: ProformaCarrier, mono: bool = False) -> List:
-        """One image per pattern, each on a full page using the maximum space."""
+    def _build_layout_pages(
+        carrier: ProformaCarrier,
+        mono: bool = False,
+        frame_width: float = CONTENT_WIDTH,
+        max_height: float = 9.3 * inch,
+    ) -> List:
+        """One image per pattern, each alone on a full page using the whole sheet.
+
+        ``frame_width``/``max_height`` describe the frame the images are drawn
+        into: the callers print the diagrams on landscape sheets, where the frame
+        is wider (770pt vs 523pt) but *shorter* (522pt vs 769pt) than a portrait
+        one — so both bounds have to travel together or a tall board overflows.
+
+        Nothing else shares a diagram sheet (no heading, no header), so every
+        pattern is drawn at the same, maximum size.
+        """
         layouts = carrier.layouts
         if not (isinstance(layouts, list) and layouts):
             return []
@@ -1135,9 +1207,6 @@ class ProformaService:
             groups = group_layouts(layouts)
 
         flowables: List = []
-        # Each image occupies nearly the whole page; the cap leaves room for the
-        # section heading on the first one (the rest stand alone after a page break).
-        max_height = 9.3 * inch
         for idx, group in enumerate(groups):
             if idx > 0:
                 flowables.append(PageBreak())
@@ -1145,7 +1214,7 @@ class ProformaService:
             img_buffer, (img_w, img_h) = VisualizationService.generate_layout_image(
                 group, mono=mono
             )
-            draw_width = CONTENT_WIDTH
+            draw_width = frame_width
             draw_height = draw_width * (img_h / img_w)
             if draw_height > max_height:
                 draw_height = max_height

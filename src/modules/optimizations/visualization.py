@@ -201,8 +201,13 @@ class VisualizationService:
         draw = ImageDraw.Draw(img)
 
         header_font = _load_font(36)
-        dim_font = _load_font(26)
-        label_font = _load_font(30)
+        # Dimensions and labels are deliberately smaller than the canvas would
+        # suggest: the diagram now prints on a landscape sheet at ~1.47x the old
+        # scale, so these still come out larger on paper than before (~7.6pt and
+        # ~8.7pt vs 6.4pt and 7.4pt), and the smaller face lets ``_fit_label``
+        # keep labels that used to be dropped for not fitting.
+        dim_font = _load_font(21)
+        label_font = _load_font(24)
         legend_font = _load_font(32)
 
         theme = _MONO_THEME if mono else _BRAND_THEME
