@@ -2,18 +2,19 @@
 
 Revision ID: 000000000001
 Revises:
-Create Date: 2026-07-22 17:17:31.883311
+Create Date: 2026-08-21 14:37:44.028597
 
 Single consolidated schema (the project keeps one squashed initial migration).
-Re-squashed from the previous four revisions (000000000001..000000000004) by
-regenerating from the models via ``alembic revision --autogenerate``, so it
-carries the metadata naming convention, composite/hot-path indexes, CHECK
-constraints, explicit ON DELETE rules (SET NULL for audit/actor FKs, CASCADE for
-order/preorder children), DB-level server defaults, and the exact-linear-meters
-``order_lines.quantity`` (Float) change. ``users`` and ``branches`` form a mutual
-FK cycle, broken here by creating ``users`` without the ``branch_id`` FK and
-adding it back afterwards. A database on an older revision is recreated (this
-project drops and rebuilds prod rather than chaining onto the old history).
+Re-squashed from the previous chain (000000000001..dab99b6a8b21) by regenerating
+from the models via ``alembic revision --autogenerate``, so it carries the
+metadata naming convention, composite/hot-path indexes, CHECK constraints,
+explicit ON DELETE rules (SET NULL for audit/actor FKs, CASCADE for
+order/preorder children), DB-level server defaults, and every column added
+since the previous squash (branch printing switches, preorder ``variant``,
+product ``external_code``). ``users`` and ``branches`` form a mutual FK cycle,
+broken here by creating ``users`` without the ``branch_id`` FK and adding it
+back afterwards. A database on an older revision is recreated (this project
+drops and rebuilds prod rather than chaining onto the old history).
 """
 from typing import Sequence, Union
 
@@ -59,6 +60,8 @@ def upgrade() -> None:
     sa.Column('address', sa.String(length=256), nullable=True),
     sa.Column('phone', sa.String(length=32), nullable=True),
     sa.Column('is_active', sa.Boolean(), nullable=False),
+    sa.Column('print_labels_enabled', sa.Boolean(), server_default=sa.text('true'), nullable=False),
+    sa.Column('print_consolidated_enabled', sa.Boolean(), server_default=sa.text('true'), nullable=False),
     sa.Column('created_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
     sa.Column('updated_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
     sa.Column('created_by', sa.Integer(), nullable=True),
@@ -123,6 +126,7 @@ def upgrade() -> None:
     sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
     sa.Column('type', sa.String(length=32), nullable=False),
     sa.Column('code', sa.String(length=32), nullable=False),
+    sa.Column('external_code', sa.String(length=64), nullable=True),
     sa.Column('name', sa.String(length=128), nullable=False),
     sa.Column('description', sa.String(length=256), nullable=True),
     sa.Column('price', sa.Float(), nullable=False),
@@ -137,6 +141,7 @@ def upgrade() -> None:
     sa.ForeignKeyConstraint(['updated_by'], ['users.id'], name=op.f('fk_products_updated_by_users'), ondelete='SET NULL'),
     sa.PrimaryKeyConstraint('id', name=op.f('pk_products')),
     sa.UniqueConstraint('code', name=op.f('uq_products_code')),
+    sa.UniqueConstraint('external_code', name=op.f('uq_products_external_code')),
     sa.UniqueConstraint('name', name=op.f('uq_products_name'))
     )
     op.create_index(op.f('ix_products_type'), 'products', ['type'], unique=False)
@@ -411,6 +416,7 @@ def upgrade() -> None:
     sa.Column('additional_services', sa.JSON(), server_default=sa.text("'[]'"), nullable=False),
     sa.Column('price_tier_code', sa.String(length=32), server_default='consumidor', nullable=False),
     sa.Column('strategy', sa.String(length=32), server_default='default', nullable=False),
+    sa.Column('variant', sa.Integer(), server_default='0', nullable=False),
     sa.Column('source', sa.String(length=32), nullable=True),
     sa.Column('notes', sa.String(length=512), nullable=True),
     sa.Column('client_note', sa.String(length=512), nullable=True),
