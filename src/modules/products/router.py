@@ -71,19 +71,26 @@ def sync_products_catalog(
 )
 def list_products(
     paging: PageParams = Depends(),
-    type: Optional[ProductType] = Query(None, description="Filter by product type"),
+    type: Optional[List[ProductType]] = Query(
+        default=None,
+        description="Filter by one or more product types (repeat the parameter)",
+    ),
     search: Optional[str] = Query(None, description="Search by name or code"),
     is_active: Optional[bool] = Query(
         None, description="Filter by active flag; omit to list both"
     ),
-    subtype: Optional[str] = Query(
-        None, description="Filter by material subtype (case-insensitive)"
+    subtype: Optional[List[str]] = Query(
+        default=None,
+        description="Filter by one or more material subtypes, case-insensitive "
+        "(repeat the parameter)",
     ),
     svc: ProductService = Depends(product_service),
 ):
     """Lists products with optional type/active/subtype filters, search, and pagination.
 
-    Results are ordered by name, so paging through them is stable.
+    ``type`` and ``subtype`` each accept multiple values (repeat the query
+    parameter) for a multi-select filter; results are ordered by name, so
+    paging through them is stable.
     """
     items, total = svc.search_paginated(
         search, type, paging.limit, paging.offset, is_active, subtype
