@@ -90,7 +90,16 @@ No cycles, enforced by convention:
   for a given board by the explicit `family` attribute they share, then applies
   a thickness→width rule (over active products only). It is **advisory for the
   UI**: nothing downstream requires a piece's edge banding to be coordinated,
-  so a contrasting one can be quoted deliberately.
+  so a contrasting one can be quoted deliberately. Board and edge-banding
+  attributes also carry an optional `subtype` (material subtype — MDP/MDF/
+  Plywood/... for boards, Canto Maderado/Solido/... for edge bandings, each a
+  closed enum). Edge bandings additionally carry an `alias` (short, ≤20 chars)
+  used only in the printed workshop notation (`2L1C CS CSH`) — independent of
+  `family`, which remains the coordination key and is never printed. The
+  catalog can also be synced in bulk from the external inventory system's CSV
+  export (`POST /products/sync`, upsert by a namespaced `external_code`,
+  all-or-nothing validation, deactivates previously-synced products missing
+  from the file).
 - **`optimizations`** — orchestrates the pure `cutting/` domain. `POST
   /optimize` is **material-source agnostic**: it takes a `materials` stock
   list (catalog boards, company/client offcuts, or manual entries, unified by

@@ -140,9 +140,12 @@ class EdgeBandingSummary(CamelModel):
     band_type: Optional[str] = Field(
         default=None, description="Canonical band type: 'Soft' / 'Hard'"
     )
-    family: Optional[str] = Field(
+    alias: Optional[str] = Field(
         default=None,
-        description="Design family printed in the workshop notation, e.g. 'CSH'",
+        description=(
+            "Short code printed in the workshop notation, e.g. 'CSH'. "
+            "Independent of the board↔tapacanto coordination field `family`."
+        ),
     )
     net_linear_m: float = Field(
         ..., description="Net linear meters (sum of banded sides)"

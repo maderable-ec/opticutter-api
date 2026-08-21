@@ -60,3 +60,20 @@ class ValidationError(AppError):
 
     status_code = 422
     code = "VALIDATION_ERROR"
+
+
+class BulkValidationError(AppError):
+    """Multiple row-level validation errors reported together (e.g. a bulk import).
+
+    Unlike a plain ``AppError`` (one message), this carries every problem found
+    in a single validation pass so the caller can fix all of them before
+    retrying, instead of a slow fix-one-resubmit-repeat loop.
+    """
+
+    status_code = 422
+    code = "VALIDATION_ERROR"
+
+    def __init__(self, detail: str, errors: list[dict]):
+        # each item: {"field": <row/context>, "message": <problem>}
+        super().__init__(detail)
+        self.errors = errors

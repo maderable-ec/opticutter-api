@@ -292,9 +292,9 @@ class OptimizationService:
         cache is invalidated whenever any of them changes.
 
         The edge-banding signature covers price **and** the attributes frozen
-        into the payload (band type, design family): they don't move the
-        geometry, but they're baked into the notation the PDFs print, so a
-        catalog edit that isn't in the hash would stay invisible for a whole
+        into the payload (band type, alias): they don't move the geometry, but
+        they're baked into the notation the PDFs print, so a catalog edit that
+        isn't in the hash would stay invisible for a whole
         ``OPT_RESULT_TTL_SECONDS`` — exactly during the setup pass when those
         fields get edited.
         """
@@ -316,7 +316,7 @@ class OptimizationService:
             str(pid): {
                 "price": p.price,
                 "band_type": (p.attributes or {}).get("bandType"),
-                "family": (p.attributes or {}).get("family"),
+                "alias": (p.attributes or {}).get("alias"),
             }
             for pid, p in eb_products.items()
         }
@@ -461,14 +461,15 @@ class OptimizationService:
             # Canonical type (``Soft``/``Hard``) to differentiate the band in the
             # diagram (soft = solid, hard = hatched). ``None`` in older snapshots.
             "band_type": attrs.get("bandType"),
-            # Design family (``CSH``) so the workshop tells two banded designs
-            # apart. ``None`` when the product has no family configured.
-            "family": attrs.get("family"),
+            # Short alias (``CSH``) so the workshop tells two banded designs
+            # apart. ``None`` when the product has no alias configured.
+            # Independent of ``family``, which stays the coordination key.
+            "alias": attrs.get("alias"),
             # Workshop notation computed from the NOMINAL sides (stable under
             # rotation); ``geo`` is only used to draw the bands on the right side.
             # ``attributes`` is persisted in camelCase → ``bandType``.
             "notation": edge_banding_notation(
-                nominal, attrs.get("bandType"), attrs.get("family")
+                nominal, attrs.get("bandType"), attrs.get("alias")
             ),
         }
 
@@ -537,7 +538,7 @@ class OptimizationService:
                     "thickness": attrs.get("thickness"),
                     "color": attrs.get("color"),
                     "band_type": attrs.get("bandType"),
-                    "family": attrs.get("family"),
+                    "alias": attrs.get("alias"),
                     "net_linear_m": round(net_m, 2),
                     "linear_m": billed,
                     "billed_linear_m": billed,
@@ -613,7 +614,7 @@ class OptimizationService:
 
         ``product_code`` carries the material's label (catalog code, or
         name/key for inline sources) that the proforma shows in the "Tablero"
-        column. ``band_type`` and ``family`` live in the product's attributes,
+        column. ``band_type`` and ``alias`` live in the product's attributes,
         not in the ``EdgeBandingSpec``; they're injected here so the proforma can
         build the edge notation (``2L1C CS CSH``) without re-resolving the
         product at render time.
@@ -630,7 +631,7 @@ class OptimizationService:
             attrs = (product.attributes if product else None) or {}
             # ``attributes`` is persisted in camelCase → ``bandType``.
             data["edge_banding"]["band_type"] = attrs.get("bandType")
-            data["edge_banding"]["family"] = attrs.get("family")
+            data["edge_banding"]["alias"] = attrs.get("alias")
         return data
 
     def _build_result_payload(

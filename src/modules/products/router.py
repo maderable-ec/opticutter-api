@@ -1,12 +1,20 @@
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, File, Query, UploadFile
+from sqlalchemy.orm import Session
 
+from src.modules.products.catalog_sync import sync_catalog
 from src.modules.products.model import ProductType
-from src.modules.products.schemas import ProductCreate, ProductResponse, ProductUpdate
+from src.modules.products.schemas import (
+    ProductCreate,
+    ProductResponse,
+    ProductSyncResult,
+    ProductUpdate,
+)
 from src.modules.products.service import ProductService, product_service
 from src.modules.products.types.edge_banding import BandType
 from src.modules.users.dependencies import require_permission
+from src.shared.database import get_db
 from src.shared.exceptions import EntityNotFoundError
 from src.shared.pagination import PageParams
 from src.shared.responses import (
@@ -35,6 +43,29 @@ def create_product(data: ProductCreate, svc: ProductService = Depends(product_se
     return ok(svc.create(data))
 
 
+@router.post(
+    "/sync",
+    response_model=DataResponse[ProductSyncResult],
+    dependencies=[_WRITE],
+)
+def sync_products_catalog(
+    file: UploadFile = File(
+        ..., description="External inventory CSV export (TABLEROS/TAPACANTOS)"
+    ),
+    db: Session = Depends(get_db),
+):
+    """Upserts board/edge-banding products from the external catalog CSV.
+
+    All-or-nothing: any row error (duplicate code/name, unparseable
+    dimensions, unrecognized CATEGORIA/subtype) aborts with zero writes and
+    the full list of problems (422). Never touches products it didn't create
+    itself — only products from a previous sync that are missing from this
+    upload get reconciled: deleted outright if no order ever used them,
+    deactivated instead if one did; hand-created products are never touched.
+    """
+    return ok(sync_catalog(db, file.file.read()))
+
+
 @router.get(
     "/", response_model=PaginatedResponse[ProductResponse], dependencies=[_READ]
 )
@@ -45,14 +76,17 @@ def list_products(
     is_active: Optional[bool] = Query(
         None, description="Filter by active flag; omit to list both"
     ),
+    subtype: Optional[str] = Query(
+        None, description="Filter by material subtype (case-insensitive)"
+    ),
     svc: ProductService = Depends(product_service),
 ):
-    """Lists products with optional type/active filters, search, and pagination.
+    """Lists products with optional type/active/subtype filters, search, and pagination.
 
     Results are ordered by name, so paging through them is stable.
     """
     items, total = svc.search_paginated(
-        search, type, paging.limit, paging.offset, is_active
+        search, type, paging.limit, paging.offset, is_active, subtype
     )
     return page(items, total, paging.limit, paging.offset)
 

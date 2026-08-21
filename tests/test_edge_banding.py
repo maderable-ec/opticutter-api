@@ -36,13 +36,21 @@ def _create_board(client, code="MEL18", price=45.5):
 
 
 def _create_edge_banding(
-    client, code="TAP22", price=2.0, color="Blanco", band_type=None, family=None
+    client,
+    code="TAP22",
+    price=2.0,
+    color="Blanco",
+    band_type=None,
+    family=None,
+    alias=None,
 ):
     attributes = {"thickness": 0.45, "width": 22, "color": color, "length": 50000}
     if band_type is not None:
         attributes["band_type"] = band_type
     if family is not None:
         attributes["family"] = family
+    if alias is not None:
+        attributes["alias"] = alias
     return client.post(
         "/api/v1/products/",
         json={
@@ -98,25 +106,25 @@ def test_edge_banding_notation(sides, band_type, expected):
 
 
 @pytest.mark.parametrize(
-    "sides, band_type, family, expected",
+    "sides, band_type, alias, expected",
     [
         (["left", "right", "top"], "Soft", "CSH", "2L1C CS CSH"),
         (["left"], "Soft", "CSH", "1L CS CSH"),
         (["top", "bottom"], "Hard", "BRD", "2C CD BRD"),
         (["left", "right", "top", "bottom"], "Soft", "BLN", "4L CS BLN"),
-        # A family without a band type still shows: they're independent.
+        # An alias without a band type still shows: they're independent.
         (["left", "right"], None, "CSH", "2L CSH"),
-        # Uppercased for the tag; the coordination match is case-insensitive anyway.
+        # Uppercased for the tag.
         (["left"], "Soft", " csh ", "1L CS CSH"),
         # No sides = nothing to qualify; the suffixes are dropped too.
         ([], "Soft", "CSH", ""),
-        # A banding with no family configured renders exactly as before.
+        # A banding with no alias configured renders exactly as before.
         (["left"], "Soft", None, "1L CS"),
         (["left"], "Soft", "  ", "1L CS"),
     ],
 )
-def test_edge_banding_notation_with_family(sides, band_type, family, expected):
-    assert edge_banding_notation(sides, band_type, family) == expected
+def test_edge_banding_notation_with_alias(sides, band_type, alias, expected):
+    assert edge_banding_notation(sides, band_type, alias) == expected
 
 
 # --------------------------------------------------------------------------- #
@@ -536,23 +544,24 @@ def test_placed_piece_notation_includes_band_type(client):
     )
     placed = resp.json()["data"]["layouts"][0]["placedPieces"][0]
     assert placed["rotated"] is False
-    # The fixture configures no family, so only the CS suffix rides along.
+    # The fixture configures no alias, so only the CS suffix rides along.
     assert placed["edges"]["notation"] == "2L1C CS"
     # The canonical type travels with the placed piece (soft/hard distinction in the diagram).
     # ``edges`` is a raw dict → the key is serialized as-is (snake_case).
     assert placed["edges"]["band_type"] == "Soft"
 
 
-def test_design_family_is_frozen_across_the_optimize_payload(client):
-    """The design family reaches every consumer of the payload, not just one.
+def test_alias_is_frozen_across_the_optimize_payload(client):
+    """The alias reaches every consumer of the payload, not just one.
 
     The PDFs render from the frozen payload with no DB session, so the product's
-    ``family`` has to be denormalized at compute time — in the placed piece
-    (diagram + thermal labels) and in the banding summary.
+    ``alias`` has to be denormalized at compute time — in the placed piece
+    (diagram + thermal labels) and in the banding summary. ``family`` stays
+    unset here on purpose: coordination isn't under test, only the printed alias.
     """
     c = _create_client(client)
     b = _create_board(client)
-    eb = _create_edge_banding(client, band_type="Soft", family="CSH")
+    eb = _create_edge_banding(client, band_type="Soft", alias="CSH")
 
     req = _requirement(eb["id"], ["left", "right", "top"])
     req["canRotate"] = False
@@ -568,15 +577,15 @@ def test_design_family_is_frozen_across_the_optimize_payload(client):
 
     placed = data["layouts"][0]["placedPieces"][0]
     assert placed["edges"]["notation"] == "2L1C CS CSH"
-    assert placed["edges"]["family"] == "CSH"
-    assert data["edgeBandingsSummary"][0]["family"] == "CSH"
+    assert placed["edges"]["alias"] == "CSH"
+    assert data["edgeBandingsSummary"][0]["alias"] == "CSH"
 
 
-def test_requirement_dump_carries_the_design_family(client, db_session):
+def test_requirement_dump_carries_the_alias(client, db_session):
     """The ``Cantos`` column reads ``requirements[].edge_banding``, not the layouts."""
     c = _create_client(client)
     b = _create_board(client)
-    eb = _create_edge_banding(client, band_type="Soft", family="CSH")
+    eb = _create_edge_banding(client, band_type="Soft", alias="CSH")
 
     order = OrderService(db_session).create(
         OrderCreate.model_validate(
@@ -590,7 +599,7 @@ def test_requirement_dump_carries_the_design_family(client, db_session):
     )
     spec = order.optimization_snapshot["requirements"][0]["edge_banding"]
     assert spec["band_type"] == "Soft"
-    assert spec["family"] == "CSH"
+    assert spec["alias"] == "CSH"
 
 
 # --------------------------------------------------------------------------- #
