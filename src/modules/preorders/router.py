@@ -1,4 +1,5 @@
-from typing import Optional
+from datetime import date
+from typing import List, Literal, Optional
 
 from fastapi import APIRouter, Depends, Query
 
@@ -105,8 +106,9 @@ def create_preorder(
 
 @router.get("/", response_model=PaginatedResponse[PreOrderSummaryResponse])
 def list_preorders(
-    status: Optional[PreOrderStatus] = Query(
-        default=None, description="Filter pre-orders by status"
+    status: Optional[List[PreOrderStatus]] = Query(
+        default=None,
+        description="Filter pre-orders by one or more statuses (repeat the parameter)",
     ),
     client_id: Optional[int] = Query(
         default=None, alias="clientId", description="Filter by client"
@@ -116,6 +118,25 @@ def list_preorders(
         alias="branchId",
         description="Global roles only (admin/seller): narrows the listing to a "
         "branch (empty = all)",
+    ),
+    search: Optional[str] = Query(
+        default=None,
+        description="Search by quote code or id, or by client identifier/name",
+    ),
+    created_from: Optional[date] = Query(
+        default=None,
+        alias="createdFrom",
+        description="Only pre-orders created on or after this day (UTC, inclusive)",
+    ),
+    created_to: Optional[date] = Query(
+        default=None,
+        alias="createdTo",
+        description="Only pre-orders created on or before this day (UTC, inclusive)",
+    ),
+    sort: Literal["oldest", "recent"] = Query(
+        default="recent",
+        description="Listing order: 'recent' first (the default this listing has "
+        "always had) or 'oldest' first",
     ),
     paging: PageParams = Depends(),
     svc: PreOrderService = Depends(preorder_service),
@@ -133,6 +154,10 @@ def list_preorders(
         branch_filter=branch_id,
         limit=paging.limit,
         offset=paging.offset,
+        search=search,
+        created_from=created_from,
+        created_to=created_to,
+        sort=sort,
     )
     return page(items, total, paging.limit, paging.offset)
 

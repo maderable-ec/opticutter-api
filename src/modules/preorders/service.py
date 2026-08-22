@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import List, Optional, Tuple
 
 from fastapi import Depends
@@ -56,29 +56,69 @@ class PreOrderService(BranchScopedMixin):
 
     def list_preorders(
         self,
-        status: Optional[PreOrderStatus] = None,
+        status: Optional[List[PreOrderStatus]] = None,
         client_id: Optional[int] = None,
         branch_scope: Optional[int] = None,
         branch_filter: Optional[int] = None,
         limit: int = 20,
         offset: int = 0,
+        search: Optional[str] = None,
+        created_from: Optional[date] = None,
+        created_to: Optional[date] = None,
+        sort: str = "recent",
     ) -> Tuple[List[PreOrderModel], int]:
-        """Lists pre-orders (newest first) with a count: ``(items, total)``.
+        """Lists pre-orders with a count: ``(items, total)``.
 
+        ``status`` filters by one or more statuses (empty list/``None`` = all).
         ``branch_scope`` confines staff to their branch; the admin (``None``) sees
         all of them and can narrow with ``branch_filter``.
+
+        ``search`` matches the quote code or the client (identifier/first/last
+        name), and also the pre-order id when the term is all digits -- the same
+        contract the orders listing offers.
+
+        ``sort`` defaults to ``recent``: unlike orders, nothing reads this
+        listing FIFO, and newest-first is what it has always returned.
         """
         self._sweep_expired()
         query = self.db.query(PreOrderModel)
-        if status is not None:
-            query = query.filter(PreOrderModel.status == status.value)
+        if status:
+            query = query.filter(PreOrderModel.status.in_([s.value for s in status]))
         if client_id is not None:
             query = query.filter(PreOrderModel.client_id == client_id)
+        if search:
+            pattern = f"%{search}%"
+            # Outer join: a pre-order always has a client, but the join must not
+            # silently drop rows if that ever stops holding.
+            query = query.outerjoin(
+                ClientModel, PreOrderModel.client_id == ClientModel.id
+            )
+            term = (
+                PreOrderModel.code.ilike(pattern)
+                | ClientModel.identifier.ilike(pattern)
+                | ClientModel.first_name.ilike(pattern)
+                | ClientModel.last_name.ilike(pattern)
+            )
+            if search.strip().isdigit():
+                term = term | (PreOrderModel.id == int(search.strip()))
+            query = query.filter(term)
+        # ``created_at`` is UTC-naive (TimestampMixin), so the day boundaries are
+        # UTC ones. ``created_to`` is inclusive: compare against the next midnight.
+        if created_from is not None:
+            query = query.filter(
+                PreOrderModel.created_at >= datetime.combine(created_from, time.min)
+            )
+        if created_to is not None:
+            query = query.filter(
+                PreOrderModel.created_at
+                < datetime.combine(created_to + timedelta(days=1), time.min)
+            )
         query = self._apply_branch_scope(query, branch_scope, branch_filter)
         total = query.count()
-        items = (
-            query.order_by(PreOrderModel.id.desc()).offset(offset).limit(limit).all()
+        order_by = (
+            PreOrderModel.id.asc() if sort == "oldest" else PreOrderModel.id.desc()
         )
+        items = query.order_by(order_by).offset(offset).limit(limit).all()
         return items, total
 
     def create(
