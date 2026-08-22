@@ -1,4 +1,5 @@
-from typing import List, Optional
+from datetime import date
+from typing import List, Literal, Optional
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, Query, UploadFile
@@ -75,11 +76,35 @@ def list_orders(
         description="Global roles only (admin/seller): narrows the listing to a "
         "branch (empty = all)",
     ),
+    client_id: Optional[int] = Query(
+        default=None,
+        alias="clientId",
+        description="Narrows the listing to one client",
+    ),
+    search: Optional[str] = Query(
+        default=None,
+        description="Search by order code or id, or by client identifier/name",
+    ),
+    created_from: Optional[date] = Query(
+        default=None,
+        alias="createdFrom",
+        description="Only orders created on or after this day (UTC, inclusive)",
+    ),
+    created_to: Optional[date] = Query(
+        default=None,
+        alias="createdTo",
+        description="Only orders created on or before this day (UTC, inclusive)",
+    ),
+    sort: Literal["oldest", "recent"] = Query(
+        default="oldest",
+        description="Listing order: 'oldest' first (FIFO, the workshop's view) "
+        "or 'recent' first (the back office's)",
+    ),
     paging: PageParams = Depends(),
     svc: OrderService = Depends(order_service),
     branch_scope: Optional[int] = Depends(get_branch_scope),
 ):
-    """Lists orders with optional status filter and pagination.
+    """Lists orders with optional filters, search, ordering and pagination.
 
     The operator only sees their branch's orders; global roles (admin/seller)
     see all of them (or filter with ``branchId``).
@@ -90,6 +115,11 @@ def list_orders(
         branch_filter=branch_id,
         limit=paging.limit,
         offset=paging.offset,
+        search=search,
+        client_filter=client_id,
+        created_from=created_from,
+        created_to=created_to,
+        sort=sort,
     )
     return page(items, total, paging.limit, paging.offset)
 

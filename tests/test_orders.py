@@ -6,10 +6,11 @@ when a pre-order is confirmed. Here they're minted directly via ``OrderService.c
 and read back via GET to verify the camelCase API projection.
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 
+from src.modules.orders.model import OrderModel
 from src.modules.orders.schemas import OrderCreate
 from src.modules.orders.service import OrderService
 from src.shared.exceptions import BusinessRuleError, EntityNotFoundError
@@ -335,6 +336,105 @@ def test_list_orders_is_fifo_oldest_first(client, db_session):
 
     resp = client.get("/api/v1/orders/").json()
     assert [o["id"] for o in resp["data"]] == [o1["id"], o2["id"], o3["id"]]
+
+
+def test_list_orders_sort_recent_reverses_the_fifo_order(client, db_session):
+    """The back office reads newest first; the FIFO default stays untouched."""
+    c = _create_client(client)
+    b = _create_board(client)
+    o1 = _create_order(client, db_session, _order_payload(c["id"], b["id"], width=600))
+    o2 = _create_order(client, db_session, _order_payload(c["id"], b["id"], width=500))
+    o3 = _create_order(client, db_session, _order_payload(c["id"], b["id"], width=400))
+
+    resp = client.get("/api/v1/orders/", params={"sort": "recent"}).json()
+    assert [o["id"] for o in resp["data"]] == [o3["id"], o2["id"], o1["id"]]
+
+
+def test_list_orders_search_by_code_id_and_client(client, db_session):
+    c1 = _create_client(client)
+    c2 = _create_client(client, identifier="0987654321", phone="0987654321")
+    # Distinguish the second client: _create_client always names them Ada Lovelace.
+    client.put(
+        f"/api/v1/clients/{c2['id']}",
+        json={
+            "identifier": "0987654321",
+            "firstName": "Grace",
+            "lastName": "Hopper",
+            "phone": "0987654321",
+        },
+    )
+    b = _create_board(client)
+    o1 = _create_order(client, db_session, _order_payload(c1["id"], b["id"], width=600))
+    o2 = _create_order(client, db_session, _order_payload(c2["id"], b["id"], width=500))
+
+    # By order code (a fragment of it is enough).
+    by_code = client.get("/api/v1/orders/", params={"search": o2["code"]}).json()
+    assert [o["id"] for o in by_code["data"]] == [o2["id"]]
+
+    # By client last name, case-insensitive.
+    by_client = client.get("/api/v1/orders/", params={"search": "hopper"}).json()
+    assert [o["id"] for o in by_client["data"]] == [o2["id"]]
+
+    # By client identifier.
+    by_ident = client.get("/api/v1/orders/", params={"search": "0987654321"}).json()
+    assert [o["id"] for o in by_ident["data"]] == [o2["id"]]
+
+    # An all-digit term also matches the order id exactly ("order 42").
+    by_id = client.get("/api/v1/orders/", params={"search": str(o1["id"])}).json()
+    assert o1["id"] in [o["id"] for o in by_id["data"]]
+
+    # No match: empty page, and the total reflects the filter, not the table.
+    none = client.get("/api/v1/orders/", params={"search": "zzzz"}).json()
+    assert none["data"] == []
+    assert none["meta"]["pagination"]["total"] == 0
+
+
+def test_list_orders_filter_by_client(client, db_session):
+    c1 = _create_client(client)
+    c2 = _create_client(client, identifier="0987654321", phone="0987654321")
+    b = _create_board(client)
+    o1 = _create_order(client, db_session, _order_payload(c1["id"], b["id"], width=600))
+    o2 = _create_order(client, db_session, _order_payload(c2["id"], b["id"], width=500))
+
+    resp = client.get("/api/v1/orders/", params={"clientId": c2["id"]}).json()
+    assert [o["id"] for o in resp["data"]] == [o2["id"]]
+    assert o1["id"] not in [o["id"] for o in resp["data"]]
+    assert resp["meta"]["pagination"]["total"] == 1
+
+
+def test_list_orders_filter_by_created_day_range(client, db_session):
+    c = _create_client(client)
+    b = _create_board(client)
+    o1 = _create_order(client, db_session, _order_payload(c["id"], b["id"], width=600))
+    o2 = _create_order(client, db_session, _order_payload(c["id"], b["id"], width=500))
+
+    # Backdate the first one; created_at is UTC-naive, so the range is a UTC day.
+    db_session.query(OrderModel).filter(OrderModel.id == o1["id"]).update(
+        {"created_at": datetime.utcnow() - timedelta(days=3)}
+    )
+    db_session.commit()
+
+    today = datetime.utcnow().date()
+    old_day = today - timedelta(days=3)
+
+    # `createdTo` is inclusive: the backdated order's own day must return it.
+    upto = client.get(
+        "/api/v1/orders/", params={"createdTo": old_day.isoformat()}
+    ).json()
+    assert [o["id"] for o in upto["data"]] == [o1["id"]]
+
+    # `createdFrom` is inclusive too, and today's order is on today's boundary.
+    since = client.get(
+        "/api/v1/orders/", params={"createdFrom": today.isoformat()}
+    ).json()
+    assert [o["id"] for o in since["data"]] == [o2["id"]]
+
+    # Both ends together span everything.
+    span = client.get(
+        "/api/v1/orders/",
+        params={"createdFrom": old_day.isoformat(), "createdTo": today.isoformat()},
+    ).json()
+    assert [o["id"] for o in span["data"]] == [o1["id"], o2["id"]]
 
 
 def test_get_order_404(client):
