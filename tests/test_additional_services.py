@@ -208,3 +208,18 @@ def test_public_review_includes_services(client):
     assert review["total"] == 51.5
     assert len(review["additionalServices"]) == 1
     assert review["additionalServices"][0]["lineTotal"] == 6.0
+
+
+def test_list_additional_services_is_ordered_by_name(client):
+    """Paging an unordered listing lets Postgres repeat or skip rows between pages."""
+    _create_service(client, name="Perforación")
+    _create_service(client, name="Biselado")
+    _create_service(client, name="Lijado")
+
+    listed = client.get("/api/v1/additional-services/").json()["data"]
+    assert [s["name"] for s in listed] == ["Biselado", "Lijado", "Perforación"]
+
+    recent = client.get(
+        "/api/v1/additional-services/", params={"sort": "recent"}
+    ).json()["data"]
+    assert [s["name"] for s in recent] == ["Lijado", "Biselado", "Perforación"]

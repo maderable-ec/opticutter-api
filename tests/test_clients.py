@@ -97,3 +97,34 @@ def test_delete_client(client):
     assert deleted.status_code == 204
     assert client.get(f"/api/v1/clients/{created['id']}").status_code == 404
     assert client.delete(f"/api/v1/clients/{created['id']}").status_code == 404
+
+
+def test_list_clients_is_ordered_by_name_and_pages_do_not_overlap(client):
+    """Paging is only safe with a total order: without it Postgres may repeat rows."""
+    for ident, last in [("1", "Zapata"), ("2", "Ayala"), ("3", "Moreno")]:
+        client.post("/api/v1/clients/", json=_payload(identifier=ident, last=last))
+
+    listed = client.get("/api/v1/clients/").json()["data"]
+    assert [c["lastName"] for c in listed] == ["Ayala", "Moreno", "Zapata"]
+
+    first = client.get("/api/v1/clients/", params={"limit": 2, "offset": 0}).json()
+    second = client.get("/api/v1/clients/", params={"limit": 2, "offset": 2}).json()
+    ids = [c["id"] for c in first["data"]] + [c["id"] for c in second["data"]]
+    assert len(ids) == len(set(ids)) == 3
+
+
+def test_list_clients_sort_recent_puts_the_newest_first(client):
+    a = client.post("/api/v1/clients/", json=_payload(identifier="1")).json()["data"]
+    b = client.post("/api/v1/clients/", json=_payload(identifier="2")).json()["data"]
+
+    resp = client.get("/api/v1/clients/", params={"sort": "recent"}).json()
+    assert [c["id"] for c in resp["data"]] == [b["id"], a["id"]]
+
+
+def test_list_clients_search_still_narrows(client):
+    client.post("/api/v1/clients/", json=_payload(identifier="1", last="Zapata"))
+    client.post("/api/v1/clients/", json=_payload(identifier="2", last="Ayala"))
+
+    found = client.get("/api/v1/clients/", params={"search": "ayala"}).json()
+    assert [c["lastName"] for c in found["data"]] == ["Ayala"]
+    assert found["meta"]["pagination"]["total"] == 1

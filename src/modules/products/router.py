@@ -77,7 +77,9 @@ def list_products(
     ),
     search: Optional[str] = Query(None, description="Search by name or code"),
     is_active: Optional[bool] = Query(
-        None, description="Filter by active flag; omit to list both"
+        None,
+        alias="isActive",
+        description="Filter by active flag; omit to list both",
     ),
     subtype: Optional[List[str]] = Query(
         default=None,

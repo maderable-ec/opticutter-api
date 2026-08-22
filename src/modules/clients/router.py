@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, Query
 from src.modules.clients.schemas import ClientCreate, ClientResponse, ClientUpdate
 from src.modules.clients.service import ClientService, client_service
 from src.modules.users.dependencies import require_permission
+from src.shared.crud import ListSort
 from src.shared.pagination import PageParams
 from src.shared.responses import (
     ERROR_RESPONSES,
@@ -35,13 +36,16 @@ def list_clients(
     search: Optional[str] = Query(
         None, description="Search by identifier, first name, or last name"
     ),
+    sort: ListSort = Query(
+        default="name",
+        description="Listing order: by name (default), or newest/oldest first",
+    ),
     svc: ClientService = Depends(client_service),
 ):
-    """Lists clients with optional search and pagination."""
-    if search:
-        items, total = svc.search_paginated(search, paging.limit, paging.offset)
-    else:
-        items, total = svc.list_paginated(paging.limit, paging.offset)
+    """Lists clients with optional search, ordering and pagination."""
+    items, total = svc.list_clients(
+        search=search, sort=sort, limit=paging.limit, offset=paging.offset
+    )
     return page(items, total, paging.limit, paging.offset)
 
 

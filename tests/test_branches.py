@@ -256,3 +256,23 @@ def test_analytics_breakdown_by_branch(client, db_session):
         "/api/v1/analytics/summary", params={**rng, "branchId": norte["id"]}
     ).json()["data"]
     assert only_norte["orderCount"] == 1
+
+
+def test_list_branches_filter_by_active_and_order(client):
+    """A branch is retired by unsetting `isActive`, never deleted, so the inactive
+    ones accumulate in the middle of a listing that could not filter them out."""
+    norte = _make_branch(client, code="NORTE", name="Sucursal Norte")
+    _make_branch(client, code="AUSTRO", name="Austro")
+    client.put(f"/api/v1/branches/{norte['id']}", json={"isActive": False})
+
+    # Omitting the flag keeps listing both: the admin manages retired branches.
+    assert client.get("/api/v1/branches/").json()["meta"]["pagination"]["total"] == 3
+
+    active = client.get("/api/v1/branches/", params={"isActive": True}).json()
+    assert norte["id"] not in [b["id"] for b in active["data"]]
+    inactive = client.get("/api/v1/branches/", params={"isActive": False}).json()
+    assert [b["code"] for b in inactive["data"]] == ["NORTE"]
+
+    # Ordered by name, with the primary key as the tiebreaker that makes paging safe.
+    names = [b["name"] for b in client.get("/api/v1/branches/").json()["data"]]
+    assert names == sorted(names)

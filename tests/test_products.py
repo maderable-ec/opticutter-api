@@ -501,9 +501,11 @@ def test_list_filter_by_is_active(client):
     # Omitting the filter keeps listing both: the catalog admin manages inactive products.
     assert client.get("/api/v1/products/").json()["meta"]["pagination"]["total"] == 2
 
-    active = client.get("/api/v1/products/", params={"is_active": True}).json()
+    # camelCase on the wire, like every other filter in the API (the body already
+    # used `isActive`; only this query param was still snake_case).
+    active = client.get("/api/v1/products/", params={"isActive": True}).json()
     assert [p["code"] for p in active["data"]] == ["ON"]
-    inactive = client.get("/api/v1/products/", params={"is_active": False}).json()
+    inactive = client.get("/api/v1/products/", params={"isActive": False}).json()
     assert [p["code"] for p in inactive["data"]] == ["OFF"]
 
 

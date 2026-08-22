@@ -8,7 +8,7 @@ from src.modules.additional_services.schemas import (
     AdditionalServiceCreate,
     AdditionalServiceUpdate,
 )
-from src.shared.crud import CRUDService
+from src.shared.crud import CRUDService, ListSort
 from src.shared.database import get_db
 
 
@@ -28,6 +28,7 @@ class AdditionalServiceService(
         is_active: Optional[bool] = None,
         limit: int = 20,
         offset: int = 0,
+        sort: ListSort = "name",
     ) -> Tuple[List[AdditionalServiceModel], int]:
         """Lists services filtered by name search and/or active flag; ``(items, total)``."""
         query = self.db.query(AdditionalServiceModel)
@@ -35,6 +36,7 @@ class AdditionalServiceService(
             query = query.filter(AdditionalServiceModel.name.ilike(f"%{search}%"))
         if is_active is not None:
             query = query.filter(AdditionalServiceModel.is_active.is_(is_active))
+        query = self._apply_sort(query, sort, AdditionalServiceModel.name)
         return self._paginate(query, limit, offset)
 
 
