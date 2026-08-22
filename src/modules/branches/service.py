@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from src.modules.branches.model import BranchModel
 from src.modules.branches.schemas import BranchCreate, BranchUpdate
-from src.shared.crud import CRUDService
+from src.shared.crud import CRUDService, ListSort
 from src.shared.database import get_db
 from src.shared.exceptions import EntityNotFoundError, ValidationError
 
@@ -56,14 +56,29 @@ class BranchService(CRUDService[BranchModel, BranchCreate, BranchUpdate]):
         """Gets a branch by its code."""
         return self.db.query(BranchModel).filter(BranchModel.code == code).first()
 
-    def search_paginated(
-        self, search: str, limit: int = 20, offset: int = 0
+    def list_branches(
+        self,
+        search: Optional[str] = None,
+        is_active: Optional[bool] = None,
+        sort: ListSort = "name",
+        limit: int = 20,
+        offset: int = 0,
     ) -> Tuple[List[BranchModel], int]:
-        """Searches branches by code or name; ``(items, total)``."""
-        pattern = f"%{search}%"
-        query = self.db.query(BranchModel).filter(
-            BranchModel.code.ilike(pattern) | BranchModel.name.ilike(pattern)
-        )
+        """Lists branches with optional search/active filter and ordering.
+
+        ``is_active`` was a column the listing showed and could toggle but not
+        filter by -- and a branch is retired by unsetting it, never deleted, so
+        the inactive ones accumulate in the middle of the list.
+        """
+        query = self.db.query(BranchModel)
+        if search:
+            pattern = f"%{search}%"
+            query = query.filter(
+                BranchModel.code.ilike(pattern) | BranchModel.name.ilike(pattern)
+            )
+        if is_active is not None:
+            query = query.filter(BranchModel.is_active.is_(is_active))
+        query = self._apply_sort(query, sort, BranchModel.name)
         return self._paginate(query, limit, offset)
 
 

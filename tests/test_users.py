@@ -583,3 +583,78 @@ def test_permission_matrix_reflects_roles():
     assert RESOURCE_ROLES["products:read"] == (UserRole.ADMIN, UserRole.SELLER)
     assert UserRole.OPERATOR in RESOURCE_ROLES["cutting_plan"]
     assert UserRole.OPERATOR not in RESOURCE_ROLES["orders:write"]
+
+
+# --- Listing facets ------------------------------------------------------------
+
+
+def test_list_users_filter_by_role_branch_and_active(client, auth, db_session):
+    """The listing showed role, branch and status as columns but could filter by none."""
+    from src.modules.users.model import UserModel
+
+    admin = auth("administrador")
+    _create_user(
+        client, admin, email="ana@empresa.com", full_name="Ana", role="vendedor"
+    )
+    beto = _create_user(
+        client, admin, email="beto@empresa.com", full_name="Beto", role="operador"
+    ).json()["data"]
+    _create_user(
+        client, admin, email="caro@empresa.com", full_name="Caro", role="operador"
+    )
+
+    by_role = client.get(
+        "/api/v1/users/", params={"role": "operador"}, headers=admin
+    ).json()
+    assert [u["email"] for u in by_role["data"]] == [
+        "beto@empresa.com",
+        "caro@empresa.com",
+    ]
+
+    # Repeating the parameter filters by several roles at once.
+    two_roles = client.get(
+        "/api/v1/users/", params={"role": ["vendedor", "operador"]}, headers=admin
+    ).json()
+    assert {u["email"] for u in two_roles["data"]} == {
+        "ana@empresa.com",
+        "beto@empresa.com",
+        "caro@empresa.com",
+    }
+
+    by_branch = client.get(
+        "/api/v1/users/",
+        params={"branchId": _BRANCH, "role": "operador"},
+        headers=admin,
+    ).json()
+    assert by_branch["meta"]["pagination"]["total"] == 2
+
+    db_session.query(UserModel).filter(UserModel.id == beto["id"]).update(
+        {"is_active": False}
+    )
+    db_session.commit()
+
+    inactive = client.get(
+        "/api/v1/users/", params={"isActive": False}, headers=admin
+    ).json()
+    assert [u["email"] for u in inactive["data"]] == ["beto@empresa.com"]
+    # Omitting the flag keeps listing both: the admin manages deactivated users.
+    both = client.get(
+        "/api/v1/users/", params={"role": "operador"}, headers=admin
+    ).json()
+    assert both["meta"]["pagination"]["total"] == 2
+
+
+def test_list_users_is_ordered_by_name_and_sort_switches_it(client, auth):
+    """A listing with no total order can repeat or skip rows between pages."""
+    admin = auth("administrador")
+    _create_user(client, admin, email="zoe@empresa.com", full_name="Zoe")
+    _create_user(client, admin, email="ana@empresa.com", full_name="Ana")
+
+    listed = client.get("/api/v1/users/", headers=admin).json()["data"]
+    names = [u["fullName"] for u in listed]
+    assert names == sorted(names)
+
+    recent = client.get(
+        "/api/v1/users/", params={"sort": "recent"}, headers=admin
+    ).json()["data"]
+    assert [u["id"] for u in recent] == sorted([u["id"] for u in recent], reverse=True)

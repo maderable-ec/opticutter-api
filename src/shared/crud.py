@@ -1,4 +1,4 @@
-from typing import Generic, List, Optional, Tuple, Type, TypeVar
+from typing import Generic, List, Literal, Optional, Tuple, Type, TypeVar
 
 from pydantic import BaseModel
 from sqlalchemy import inspect
@@ -11,6 +11,11 @@ from src.shared.exceptions import ConflictError, EntityNotFoundError
 from src.shared.mixins import AuditMixin
 
 ModelT = TypeVar("ModelT", bound=Base)
+
+# The sort every CRUD listing offers. ``name`` is the default everywhere: these are
+# reference catalogues, read alphabetically. ``recent``/``oldest`` exist because the
+# back office also asks "what did we just add?".
+ListSort = Literal["name", "recent", "oldest"]
 CreateT = TypeVar("CreateT", bound=BaseModel)
 UpdateT = TypeVar("UpdateT", bound=BaseModel)
 
@@ -48,10 +53,29 @@ class CRUDService(Generic[ModelT, CreateT, UpdateT]):
     def _paginate(
         self, query: Query, limit: int, offset: int
     ) -> Tuple[List[ModelT], int]:
-        """Counts the total and returns the page; reusable by filtered searches."""
+        """Counts the total and returns the page; reusable by filtered searches.
+
+        Applies no ordering of its own: callers that page a listing must order it
+        themselves (``_apply_sort`` does it). Paging an unordered query lets
+        Postgres repeat or skip rows between pages.
+        """
         total = query.count()
         items = query.offset(offset).limit(limit).all()
         return items, total
+
+    def _apply_sort(self, query: Query, sort: str, *name_columns) -> Query:
+        """Orders a listing by ``sort``, always with a primary-key tiebreaker.
+
+        The tiebreaker is not cosmetic. Without a *total* order, a paged query has
+        no defined answer for "the next 20 rows" and Postgres may hand back one it
+        already sent -- the bug ``test_list_is_ordered_by_name_and_pages_do_not_overlap``
+        was written to pin for products, and which every other CRUD listing had.
+        """
+        if sort == "recent":
+            return query.order_by(self.model.id.desc())
+        if sort == "oldest":
+            return query.order_by(self.model.id.asc())
+        return query.order_by(*name_columns, self.model.id.asc())
 
     def create(self, data: CreateT) -> ModelT:
         return self._persist(self.model(**data.model_dump()))

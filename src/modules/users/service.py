@@ -7,7 +7,7 @@ from src.modules.branches.model import BranchModel
 from src.modules.users.enums import UserRole
 from src.modules.users.model import UserModel
 from src.modules.users.schemas import ProfileUpdate, UserCreate, UserUpdate
-from src.shared.crud import CRUDService
+from src.shared.crud import CRUDService, ListSort
 from src.shared.database import get_db
 from src.shared.exceptions import (
     AuthenticationError,
@@ -103,14 +103,35 @@ class UserService(CRUDService[UserModel, UserCreate, UserUpdate]):
             return None
         return user
 
-    def search_paginated(
-        self, search: str, limit: int = 20, offset: int = 0
+    def list_users(
+        self,
+        search: Optional[str] = None,
+        roles: Optional[List[UserRole]] = None,
+        branch_id: Optional[int] = None,
+        is_active: Optional[bool] = None,
+        sort: ListSort = "name",
+        limit: int = 20,
+        offset: int = 0,
     ) -> Tuple[List[UserModel], int]:
-        """Searches users by email or name; ``(items, total)``."""
-        pattern = f"%{search}%"
-        query = self.db.query(UserModel).filter(
-            UserModel.email.ilike(pattern) | UserModel.full_name.ilike(pattern)
-        )
+        """Lists users with optional search, facets and ordering; ``(items, total)``.
+
+        ``roles``, ``branch_id`` and ``is_active`` were all columns of the admin
+        listing with no way to filter by them, on the one page where "show me the
+        operators of this branch" is the question actually being asked.
+        """
+        query = self.db.query(UserModel)
+        if search:
+            pattern = f"%{search}%"
+            query = query.filter(
+                UserModel.email.ilike(pattern) | UserModel.full_name.ilike(pattern)
+            )
+        if roles:
+            query = query.filter(UserModel.role.in_([r.value for r in roles]))
+        if branch_id is not None:
+            query = query.filter(UserModel.branch_id == branch_id)
+        if is_active is not None:
+            query = query.filter(UserModel.is_active.is_(is_active))
+        query = self._apply_sort(query, sort, UserModel.full_name)
         return self._paginate(query, limit, offset)
 
     def list_by_roles(self, roles: List[UserRole]) -> List[UserModel]:

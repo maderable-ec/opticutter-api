@@ -12,6 +12,7 @@ from src.modules.additional_services.service import (
     additional_service_service,
 )
 from src.modules.users.dependencies import require_permission
+from src.shared.crud import ListSort
 from src.shared.pagination import PageParams
 from src.shared.responses import (
     ERROR_RESPONSES,
@@ -58,10 +59,16 @@ def list_additional_services(
     is_active: Optional[bool] = Query(
         None, alias="isActive", description="Filter by active flag"
     ),
+    sort: ListSort = Query(
+        default="name",
+        description="Listing order: by name (default), or newest/oldest first",
+    ),
     svc: AdditionalServiceService = Depends(additional_service_service),
 ):
     """Lists additional services with optional search/active filter and pagination."""
-    items, total = svc.search_paginated(search, is_active, paging.limit, paging.offset)
+    items, total = svc.search_paginated(
+        search, is_active, paging.limit, paging.offset, sort=sort
+    )
     return page(items, total, paging.limit, paging.offset)
 
 
