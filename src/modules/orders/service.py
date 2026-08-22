@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime, time, timedelta
 from typing import List, Optional, Tuple
 
 from fastapi import Depends
@@ -93,19 +93,59 @@ class OrderService(BranchScopedMixin):
         branch_filter: Optional[int] = None,
         limit: int = 20,
         offset: int = 0,
+        search: Optional[str] = None,
+        client_filter: Optional[int] = None,
+        created_from: Optional[date] = None,
+        created_to: Optional[date] = None,
+        sort: str = "oldest",
     ) -> Tuple[List[OrderModel], int]:
-        """Lists orders (oldest first, FIFO) with total count: ``(items, total)``.
+        """Lists orders with total count: ``(items, total)``.
 
         ``status`` filters by one or more statuses (empty list/``None`` = all).
         ``branch_scope`` isolates staff to their branch; the admin (``None``)
         sees all and can narrow to one with ``branch_filter``.
+
+        ``search`` matches the order code or the client (identifier/first/last
+        name), and also the order id when the term is all digits -- the shop
+        says "order 42" as often as it reads the code off the sheet.
+
+        ``sort`` defaults to ``oldest`` because the workshop reads this listing
+        FIFO; the back office asks for ``recent`` explicitly.
         """
         query = self.db.query(OrderModel)
         if status:
             query = query.filter(OrderModel.status.in_([s.value for s in status]))
+        if client_filter is not None:
+            query = query.filter(OrderModel.client_id == client_filter)
+        if search:
+            pattern = f"%{search}%"
+            # Outer join: an order always has a client, but the join must not
+            # silently drop rows if that ever stops holding.
+            query = query.outerjoin(ClientModel, OrderModel.client_id == ClientModel.id)
+            term = (
+                OrderModel.code.ilike(pattern)
+                | ClientModel.identifier.ilike(pattern)
+                | ClientModel.first_name.ilike(pattern)
+                | ClientModel.last_name.ilike(pattern)
+            )
+            if search.strip().isdigit():
+                term = term | (OrderModel.id == int(search.strip()))
+            query = query.filter(term)
+        # ``created_at`` is UTC-naive (TimestampMixin), so the day boundaries are
+        # UTC ones. ``created_to`` is inclusive: compare against the next midnight.
+        if created_from is not None:
+            query = query.filter(
+                OrderModel.created_at >= datetime.combine(created_from, time.min)
+            )
+        if created_to is not None:
+            query = query.filter(
+                OrderModel.created_at
+                < datetime.combine(created_to + timedelta(days=1), time.min)
+            )
         query = self._apply_branch_scope(query, branch_scope, branch_filter)
         total = query.count()
-        orders = query.order_by(OrderModel.id.asc()).offset(offset).limit(limit).all()
+        order_by = OrderModel.id.desc() if sort == "recent" else OrderModel.id.asc()
+        orders = query.order_by(order_by).offset(offset).limit(limit).all()
         return orders, total
 
     def create(self, data: OrderCreate, actor: Optional[Actor] = None) -> OrderModel:
