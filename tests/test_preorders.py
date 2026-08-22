@@ -233,3 +233,120 @@ def test_update_preorder_changes_strategy(client):
     data = upd.json()["data"]
     assert data["strategy"] == "longOffcuts"
     assert data["optimization"]["strategy"] == "longOffcuts"
+
+
+def test_list_preorders_filter_by_multiple_statuses(client, db_session):
+    """Repeating ``status`` filters by several at once; one occurrence still works."""
+    c, b = _setup(client)
+    p1 = _create_preorder(client, c, b, width=600).json()["data"]
+    p2 = _create_preorder(client, c, b, width=500).json()["data"]
+    p3 = _create_preorder(client, c, b, width=400).json()["data"]
+
+    # Move two of them off 'draft' directly: the transitions themselves are
+    # covered by the review-flow tests, this one is about the filter.
+    db_session.get(PreOrderModel, p2["id"]).status = "sent"
+    db_session.get(PreOrderModel, p3["id"]).status = "confirmed"
+    db_session.commit()
+
+    both = client.get(
+        "/api/v1/preorders/", params={"status": ["draft", "confirmed"]}
+    ).json()
+    assert {p["id"] for p in both["data"]} == {p1["id"], p3["id"]}
+    assert both["meta"]["pagination"]["total"] == 2
+
+    # A single occurrence keeps behaving as it did before the param went plural.
+    only_sent = client.get("/api/v1/preorders/", params={"status": "sent"}).json()
+    assert [p["id"] for p in only_sent["data"]] == [p2["id"]]
+
+
+def test_list_preorders_defaults_to_newest_first(client):
+    """Nothing reads this listing FIFO, and newest-first is what it always returned."""
+    c, b = _setup(client)
+    p1 = _create_preorder(client, c, b, width=600).json()["data"]
+    p2 = _create_preorder(client, c, b, width=500).json()["data"]
+    p3 = _create_preorder(client, c, b, width=400).json()["data"]
+
+    resp = client.get("/api/v1/preorders/").json()
+    assert [p["id"] for p in resp["data"]] == [p3["id"], p2["id"], p1["id"]]
+
+    oldest = client.get("/api/v1/preorders/", params={"sort": "oldest"}).json()
+    assert [p["id"] for p in oldest["data"]] == [p1["id"], p2["id"], p3["id"]]
+
+
+def test_list_preorders_search_by_code_id_and_client(client):
+    c1 = _create_client(client)
+    c2 = _create_client(client, identifier="0987654321", phone="0987654321")
+    # Distinguish the second client: _create_client always names them Ada Lovelace.
+    client.put(
+        f"/api/v1/clients/{c2['id']}",
+        json={
+            "identifier": "0987654321",
+            "firstName": "Grace",
+            "lastName": "Hopper",
+            "phone": "0987654321",
+        },
+    )
+    b = _create_board(client)
+    p1 = _create_preorder(client, c1, b, width=600).json()["data"]
+    p2 = _create_preorder(client, c2, b, width=500).json()["data"]
+
+    # By quote code (a fragment of it is enough).
+    by_code = client.get("/api/v1/preorders/", params={"search": p2["code"]}).json()
+    assert [p["id"] for p in by_code["data"]] == [p2["id"]]
+
+    # By client last name, case-insensitive.
+    by_client = client.get("/api/v1/preorders/", params={"search": "hopper"}).json()
+    assert [p["id"] for p in by_client["data"]] == [p2["id"]]
+
+    # By client identifier.
+    by_ident = client.get("/api/v1/preorders/", params={"search": "0987654321"}).json()
+    assert [p["id"] for p in by_ident["data"]] == [p2["id"]]
+
+    # An all-digit term also matches the pre-order id exactly.
+    by_id = client.get("/api/v1/preorders/", params={"search": str(p1["id"])}).json()
+    assert p1["id"] in [p["id"] for p in by_id["data"]]
+
+    # No match: empty page, and the total reflects the filter, not the table.
+    none = client.get("/api/v1/preorders/", params={"search": "zzzz"}).json()
+    assert none["data"] == []
+    assert none["meta"]["pagination"]["total"] == 0
+
+
+def test_list_preorders_filter_by_client(client):
+    c1 = _create_client(client)
+    c2 = _create_client(client, identifier="0987654321", phone="0987654321")
+    b = _create_board(client)
+    p1 = _create_preorder(client, c1, b, width=600).json()["data"]
+    p2 = _create_preorder(client, c2, b, width=500).json()["data"]
+
+    resp = client.get("/api/v1/preorders/", params={"clientId": c2["id"]}).json()
+    assert [p["id"] for p in resp["data"]] == [p2["id"]]
+    assert p1["id"] not in [p["id"] for p in resp["data"]]
+    assert resp["meta"]["pagination"]["total"] == 1
+
+
+def test_list_preorders_filter_by_created_day_range(client, db_session):
+    c, b = _setup(client)
+    p1 = _create_preorder(client, c, b, width=600).json()["data"]
+    p2 = _create_preorder(client, c, b, width=500).json()["data"]
+
+    # Backdate the first one; created_at is UTC-naive, so the range is a UTC day.
+    db_session.query(PreOrderModel).filter(PreOrderModel.id == p1["id"]).update(
+        {"created_at": datetime.utcnow() - timedelta(days=3)}
+    )
+    db_session.commit()
+
+    today = datetime.utcnow().date()
+    old_day = today - timedelta(days=3)
+
+    # `createdTo` is inclusive: the backdated quote's own day must return it.
+    upto = client.get(
+        "/api/v1/preorders/", params={"createdTo": old_day.isoformat()}
+    ).json()
+    assert [p["id"] for p in upto["data"]] == [p1["id"]]
+
+    # `createdFrom` is inclusive too, and today's quote is on today's boundary.
+    since = client.get(
+        "/api/v1/preorders/", params={"createdFrom": today.isoformat()}
+    ).json()
+    assert [p["id"] for p in since["data"]] == [p2["id"]]
