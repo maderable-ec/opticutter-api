@@ -1009,7 +1009,10 @@ class ProformaService:
                             cell_style,
                         ),
                         f"{entry.get('height', 0):.0f}×{entry.get('width', 0):.0f} mm",
-                        f"{entry.get('thickness', 0):.0f} mm",
+                        # ``g`` so a whole thickness prints "15 mm" while a
+                        # fractional one (OSB 11.1, MDF fondo 5.5) keeps its
+                        # decimal instead of being rounded to a wrong number.
+                        f"{entry.get('thickness', 0):g} mm",
                         str(entry.get("count", 0)),
                     ]
                 )

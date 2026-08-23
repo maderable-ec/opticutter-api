@@ -9,11 +9,13 @@ paired by an explicit, configurable ``family`` attribute (not the editable code)
 from types import SimpleNamespace
 
 import pytest
+from pydantic import ValidationError
 
 from src.modules.products.service import (
     BOARD_THICKNESS_TO_EDGE_WIDTH,
     ProductService,
 )
+from src.modules.products.types.board import BoardAttributes
 from src.modules.products.types.edge_banding import BandType
 from src.shared.exceptions import BusinessRuleError
 
@@ -111,3 +113,30 @@ def test_non_board_product_is_rejected(mock_session):
     )
     with pytest.raises(BusinessRuleError):
         ProductService(mock_session).find_edge_bandings_for_board(1)
+
+
+# --------------------------------------------------------------------------- #
+# Board thickness accepts the fractional values the vendor actually sells
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("thickness", [15, 18, 5.5, 9.5, 11.1, 18.3, 3.6])
+def test_board_thickness_accepts_whole_and_fractional_mm(thickness):
+    """OSB, MDF fondo and thin plywood ship in fractional thicknesses and are
+    in the external catalog; an integer-only field silently kept them out."""
+    attrs = BoardAttributes(height=2440, width=1220, thickness=thickness)
+    assert attrs.thickness == pytest.approx(float(thickness))
+
+
+@pytest.mark.parametrize("thickness", [0, -1, -0.5])
+def test_board_thickness_still_rejects_impossible_values(thickness):
+    with pytest.raises(ValidationError):
+        BoardAttributes(height=2440, width=1220, thickness=thickness)
+
+
+def test_fractional_thickness_coordinates_no_edge_banding(mock_session):
+    """A 5.5mm board has no coordinated tapacanto, and the lookup must return
+    an empty list rather than blow up on the int() the width rule applies."""
+    svc = ProductService(mock_session)
+    mock_session.get.return_value = _board(thickness=5.5)
+    assert svc.find_edge_bandings_for_board(1) == []

@@ -1,7 +1,7 @@
 from enum import Enum
 from typing import Optional
 
-from pydantic import Field, PositiveInt
+from pydantic import Field, PositiveFloat, PositiveInt
 
 from src.shared.schemas import CamelModel
 
@@ -56,7 +56,10 @@ class BoardAttributes(CamelModel):
         ..., description="Height (length, first dimension) in mm"
     )
     width: PositiveInt = Field(..., description="Width (second dimension) in mm")
-    thickness: PositiveInt = Field(..., description="Thickness in mm")
+    # Fractional, like the edge banding's: OSB, MDF fondo and thin plywood ship
+    # in 5.5, 9.5, 11.1, 18.3mm and the vendor's catalog carries them. Only the
+    # two dimensions the optimizer cuts along stay integral.
+    thickness: PositiveFloat = Field(..., description="Thickness in mm")
     grain_direction: Optional[str] = Field(
         None, max_length=4, description="Grain direction"
     )

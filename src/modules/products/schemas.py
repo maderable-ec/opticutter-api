@@ -1,4 +1,4 @@
-from typing import Annotated, Literal, Optional, Union
+from typing import Annotated, List, Literal, Optional, Union
 
 from pydantic import Field, confloat
 
@@ -65,11 +65,34 @@ class ProductResponse(CamelModel):
     attributes: dict
 
 
+class ProductSyncIssue(CamelModel):
+    """One source row the sync could not import.
+
+    Carries the vendor's own code and article name, because fixing it means
+    finding that row in the inventory system — a row number would be useless.
+    """
+
+    code: str
+    name: str
+    message: str
+
+
 class ProductSyncResult(CamelModel):
-    """Summary of an external catalog CSV sync."""
+    """Summary of a sync against the external inventory system."""
 
     created: int
     updated: int
     deactivated: int
     deleted: int
     skipped_medio: int
+    # Rows the source returned but has taken out of service (est/FecEli). They
+    # are reported rather than silently dropped: together with `deleted` and
+    # `deactivated` they explain why the catalog shrank.
+    skipped_inactive: int = 0
+    # Rows whose data the sync could not parse. They are skipped, never fatal:
+    # the source is a live database, so an article with no usable dimensions
+    # can't be "fixed and re-uploaded" before every run. See `issues`.
+    skipped_invalid: int = 0
+    issues: List[ProductSyncIssue] = []
+    # True when nothing was written — the pass ran and rolled back.
+    dry_run: bool = False

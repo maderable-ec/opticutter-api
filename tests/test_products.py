@@ -1,7 +1,12 @@
 """Tests for the products module (multi-type catalog: CRUD + per-type validation)."""
 
+from decimal import Decimal
+
+from sqlalchemy.exc import OperationalError
+
 from src.modules.orders.schemas import OrderCreate
 from src.modules.orders.service import OrderService
+from src.modules.products.external_catalog import external_catalog
 
 
 def _board_payload(code="MEL18", name="Melamina 18mm"):
@@ -167,49 +172,115 @@ def test_board_has_no_alias_attribute(client):
 
 
 # --------------------------------------------------------------------------- #
-# External catalog CSV sync
+# External inventory sync
+#
+# The vendor's MySQL is swapped for canned ``marticulo`` rows, so the whole
+# pipeline runs for real — column mapping, active/retired split, validation,
+# upsert and reconciliation — without a live external server.
 # --------------------------------------------------------------------------- #
-_SYNC_HEADER = (
-    "CODIGO;ARTICULO;MARCA;TIPO;CATEGORIA;MED;GRUPO;IVA;UNI;CAJ;"
-    "P.Comp;Tot. Inv;Util%;P.venta;P.venta2;P.Venta3;OBS."
+
+
+class _FakeResult:
+    def __init__(self, records):
+        self._records = records
+
+    def mappings(self):
+        return self
+
+    def all(self):
+        return self._records
+
+
+class _FakeConnection:
+    def __init__(self, records):
+        self._records = records
+
+    def execute(self, _query):
+        return _FakeResult(self._records)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class _FakeEngine:
+    def __init__(self, records):
+        self.records = records
+
+    def connect(self):
+        return _FakeConnection(self.records)
+
+
+def _load_inventory(monkeypatch, *records):
+    """Points the shared source at these rows (same shape as ``isolated_cache``)."""
+    monkeypatch.setattr(external_catalog, "_engine", _FakeEngine(list(records)))
+    monkeypatch.setattr(external_catalog, "_initialized", True)
+
+
+def _board_record(**overrides):
+    record = {
+        "cin": "1033",
+        "nom": "MDP RH ROBLE BARROCO AMBAR (2.07X2.80)M-15MM",
+        "mar": "KRONOSPAN",
+        "tip": "MDP",
+        "cat": "TABLEROS",
+        "gru": "MDP MELAMINA RH",
+        "iva": Decimal("15.00"),
+        "ven": Decimal("14.650000"),
+        "obs": "CSH - Cashmere",
+        "est": 1,
+        "FecEli": None,
+    }
+    record.update(overrides)
+    return record
+
+
+def _edge_record(**overrides):
+    record = {
+        "cin": "57",
+        "nom": "TAPACANTO IBIZA 19X0.40MM",
+        "mar": "HF",
+        "tip": "TAPACANTOS",
+        "cat": "TAPACANTOS",
+        "gru": "CANTO MADERADO",
+        "iva": Decimal("15.00"),
+        "ven": Decimal("0.350000"),
+        "obs": "CSH - Cashmere",
+        "est": 1,
+        "FecEli": None,
+    }
+    record.update(overrides)
+    return record
+
+
+_MEDIO_RECORD = _board_record(
+    cin=9999,
+    nom="MDP RH IBIZA (2.15X2.44)M-15MM (MEDIO)",
+    mar="DURATEX",
+    ven=Decimal("44.130000"),
+    obs="",
+)
+
+_OTHER_BOARD_RECORD = _board_record(
+    cin=9001,
+    nom="MDP RH OTRO DISEÑO (1.83X2.44)M-15MM",
+    obs="",
 )
 
 
-def _sync_csv(*data_rows):
-    lines = [
-        "Reporte de inventarios;;;;;;;;;;;;;;;;",
-        "Para el día jueves, 20 de agosto del 2026;;;;;;;;;;;;;;;;",
-        ";;;;;;;;;;;;;;;;",
-        _SYNC_HEADER,
-        *data_rows,
-        ";;;;;;;;;;TOTAL:;0;;;;;",
-    ]
-    return "\n".join(lines).encode("utf-8")
+def _sync(client, dry_run=False):
+    return client.post(f"/api/v1/products/sync?dryRun={str(dry_run).lower()}")
 
 
-_BOARD_ROW = (
-    "1033;MDP RH ROBLE BARROCO AMBAR (2.07X2.80)M-15MM;KRONOSPAN;MDP;TABLEROS;"
-    "Uni;MDP MELAMINA RH;15%;60;0;10.82;649.36;35%;14.65;13.47;13.47;CSH - Cashmere"
-)
-_EDGE_ROW = (
-    "57;TAPACANTO IBIZA 19X0.40MM;HF;TAPACANTOS;TAPACANTOS;Uni;CANTO MADERADO;"
-    "15%;100;0;0.18;18;93%;0.35;0.35;0.35;CSH - Cashmere"
-)
-_MEDIO_ROW = (
-    "9999;MDP RH IBIZA (2.15X2.44)M-15MM (MEDIO);DURATEX;MDP;TABLEROS;Uni;"
-    "MDP MELAMINA RH;15%;1;0;31.5;31.5;40%;44.13;42.39;42.39;"
-)
+def _issues(resp):
+    return resp.json()["data"]["issues"]
 
 
-def _sync(client, csv_bytes, filename="catalog.csv"):
-    return client.post(
-        "/api/v1/products/sync",
-        files={"file": (filename, csv_bytes, "text/csv")},
-    )
-
-
-def test_sync_happy_path_creates_board_and_edge_banding(client):
-    resp = _sync(client, _sync_csv(_BOARD_ROW, _EDGE_ROW))
+def test_sync_happy_path_creates_board_and_edge_banding(client, monkeypatch):
+    _load_inventory(monkeypatch, _board_record(), _edge_record())
+    resp = _sync(client)
     assert resp.status_code == 200, resp.json()
     data = resp.json()["data"]
     assert data == {
@@ -218,6 +289,10 @@ def test_sync_happy_path_creates_board_and_edge_banding(client):
         "deactivated": 0,
         "deleted": 0,
         "skippedMedio": 0,
+        "skippedInactive": 0,
+        "skippedInvalid": 0,
+        "issues": [],
+        "dryRun": False,
     }
 
     listed = client.get("/api/v1/products/?search=ROBLE BARROCO").json()["data"]
@@ -226,7 +301,7 @@ def test_sync_happy_path_creates_board_and_edge_banding(client):
     assert board["type"] == "board"
     assert board["code"] == "1033"
     assert board["externalCode"] == "TABLEROS:1033"
-    # P.venta (14.65) comes without IVA; the catalog stores the price with the
+    # `ven` (14.65) comes without IVA; the catalog stores the price with the
     # row's own IVA rate (15%) already included: 14.65 * 1.15 = 16.8475 -> 16.85.
     assert board["price"] == 16.85
     assert board["attributes"]["width"] == 2070
@@ -242,116 +317,355 @@ def test_sync_happy_path_creates_board_and_edge_banding(client):
     assert eb["attributes"]["subtype"] == "Wood Grain"
     assert eb["attributes"]["family"] == "Cashmere"
     assert eb["attributes"]["alias"] == "CSH"
-    # No band-type column in the vendor export: inferred from thickness (<1mm = Soft).
+    # No band-type column in the vendor's schema: inferred from thickness
+    # (<1mm = Soft).
     assert eb["attributes"]["bandType"] == "Soft"
 
 
-def test_sync_infers_hard_band_type_from_thickness(client):
-    hard_row = _EDGE_ROW.replace("19X0.40MM", "40X1.5MM")
-    _sync(client, _sync_csv(hard_row))
+def test_sync_infers_hard_band_type_from_thickness(client, monkeypatch):
+    _load_inventory(monkeypatch, _edge_record(nom="TAPACANTO IBIZA 40X1.5MM"))
+    _sync(client)
     eb = client.get("/api/v1/products/?search=IBIZA").json()["data"][0]
     assert eb["attributes"]["thickness"] == 1.5
     assert eb["attributes"]["bandType"] == "Hard"
 
 
-def test_sync_skips_medio_row(client):
-    resp = _sync(client, _sync_csv(_MEDIO_ROW))
+def test_sync_skips_medio_row(client, monkeypatch):
+    _load_inventory(monkeypatch, _MEDIO_RECORD)
+    resp = _sync(client)
     assert resp.status_code == 200
-    assert resp.json()["data"] == {
-        "created": 0,
-        "updated": 0,
-        "deactivated": 0,
-        "deleted": 0,
-        "skippedMedio": 1,
-    }
+    assert resp.json()["data"]["skippedMedio"] == 1
+    assert resp.json()["data"]["created"] == 0
     assert client.get("/api/v1/products/").json()["data"] == []
 
 
-def test_sync_rejects_duplicate_codigo_with_zero_writes(client):
-    dup_row = _EDGE_ROW.replace(
-        "TAPACANTO IBIZA 19X0.40MM", "TAPACANTO KALA WHITE 19X1.5MM"
+def test_sync_skips_a_duplicate_codigo_and_keeps_the_first(client, monkeypatch):
+    _load_inventory(
+        monkeypatch,
+        _edge_record(),
+        _edge_record(nom="TAPACANTO KALA WHITE 19X1.5MM"),
     )
-    resp = _sync(client, _sync_csv(_EDGE_ROW, dup_row))
-    assert resp.status_code == 422
-    errors = resp.json()["errors"]
-    assert any("duplicado" in e["message"] for e in errors)
-    assert client.get("/api/v1/products/").json()["data"] == []
+    resp = _sync(client)
+    assert resp.status_code == 200
+    assert resp.json()["data"]["created"] == 1
+    assert resp.json()["data"]["skippedInvalid"] == 1
+    assert any("duplicado" in i["message"] for i in _issues(resp))
 
 
-def test_sync_rejects_codigo_shared_between_board_and_edge_banding(client):
+def test_sync_skips_a_codigo_shared_between_board_and_edge_banding(client, monkeypatch):
     """`code` is the bare CODIGO (not namespaced by categoría), so a board and
     an edge banding sharing the same CODIGO would collide on `code` even
     though their `external_code`s differ ("TABLEROS:1033" vs "TAPACANTOS:1033")."""
-    clashing_edge_row = _EDGE_ROW.replace("57;", "1033;", 1)
-    resp = _sync(client, _sync_csv(_BOARD_ROW, clashing_edge_row))
-    assert resp.status_code == 422
-    errors = resp.json()["errors"]
-    assert any("duplicado" in e["message"] for e in errors)
-    assert client.get("/api/v1/products/").json()["data"] == []
+    _load_inventory(monkeypatch, _board_record(), _edge_record(cin=1033))
+    resp = _sync(client)
+    assert resp.status_code == 200
+    assert resp.json()["data"]["created"] == 1
+    assert any("duplicado" in i["message"] for i in _issues(resp))
 
 
-def test_sync_rejects_unparseable_dimensions_with_zero_writes(client):
-    bad_row = (
-        "2026;PLYWOOD ESTANDAR (244X122)X4MM;PELIKANO;PLYWOOD;TABLEROS;Uni;"
-        "ESTANDAR;15%;29;0;8.82;255.79;25%;11.09;11.09;11.09;"
+def test_sync_skips_unparseable_dimensions_and_imports_the_rest(client, monkeypatch):
+    """The real inventory carries articles whose name has no usable dimensions
+    at all ("LIBRE"). Those can never be parsed, so they must not be able to
+    hold back the hundreds of articles that are perfectly readable."""
+    _load_inventory(
+        monkeypatch,
+        _board_record(),
+        _board_record(
+            cin=2026,
+            nom="PLYWOOD ESTANDAR (244X122)X4MM",
+            tip="PLYWOOD",
+            gru="ESTANDAR",
+        ),
     )
-    resp = _sync(client, _sync_csv(_BOARD_ROW, bad_row))
+    resp = _sync(client)
+    assert resp.status_code == 200
+    assert resp.json()["data"]["created"] == 1
+    assert resp.json()["data"]["skippedInvalid"] == 1
+    assert any("medidas" in i["message"] for i in _issues(resp))
+    assert len(client.get("/api/v1/products/").json()["data"]) == 1
+
+
+def test_sync_skips_a_malformed_price(client, monkeypatch):
+    _load_inventory(monkeypatch, _board_record(ven=None))
+    resp = _sync(client)
+    assert resp.status_code == 200
+    assert any("precio de venta" in i["message"] for i in _issues(resp))
+
+
+def test_sync_skips_a_malformed_iva(client, monkeypatch):
+    _load_inventory(monkeypatch, _board_record(iva="quince"))
+    resp = _sync(client)
+    assert resp.status_code == 200
+    assert any("IVA" in i["message"] for i in _issues(resp))
+
+
+def test_sync_skips_an_unrecognized_category(client, monkeypatch):
+    _load_inventory(
+        monkeypatch, _board_record(), _board_record(cin=8080, cat="HERRAJES")
+    )
+    resp = _sync(client)
+    assert resp.status_code == 200
+    assert resp.json()["data"]["created"] == 1
+    assert any("no reconocida" in i["message"] for i in _issues(resp))
+
+
+def test_sync_refuses_to_steal_a_hand_created_products_name(client, monkeypatch):
+    """Hand-created products are never touched, so a name collision has to be
+    reported rather than resolved — otherwise the unique constraint would."""
+    client.post(
+        "/api/v1/products/",
+        json=_board_payload(code="MANUAL1", name=_board_record()["nom"]),
+    )
+    _load_inventory(monkeypatch, _board_record())
+    resp = _sync(client)
     assert resp.status_code == 422
-    errors = resp.json()["errors"]
-    assert any("medidas" in e["message"] for e in errors)
-    assert client.get("/api/v1/products/").json()["data"] == []
+    assert any("ya lo usa otro producto" in e["message"] for e in resp.json()["errors"])
 
 
-def test_sync_reruns_update_instead_of_duplicating(client):
-    first = _sync(client, _sync_csv(_BOARD_ROW)).json()["data"]
+def test_sync_refuses_to_steal_a_hand_created_products_code(client, monkeypatch):
+    client.post(
+        "/api/v1/products/", json=_board_payload(code="1033", name="Hecho a mano")
+    )
+    _load_inventory(monkeypatch, _board_record())
+    resp = _sync(client)
+    assert resp.status_code == 422
+    assert any("ya lo usa otro producto" in e["message"] for e in resp.json()["errors"])
+
+
+def test_sync_skips_a_name_used_twice_in_the_source(client, monkeypatch):
+    """`name` is unique in the catalog, so of two vendor articles sharing one
+    only the first is imported; the second is reported."""
+    _load_inventory(monkeypatch, _board_record(), _board_record(cin=8081))
+    resp = _sync(client)
+    assert resp.status_code == 200
+    assert resp.json()["data"]["created"] == 1
+    assert any("duplicado" in i["message"] for i in _issues(resp))
+
+
+def test_sync_imports_a_board_with_fractional_thickness(client, monkeypatch):
+    """Real article from the vendor's table. The name always parsed; what
+    rejected it was the catalog's own integer-only thickness field."""
+    _load_inventory(monkeypatch, _board_record(nom="MDF RH (2.44X2.13)M-5.5MM"))
+    resp = _sync(client)
+    assert resp.status_code == 200, resp.json()
+    assert resp.json()["data"]["created"] == 1
+    assert resp.json()["data"]["skippedInvalid"] == 0
+
+    board = client.get("/api/v1/products/?search=MDF RH").json()["data"][0]
+    assert board["attributes"]["thickness"] == 5.5
+
+
+def test_sync_skips_a_board_with_impossible_attributes(client, monkeypatch):
+    _load_inventory(monkeypatch, _board_record(nom="MDP RH PRUEBA (2.07X2.80)M-0MM"))
+    resp = _sync(client)
+    assert resp.status_code == 200
+    assert any("tablero inválidos" in i["message"] for i in _issues(resp))
+
+
+def test_sync_skips_an_edge_banding_with_unparseable_dimensions(client, monkeypatch):
+    # Real shape from the vendor's table: the "MM" suffix is simply missing.
+    _load_inventory(monkeypatch, _edge_record(nom="TAPACANTO CAPRI 22X1.5"))
+    resp = _sync(client)
+    assert resp.status_code == 200
+    assert any("medidas" in i["message"] for i in _issues(resp))
+
+
+def test_sync_skips_an_edge_banding_with_impossible_attributes(client, monkeypatch):
+    _load_inventory(monkeypatch, _edge_record(nom="TAPACANTO CAPRI 0X0.40MM"))
+    resp = _sync(client)
+    assert resp.status_code == 200
+    assert any("tapacanto inválidos" in i["message"] for i in _issues(resp))
+
+
+def test_sync_issue_identifies_the_row_by_vendor_code_and_name(client, monkeypatch):
+    """There's no file to count lines in any more — the operator finds the row
+    in the inventory system by its code and article name."""
+    _load_inventory(
+        monkeypatch,
+        _board_record(),
+        _board_record(cin=4242, nom="TABLERO SIN MEDIDAS RECONOCIBLES"),
+    )
+    resp = _sync(client)
+    assert resp.status_code == 200
+    (issue,) = _issues(resp)
+    assert issue["code"] == "4242"
+    assert issue["name"] == "TABLERO SIN MEDIDAS RECONOCIBLES"
+
+
+def test_sync_reruns_update_instead_of_duplicating(client, monkeypatch):
+    _load_inventory(monkeypatch, _board_record())
+    first = _sync(client).json()["data"]
     assert first["created"] == 1
 
-    changed_row = _BOARD_ROW.replace("14.65;13.47;13.47", "20.00;19.00;19.00")
-    second = _sync(client, _sync_csv(changed_row)).json()["data"]
-    assert second == {
-        "created": 0,
-        "updated": 1,
-        "deactivated": 0,
-        "deleted": 0,
-        "skippedMedio": 0,
-    }
+    _load_inventory(monkeypatch, _board_record(ven=Decimal("20.000000")))
+    second = _sync(client).json()["data"]
+    assert second["created"] == 0
+    assert second["updated"] == 1
+    assert second["deleted"] == 0
 
     listed = client.get("/api/v1/products/?search=ROBLE BARROCO").json()["data"]
     assert len(listed) == 1
     assert listed[0]["price"] == 23.0  # 20.00 * 1.15 IVA
 
 
-_OTHER_BOARD_ROW = (
-    _BOARD_ROW.replace("1033", "9001")
-    .replace("ROBLE BARROCO AMBAR (2.07X2.80)M-15MM", "OTRO DISEÑO (1.83X2.44)M-15MM")
-    .replace("CSH - Cashmere", "")
-)
-
-
-def test_sync_deletes_unused_products_missing_from_a_later_upload(client):
+def test_sync_deletes_unused_products_missing_from_a_later_read(client, monkeypatch):
     """A synced product with no order referencing it is deleted outright,
-    not just deactivated, when it drops out of a later upload."""
-    _sync(client, _sync_csv(_BOARD_ROW, _EDGE_ROW))
-    # Only the edge-banding row appears this time; the board type isn't
-    # touched at all (no TABLEROS rows in this upload).
-    resp = _sync(client, _sync_csv(_EDGE_ROW))
-    assert resp.json()["data"] == {
-        "created": 0,
-        "updated": 1,
-        "deactivated": 0,
-        "deleted": 0,
-        "skippedMedio": 0,
-    }
+    not just deactivated, when it drops out of a later read."""
+    _load_inventory(monkeypatch, _board_record(), _edge_record())
+    _sync(client)
 
-    # A file that DOES include the board type, but omits this specific board
+    # Only the edge banding comes back this time; the board type isn't touched
+    # at all (no TABLEROS rows in this read).
+    _load_inventory(monkeypatch, _edge_record())
+    resp = _sync(client)
+    assert resp.json()["data"]["updated"] == 1
+    assert resp.json()["data"]["deleted"] == 0
+    assert resp.json()["data"]["deactivated"] == 0
+
+    # A read that DOES include the board type, but omits this specific board
     # (never referenced by any order), deletes it outright.
-    resp = _sync(client, _sync_csv(_OTHER_BOARD_ROW))
+    _load_inventory(monkeypatch, _OTHER_BOARD_RECORD)
+    resp = _sync(client)
     assert resp.status_code == 200
     assert resp.json()["data"]["created"] == 1
     assert resp.json()["data"]["deactivated"] == 0
     assert resp.json()["data"]["deleted"] == 1
 
     assert client.get("/api/v1/products/?search=ROBLE BARROCO").json()["data"] == []
+
+
+def test_sync_keeps_a_product_whose_row_stopped_being_readable(client, monkeypatch):
+    """The trap of skip-and-report: a row we failed to parse is missing from
+    the valid set, which is exactly what reconciliation deletes on. "We
+    couldn't read it" must not be confused with "the vendor removed it"."""
+    _load_inventory(monkeypatch, _board_record(), _OTHER_BOARD_RECORD)
+    assert _sync(client).json()["data"]["created"] == 2
+
+    # Someone edits the article in the inventory and breaks its dimensions.
+    _load_inventory(
+        monkeypatch,
+        _board_record(nom="MDP RH ROBLE BARROCO AMBAR SIN MEDIDAS"),
+        _OTHER_BOARD_RECORD,
+    )
+    data = _sync(client).json()["data"]
+    assert data["skippedInvalid"] == 1
+    assert data["deleted"] == 0
+    assert data["deactivated"] == 0
+
+    survivor = client.get("/api/v1/products/?search=ROBLE BARROCO").json()["data"]
+    assert len(survivor) == 1
+    assert survivor[0]["isActive"] is True
+
+
+def test_sync_still_aborts_when_the_source_clashes_with_the_catalog(
+    client, monkeypatch
+):
+    """Unreadable data is the source's problem and gets skipped; a name or code
+    already owned by a hand-created product is the destination's, and importing
+    over it would corrupt a catalog nobody asked to change."""
+    client.post(
+        "/api/v1/products/",
+        json=_board_payload(code="MANUAL9", name=_board_record()["nom"]),
+    )
+    _load_inventory(monkeypatch, _board_record(), _OTHER_BOARD_RECORD)
+    resp = _sync(client)
+    assert resp.status_code == 422
+    # Zero writes: the good row alongside it isn't imported either.
+    assert client.get("/api/v1/products/?search=OTRO DISE").json()["data"] == []
+
+
+def test_sync_retires_products_the_vendor_flagged_inactive(client, monkeypatch):
+    """`est`/`FecEli` make the retirement explicit: the row still comes back,
+    it just no longer counts as part of the catalog."""
+    _load_inventory(monkeypatch, _board_record(), _OTHER_BOARD_RECORD)
+    assert _sync(client).json()["data"]["created"] == 2
+
+    _load_inventory(monkeypatch, _board_record(est=0), _OTHER_BOARD_RECORD)
+    data = _sync(client).json()["data"]
+    assert data["skippedInactive"] == 1
+    assert data["updated"] == 1
+    assert data["deleted"] == 1
+
+    assert client.get("/api/v1/products/?search=ROBLE BARROCO").json()["data"] == []
+
+
+def test_sync_ignores_malformed_data_on_a_retired_row(client, monkeypatch):
+    """A retired article never reaches validation, so bad data on something
+    nobody sells any more can't abort the whole sync."""
+    _load_inventory(
+        monkeypatch,
+        _board_record(),
+        _board_record(cin=7777, nom="CHATARRA SIN FORMATO", est=0),
+    )
+    resp = _sync(client)
+    assert resp.status_code == 200, resp.json()
+    assert resp.json()["data"]["created"] == 1
+    assert resp.json()["data"]["skippedInactive"] == 1
+
+
+def test_sync_aborts_when_the_source_returns_nothing_active(client, monkeypatch):
+    """Reconciliation removes whatever the read didn't bring, so an empty read
+    would wipe the catalog — that's a broken query, never a real catalog."""
+    _load_inventory(monkeypatch, _board_record())
+    _sync(client)
+
+    _load_inventory(monkeypatch, _board_record(est=0))
+    resp = _sync(client)
+    assert resp.status_code == 422
+    assert client.get("/api/v1/products/?search=ROBLE BARROCO").json()["data"] != []
+
+
+def test_sync_fails_loudly_when_the_source_is_unreachable(client, monkeypatch):
+    _load_inventory(monkeypatch, _board_record())
+    _sync(client)
+
+    class _BrokenEngine:
+        def connect(self):
+            raise OperationalError("SELECT 1", {}, Exception("connection refused"))
+
+    monkeypatch.setattr(external_catalog, "_engine", _BrokenEngine())
+    monkeypatch.setattr(external_catalog, "_initialized", True)
+
+    resp = _sync(client)
+    assert resp.status_code == 503
+    assert resp.json()["errors"][0]["code"] == "EXTERNAL_SERVICE_ERROR"
+    # The catalog is untouched: a dead source must never look like an empty one.
+    assert client.get("/api/v1/products/?search=ROBLE BARROCO").json()["data"] != []
+
+
+def test_sync_dry_run_reports_without_writing(client, monkeypatch):
+    _load_inventory(monkeypatch, _board_record(), _edge_record())
+    preview = _sync(client, dry_run=True)
+    assert preview.status_code == 200
+    assert preview.json()["data"] == {
+        "created": 2,
+        "updated": 0,
+        "deactivated": 0,
+        "deleted": 0,
+        "skippedMedio": 0,
+        "skippedInactive": 0,
+        "skippedInvalid": 0,
+        "issues": [],
+        "dryRun": True,
+    }
+    assert client.get("/api/v1/products/").json()["data"] == []
+
+    # ...and the real run then does exactly what the preview announced.
+    applied = _sync(client)
+    assert applied.json()["data"]["created"] == 2
+    assert len(client.get("/api/v1/products/").json()["data"]) == 2
+
+
+def test_sync_dry_run_previews_deletions_without_applying_them(client, monkeypatch):
+    _load_inventory(monkeypatch, _board_record(), _OTHER_BOARD_RECORD)
+    _sync(client)
+
+    _load_inventory(monkeypatch, _OTHER_BOARD_RECORD)
+    preview = _sync(client, dry_run=True).json()["data"]
+    assert preview["deleted"] == 1
+    assert preview["dryRun"] is True
+    # Still there: the pass ran and rolled back.
+    assert client.get("/api/v1/products/?search=ROBLE BARROCO").json()["data"] != []
 
 
 def _mint_order_referencing(client, db_session, board_id, eb_id):
@@ -391,17 +705,19 @@ def _mint_order_referencing(client, db_session, board_id, eb_id):
     )
 
 
-def test_sync_deactivates_products_in_use_missing_from_a_later_upload(
-    client, db_session
+def test_sync_deactivates_products_in_use_missing_from_a_later_read(
+    client, db_session, monkeypatch
 ):
     """A synced product an order actually references gets deactivated instead
-    of deleted, same as before this feature — the FK would reject the delete."""
-    _sync(client, _sync_csv(_BOARD_ROW, _EDGE_ROW))
+    of deleted — the FK would reject the delete."""
+    _load_inventory(monkeypatch, _board_record(), _edge_record())
+    _sync(client)
     board = client.get("/api/v1/products/?search=ROBLE BARROCO").json()["data"][0]
     eb = client.get("/api/v1/products/?search=IBIZA").json()["data"][0]
     _mint_order_referencing(client, db_session, board["id"], eb["id"])
 
-    resp = _sync(client, _sync_csv(_OTHER_BOARD_ROW))
+    _load_inventory(monkeypatch, _OTHER_BOARD_RECORD)
+    resp = _sync(client)
     assert resp.status_code == 200
     assert resp.json()["data"]["deactivated"] == 1
     assert resp.json()["data"]["deleted"] == 0
@@ -410,10 +726,11 @@ def test_sync_deactivates_products_in_use_missing_from_a_later_upload(
     assert original["isActive"] is False
 
 
-def test_sync_never_deactivates_a_hand_created_product(client):
+def test_sync_never_deactivates_a_hand_created_product(client, monkeypatch):
     manual = client.post("/api/v1/products/", json=_board_payload()).json()["data"]
 
-    resp = _sync(client, _sync_csv(_BOARD_ROW))
+    _load_inventory(monkeypatch, _board_record())
+    resp = _sync(client)
     assert resp.status_code == 200
     assert resp.json()["data"]["deactivated"] == 0
 
