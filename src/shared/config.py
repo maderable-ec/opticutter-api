@@ -48,6 +48,21 @@ class Config:
     DB_MAX_OVERFLOW = env.int("DB_MAX_OVERFLOW", 10)
     DB_POOL_RECYCLE_SECONDS = env.int("DB_POOL_RECYCLE_SECONDS", 1800)
 
+    # External inventory (SIFAC) MySQL: read-only source of the product catalog
+    # sync (src/modules/products/external_catalog.py). The `marticulo` table is
+    # latin1, so the charset belongs in the URL — without it the accents in the
+    # product names and the OBS. column come back mangled.
+    #   mysql+pymysql://user:pass@host:port/db?charset=latin1
+    # Empty by default: the sync endpoint answers a clear 503 instead of the
+    # process failing at import time on deployments that don't use it.
+    EXTERNAL_CATALOG_URL = env("EXTERNAL_CATALOG_URL", "")
+    EXTERNAL_CATALOG_CONNECT_TIMEOUT_SECONDS = env.int(
+        "EXTERNAL_CATALOG_CONNECT_TIMEOUT_SECONDS", 10
+    )
+    EXTERNAL_CATALOG_READ_TIMEOUT_SECONDS = env.int(
+        "EXTERNAL_CATALOG_READ_TIMEOUT_SECONDS", 30
+    )
+
     REDIS_URL = env(
         "REDIS_URL",
         {

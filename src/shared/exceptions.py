@@ -62,6 +62,17 @@ class ValidationError(AppError):
     code = "VALIDATION_ERROR"
 
 
+class ExternalServiceError(AppError):
+    """A third-party system this operation depends on is unreachable or failing.
+
+    Distinct from a 5xx of our own: nothing is wrong with this service, so the
+    caller can retry once the external system recovers.
+    """
+
+    status_code = 503
+    code = "EXTERNAL_SERVICE_ERROR"
+
+
 class BulkValidationError(AppError):
     """Multiple row-level validation errors reported together (e.g. a bulk import).
 

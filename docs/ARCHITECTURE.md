@@ -93,15 +93,36 @@ No cycles, enforced by convention:
   so a contrasting one can be quoted deliberately. Board and edge-banding
   attributes also carry an optional `subtype` (material subtype — MDP/MDF/
   Plywood/Pine/... for boards, Wood Grain/Solid/Gloss/... for edge bandings,
-  each a closed enum with canonical English values; the external CSV sync
+  each a closed enum with canonical English values; the external catalog sync
   feeds it the vendor's Spanish `TIPO`/`GRUPO` text, normalized via input
   aliases). Edge bandings additionally carry an `alias` (short, ≤20 chars)
   used only in the printed workshop notation (`2L1C CS CSH`) — independent of
   `family`, which remains the coordination key and is never printed. The
-  catalog can also be synced in bulk from the external inventory system's CSV
-  export (`POST /products/sync`, upsert by a namespaced `external_code`,
-  all-or-nothing validation, deactivates previously-synced products missing
-  from the file).
+  catalog is also synced in bulk **straight from the external inventory
+  system's MySQL** (`POST /products/sync`, no body — it replaced an upload of
+  that system's CSV export, so nobody has to export and re-upload a file).
+  `external_catalog.py` owns the vendor schema (`marticulo`: the whole
+  `TABLEROS` category plus `TAPACANTOS` narrowed to its homonymous `tip`,
+  since that category holds a second `tip` that isn't edge banding) and hands
+  `catalog_sync.py` plain text rows; everything downstream is source-agnostic.
+  Upsert is by a namespaced `external_code` (`"{CATEGORIA}:{CODIGO}"`, where
+  CODIGO is the vendor's `cin` column — **not** its `cod` primary key, which is
+  an unrelated autoincrement; keying on `cod` recreates the catalog under wrong
+  codes), and
+  products the read no longer brings are reconciled (deleted if no order used
+  them, deactivated otherwise). Three safeguards specific to reading a live
+  database rather than an uploaded file: (1) a row whose data doesn't parse is
+  **skipped and reported** (`ProductSyncResult.issues`, carrying the vendor's
+  code and article name) instead of aborting — the vendor's table permanently
+  contains articles with no usable dimensions, and they can't be "fixed and
+  re-uploaded" before every run; skipped rows are also excluded from the
+  reconciliation pass, since *we couldn't read it* must not be confused with
+  *the vendor removed it*; (2) retirement is **explicit** (`est`/`FecEli`), and
+  retired rows never reach validation; (3) a read with zero active rows aborts
+  rather than letting reconciliation empty the catalog. What still aborts with
+  zero writes is a clash with the catalog itself — a name or code owned by a
+  hand-created product — because that's a problem at the destination.
+  `?dryRun=true` runs the whole pass and rolls back.
 - **`optimizations`** — orchestrates the pure `cutting/` domain. `POST
   /optimize` is **material-source agnostic**: it takes a `materials` stock
   list (catalog boards, company/client offcuts, or manual entries, unified by

@@ -15,6 +15,10 @@ Pillow==10.4.0
 sqlalchemy==2.0.25
 alembic==1.13.1
 psycopg2-binary==2.9.9
+# Read-only driver for the external inventory MySQL (product catalog sync,
+# src/modules/products/external_catalog.py). Pure Python on purpose: the
+# Dockerfile's runtime stage is slim and has no compiler.
+PyMySQL==1.1.1
 reportlab==4.2.5
 pypdf==5.1.0
 bcrypt==4.2.1

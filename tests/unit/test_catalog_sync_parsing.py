@@ -1,10 +1,13 @@
-"""Unit: external catalog CSV parsing helpers (no DB).
+"""Unit: external catalog field parsing (no DB).
 
-Covers decoding, header/footer detection, the MEDIO/MEDIA skip token and the
-strict board/edge-banding dimension regexes — against both the confirmed
-going-forward format and legacy formats that must NOT match (see
-``catalog_sync.py``'s module docstring for why guessing is deliberately
-avoided rather than "fixed").
+Covers the MEDIO/MEDIA skip token, the strict board/edge-banding dimension
+regexes — against both the confirmed going-forward format and legacy formats
+that must NOT match (see ``catalog_sync.py``'s module docstring for why
+guessing is deliberately avoided rather than "fixed") — and the OBS./IVA
+helpers.
+
+These parse the vendor's free-text columns, so they are independent of where
+the rows come from: they outlived the move off the CSV export unchanged.
 """
 
 import pytest
@@ -13,67 +16,10 @@ from src.modules.products.catalog_sync import (
     _BOARD_DIMS_RE,
     _EDGE_DIMS_RE,
     _MEDIO_RE,
-    _decode,
+    _external_code,
     _parse_iva_rate,
-    _parse_rows,
     _split_obs,
 )
-from src.shared.exceptions import BulkValidationError
-
-_HEADER = "CODIGO;ARTICULO;MARCA;TIPO;CATEGORIA;MED;GRUPO;IVA;UNI;CAJ;P.Comp;Tot. Inv;Util%;P.venta;P.venta2;P.Venta3;OBS."
-
-
-def _csv(*data_rows):
-    lines = [
-        "Reporte de inventarios;;;;;;;;;;;;;;;;",
-        "Para el día jueves, 20 de agosto del 2026;;;;;;;;;;;;;;;;",
-        ";;;;;;;;;;;;;;;;",
-        _HEADER,
-        *data_rows,
-        ";;;;;;;;;;TOTAL:;24916.49;;;;;",
-    ]
-    return "\n".join(lines)
-
-
-def test_decode_utf8():
-    assert _decode("día".encode("utf-8")) == "día"
-
-
-def test_decode_falls_back_to_cp1252():
-    assert _decode("día".encode("cp1252")) == "día"
-
-
-def test_parse_rows_skips_junk_header_and_total_row():
-    text = _csv(
-        "1033;PLYWOOD ESTANDAR (2.44X1.22)M-5MM;PELIKANO;PLYWOOD;TABLEROS;Uni;ESTANDAR;15%;60;0;10.8;649.36;35%;14.65;13.47;13.47;"
-    )
-    rows = _parse_rows(text)
-    assert len(rows) == 1
-    assert rows[0].codigo == "1033"
-    assert rows[0].articulo == "PLYWOOD ESTANDAR (2.44X1.22)M-5MM"
-    assert rows[0].row_no == 1
-
-
-def test_parse_rows_no_header_raises():
-    with pytest.raises(BulkValidationError):
-        _parse_rows("a;b;c\n1;2;3")
-
-
-def test_parse_rows_header_not_at_fixed_line():
-    # Header two lines later than the usual 3-line junk block still resolves.
-    text = "\n".join(
-        [
-            "x;;;;;;;;;;;;;;;;",
-            "y;;;;;;;;;;;;;;;;",
-            "z;;;;;;;;;;;;;;;;",
-            "w;;;;;;;;;;;;;;;;",
-            _HEADER,
-            "27;TAPACANTO IBIZA 19X0.40MM;HF;TAPACANTOS;TAPACANTOS;Uni;CANTO MADERADO;15%;100;0;0.18;18;93%;0.35;0.35;0.35;",
-        ]
-    )
-    rows = _parse_rows(text)
-    assert len(rows) == 1
-    assert rows[0].codigo == "27"
 
 
 @pytest.mark.parametrize(
@@ -150,6 +96,12 @@ def test_parse_iva_rate_no_percent_sign():
     assert _parse_iva_rate("15") == 0.15
 
 
+def test_parse_iva_rate_decimal_column_form():
+    # How MySQL's decimal(5,2) renders: no percent sign, trailing zeros.
+    assert _parse_iva_rate("15.00") == 0.15
+    assert _parse_iva_rate("0.00") == 0.0
+
+
 def test_parse_iva_rate_blank_means_no_surcharge():
     assert _parse_iva_rate("") == 0.0
     assert _parse_iva_rate("   ") == 0.0
@@ -157,3 +109,10 @@ def test_parse_iva_rate_blank_means_no_surcharge():
 
 def test_parse_iva_rate_malformed_is_none():
     assert _parse_iva_rate("quince") is None
+
+
+def test_external_code_is_namespaced_by_category():
+    # The key the sync matches on; a board and an edge banding may share a bare
+    # code in the vendor's system without colliding here.
+    assert _external_code("TABLEROS", "1033") == "TABLEROS:1033"
+    assert _external_code("TAPACANTOS", "1033") == "TAPACANTOS:1033"

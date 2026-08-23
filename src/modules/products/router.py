@@ -1,9 +1,9 @@
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, File, Query, UploadFile
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
-from src.modules.products.catalog_sync import sync_catalog
+from src.modules.products.catalog_sync import sync_catalog_from_external
 from src.modules.products.model import ProductType
 from src.modules.products.schemas import (
     ProductCreate,
@@ -49,21 +49,28 @@ def create_product(data: ProductCreate, svc: ProductService = Depends(product_se
     dependencies=[_WRITE],
 )
 def sync_products_catalog(
-    file: UploadFile = File(
-        ..., description="External inventory CSV export (TABLEROS/TAPACANTOS)"
+    dry_run: bool = Query(
+        False,
+        alias="dryRun",
+        description="Report what would change without writing anything",
     ),
     db: Session = Depends(get_db),
 ):
-    """Upserts board/edge-banding products from the external catalog CSV.
+    """Upserts board/edge-banding products from the external inventory system.
+
+    Takes no body: the source is the vendor's database (EXTERNAL_CATALOG_URL),
+    so the operator triggers this instead of exporting and uploading a file.
 
     All-or-nothing: any row error (duplicate code/name, unparseable
     dimensions, unrecognized CATEGORIA/subtype) aborts with zero writes and
     the full list of problems (422). Never touches products it didn't create
-    itself — only products from a previous sync that are missing from this
-    upload get reconciled: deleted outright if no order ever used them,
+    itself — only products from a previous sync that this read no longer
+    brings get reconciled: deleted outright if no order ever used them,
     deactivated instead if one did; hand-created products are never touched.
+
+    Run it with ``?dryRun=true`` first: same pass, same numbers, rolled back.
     """
-    return ok(sync_catalog(db, file.file.read()))
+    return ok(sync_catalog_from_external(db, dry_run=dry_run))
 
 
 @router.get(
