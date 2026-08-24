@@ -18,6 +18,17 @@ from src.shared.exceptions import BusinessRuleError
 BOARD_THICKNESS_TO_EDGE_WIDTH = {15: 19, 36: 40}
 
 
+def normalize_family(value: Optional[str]) -> str:
+    """Normalizes a family value for matching (trim + case-insensitive).
+
+    Module-level rather than a method because the catalog sync compares the
+    same key when it reports families that lost their counterpart
+    (``catalog_sync._collect_warnings``): both sides must agree on what "the
+    same family" means, or the warning would fire on pairs that do coordinate.
+    """
+    return (value or "").strip().casefold()
+
+
 class ProductService(CRUDService[ProductModel, ProductBase, ProductUpdate]):
     """Product catalog CRUD + searches and per-type attribute validation.
 
@@ -94,11 +105,6 @@ class ProductService(CRUDService[ProductModel, ProductBase, ProductUpdate]):
         query = query.order_by(ProductModel.name, ProductModel.id)
         return self._paginate(query, limit, offset)
 
-    @staticmethod
-    def _norm_family(value: Optional[str]) -> str:
-        """Normalizes a family value for matching (trim + case-insensitive)."""
-        return (value or "").strip().casefold()
-
     def find_edge_bandings_for_board(
         self, board_id: int, band_type: Optional[BandType] = None
     ) -> List[ProductModel]:
@@ -116,7 +122,7 @@ class ProductService(CRUDService[ProductModel, ProductBase, ProductUpdate]):
         if board.type != ProductType.BOARD.value:
             raise BusinessRuleError(f"El producto {board.code} no es un tablero")
 
-        board_family = self._norm_family(board.attributes.get("family"))
+        board_family = normalize_family(board.attributes.get("family"))
         if not board_family:
             return []
 
@@ -138,7 +144,7 @@ class ProductService(CRUDService[ProductModel, ProductBase, ProductUpdate]):
         matches = [
             p
             for p in candidates
-            if self._norm_family(p.attributes.get("family")) == board_family
+            if normalize_family(p.attributes.get("family")) == board_family
             and p.attributes.get("width") == target_width
             and (band_type is None or p.attributes.get("bandType") == band_type.value)
         ]

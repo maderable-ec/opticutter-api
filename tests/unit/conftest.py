@@ -7,7 +7,7 @@ only tests that request ``db_session`` (the integration ones) touch the database
 
 Test patterns without a DB:
 
-- **Pure functions**: exercised directly (e.g. ``hash_token``, ``_norm_family``,
+- **Pure functions**: exercised directly (e.g. ``hash_token``, ``normalize_family``,
   ``_has_payment``, ``_progress``).
 - **Service logic**: build the service with ``mock_session`` and configure per test
   what each method queries::

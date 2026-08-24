@@ -14,6 +14,7 @@ from pydantic import ValidationError
 from src.modules.products.service import (
     BOARD_THICKNESS_TO_EDGE_WIDTH,
     ProductService,
+    normalize_family,
 )
 from src.modules.products.types.board import BoardAttributes
 from src.modules.products.types.edge_banding import BandType
@@ -36,7 +37,7 @@ def test_thickness_to_edge_width_map():
     ],
 )
 def test_norm_family(value, expected):
-    assert ProductService._norm_family(value) == expected
+    assert normalize_family(value) == expected
 
 
 # --- Matching with a mocked session --------------------------------------------

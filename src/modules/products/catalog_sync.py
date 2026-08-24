@@ -32,6 +32,7 @@ from src.modules.orders.model import OrderBoardModel, OrderLineModel, OrderPiece
 from src.modules.products.external_catalog import SourceRow, fetch_rows
 from src.modules.products.model import ProductModel, ProductType
 from src.modules.products.schemas import ProductSyncIssue, ProductSyncResult
+from src.modules.products.service import normalize_family
 from src.modules.products.types.board import BoardAttributes
 from src.modules.products.types.edge_banding import BandType, EdgeBandingAttributes
 from src.shared.exceptions import BulkValidationError
@@ -71,12 +72,53 @@ _EDGE_DIMS_RE = re.compile(
 _IVA_RE = re.compile(r"(\d+(?:\.\d+)?)\s*%?")
 
 
-def _split_obs(obs: str) -> Tuple[Optional[str], Optional[str]]:
-    """``"ALIAS - FAMILY"`` -> ``(alias, family)``; empty/no separator -> ``(None, None)``."""
-    if not obs or " - " not in obs:
+# The vendor's OBS. column carries the design data, one field for both
+# categories: the FAMILY, optionally followed by the edge banding's short ALIAS.
+#
+#   "Cashmere"        -> family "Cashmere", no alias
+#   "Cashmere - CSH"  -> family "Cashmere", alias "CSH"
+#
+# The family comes FIRST because it is the half that always applies: it is the
+# board<->edge-banding coordination key (``ProductService.find_edge_bandings_for_board``)
+# and a board has nothing else to write there. The alias — the short code the
+# workshop notation prints (``2L1C CS CSH``) — only means anything on an edge
+# banding, so it is an optional suffix rather than a mandatory prefix. Writing
+# just the family is therefore correct in both categories, which is the whole
+# point: the previous "ALIAS - FAMILY" order forced a board to invent an alias
+# (or lead with an invisible " - ") and silently yielded NO family at all when
+# it didn't.
+#
+# Both categories parse identically and the board simply drops the alias. That
+# is deliberate: an operator who writes the same text on a board and on its
+# edge banding ("Cashmere - CSH" in both) still gets a match, because both
+# sides trim the same way. A board-takes-OBS-whole rule would break exactly
+# there.
+_OBS_SEP = " - "
+
+# The alias is a short code: no inner whitespace and within the schema's cap
+# (``EdgeBandingAttributes.alias``, 20 chars). A right-hand side that doesn't
+# look like one is not an alias — it's part of the family. This keeps
+# "Cashmere - Cashmere Claro" from becoming an alias that overflows the
+# proforma's "Cantos" column, sized for "2L1C CS CSH".
+_ALIAS_RE = re.compile(r"^\S{1,20}$")
+
+
+def _parse_obs(obs: str) -> Tuple[Optional[str], Optional[str]]:
+    """``"FAMILY"``/``"FAMILY - ALIAS"`` -> ``(family, alias)``; empty -> ``(None, None)``.
+
+    Splits on the **last** separator so a hyphen inside the design's own name
+    stays on the family side: ``"Roble Barroco - Dorado - RBD"`` yields
+    ``("Roble Barroco - Dorado", "RBD")``.
+    """
+    text = obs.strip()
+    if not text:
         return None, None
-    alias, family = obs.split(" - ", 1)
-    return alias.strip() or None, family.strip() or None
+    if _OBS_SEP in text:
+        family, alias = text.rsplit(_OBS_SEP, 1)
+        family, alias = family.strip(), alias.strip()
+        if family and _ALIAS_RE.match(alias):
+            return family, alias
+    return text, None
 
 
 def _parse_iva_rate(iva: str) -> Optional[float]:
@@ -112,7 +154,11 @@ class _ValidRow:
 
 @dataclass
 class _Issue:
-    """A source row that couldn't be imported, and why.
+    """Something to report about a source row, and why.
+
+    Used for both severities: a row that couldn't be imported (``issues``) and
+    one that imported with a coordination problem (``warnings``,
+    ``_collect_warnings``). Only the former reaches the reconciliation shield.
 
     ``external_code`` is kept so the reconciliation pass can leave the product
     alone: a row we failed to read is not a row the vendor deleted. It's
@@ -140,13 +186,110 @@ def _conflict(row_no: int, codigo: str, message: str) -> dict:
     return {"field": str(row_no), "message": f"Código {codigo}: {message}"}
 
 
+def _collect_warnings(valid: Sequence[_ValidRow]) -> List[_Issue]:
+    """Rows that imported fine but whose design data can't do its job.
+
+    Nothing here skips a row or blocks the sync — these products are in the
+    catalog and sellable. What they've lost is the board<->edge-banding
+    *coordination*, which fails **silently**: a board with no family (or with a
+    family no banding shares) simply returns an empty picker, and nobody finds
+    out until a seller can't quote the tapacanto. Reporting it is the only way
+    the operator sees it, and the dry run is where they'd want to.
+
+    Deliberately narrow, so the list stays worth reading:
+
+    * A **board** with no family is NOT a warning. Plywood, OSB and MDF fondo
+      have no coordinated banding at all, and warning about every one of them
+      would bury the real problems.
+    * A family is only checked for a counterpart when it was actually
+      *declared* — writing one is the statement of intent that makes its
+      absence on the other side a mistake.
+    * The thickness->width rule (``BOARD_THICKNESS_TO_EDGE_WIDTH``) is left
+      out on purpose: "no soft banding for a 36 mm board" is a real catalog
+      gap, not a data-entry error. Matching at the family level is what catches
+      the drift this is for — a board left on "Cashmere" while its banding
+      moved to "CSH".
+    """
+    warnings: List[_Issue] = []
+
+    def warn(row: _ValidRow, message: str) -> None:
+        warnings.append(
+            _Issue(
+                row_no=row.row_no,
+                codigo=row.codigo,
+                name=row.name,
+                message=message,
+                external_code=row.external_code,
+            )
+        )
+
+    # First row that declared each family, per side — the anchor for the
+    # "no counterpart" warning, so an orphan family is reported once instead of
+    # once per article that carries it.
+    first_by_family: Dict[ProductType, Dict[str, _ValidRow]] = {
+        ProductType.BOARD: {},
+        ProductType.EDGE_BANDING: {},
+    }
+
+    for row in valid:
+        family = normalize_family(row.attributes.get("family"))
+        if family:
+            # setdefault on the outer dict too: a future ProductType reaching
+            # the sync should not KeyError its way out of a warning.
+            first_by_family.setdefault(row.product_type, {}).setdefault(family, row)
+
+        if row.product_type is not ProductType.EDGE_BANDING:
+            continue
+        if not family:
+            # An edge banding always *is* a design, so a missing family here is
+            # a blank field, not a product that has none.
+            warn(
+                row,
+                "tapacanto sin familia (OBS. vacío): no va a coordinar con "
+                "ningún tablero",
+            )
+        elif not row.attributes.get("alias"):
+            warn(
+                row,
+                "tapacanto sin alias (OBS. sin ' - CÓDIGO'): la notación de "
+                "despiece no lo va a distinguir de otro diseño",
+            )
+
+    boards = first_by_family[ProductType.BOARD]
+    bandings = first_by_family[ProductType.EDGE_BANDING]
+    for family, row in boards.items():
+        if family not in bandings:
+            warn(
+                row,
+                f"la familia '{row.attributes['family']}' solo aparece en "
+                "tableros; ningún tapacanto la coordina",
+            )
+    for family, row in bandings.items():
+        if family not in boards:
+            warn(
+                row,
+                f"la familia '{row.attributes['family']}' solo aparece en "
+                "tapacantos; ningún tablero la usa",
+            )
+
+    warnings.sort(key=lambda w: w.row_no)
+    return warnings
+
+
 def _validate(
     rows: Sequence[SourceRow],
-) -> Tuple[List[_ValidRow], int, List[_Issue]]:
+) -> Tuple[List[_ValidRow], int, List[_Issue], List[_Issue]]:
     """Splits the source rows into what can be imported and what can't.
 
     Nothing here is fatal: every problem becomes an ``_Issue`` the caller
     reports, so one unusable article can't hold back the whole catalog.
+
+    Returns ``(valid, skipped_medio, issues, warnings)``. The last two share a
+    shape but not a meaning: an **issue** is a row that was skipped, a
+    **warning** is a row that imported with a coordination problem
+    (``_collect_warnings``). Keeping them apart matters beyond presentation —
+    ``_apply`` reads ``issues`` to shield those products from reconciliation,
+    and a warned row was read just fine.
     """
     issues: List[_Issue] = []
     valid: List[_ValidRow] = []
@@ -211,7 +354,7 @@ def _validate(
             continue
         seen_names[row.articulo] = row.codigo
 
-        alias, family = _split_obs(row.obs)
+        family, alias = _parse_obs(row.obs)
 
         try:
             price = float(row.p_venta)
@@ -304,7 +447,7 @@ def _validate(
             )
         )
 
-    return valid, skipped_medio, issues
+    return valid, skipped_medio, issues, _collect_warnings(valid)
 
 
 def _is_product_in_use(db: Session, product_id: int) -> bool:
@@ -335,6 +478,7 @@ def _apply(
     skipped_medio: int,
     skipped_inactive: int,
     issues: List[_Issue],
+    warnings: List[_Issue],
     *,
     dry_run: bool,
 ) -> ProductSyncResult:
@@ -349,7 +493,9 @@ def _apply(
 
     Aborts with zero writes only on a conflict with the catalog itself: a name
     or code already owned by a product this sync didn't create. Row-level data
-    problems are carried in ``issues`` and skipped instead.
+    problems are carried in ``issues`` and skipped instead. ``warnings`` is
+    pass-through: those rows are written like any other, and only the result
+    carries them.
 
     Reconciliation: a product is reconciled only if it was created by a
     previous sync (has a non-null ``external_code``), its ``type`` matches
@@ -473,6 +619,7 @@ def _apply(
         skipped_inactive=skipped_inactive,
         skipped_invalid=len(issues),
         issues=[i.to_schema() for i in issues],
+        warnings=[w.to_schema() for w in warnings],
         dry_run=dry_run,
     )
 
@@ -516,12 +663,13 @@ def sync_catalog_from_external(
             ],
         )
 
-    valid_rows, skipped_medio, issues = _validate(active_rows)
+    valid_rows, skipped_medio, issues, warnings = _validate(active_rows)
     return _apply(
         db,
         valid_rows,
         skipped_medio,
         len(retired_rows),
         issues,
+        warnings,
         dry_run=dry_run,
     )
