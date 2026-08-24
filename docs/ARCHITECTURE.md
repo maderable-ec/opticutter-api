@@ -97,7 +97,19 @@ No cycles, enforced by convention:
   feeds it the vendor's Spanish `TIPO`/`GRUPO` text, normalized via input
   aliases). Edge bandings additionally carry an `alias` (short, ≤20 chars)
   used only in the printed workshop notation (`2L1C CS CSH`) — independent of
-  `family`, which remains the coordination key and is never printed. The
+  `family`, which remains the coordination key and is never printed. Both come
+  from a single free-text column in the vendor's inventory (`marticulo.obs`),
+  written **`FAMILIA`** or **`FAMILIA - ALIAS`**: the column *is* the family,
+  and the short code is an optional suffix behind `" - "`. The family leads
+  because it is the half that always applies — a board has no alias to write,
+  so writing just the family has to be valid input in both categories. Both
+  categories parse identically (the board simply drops the alias), which is
+  what makes the likeliest data-entry slip harmless: the same text pasted on a
+  board and on its tapacanto still coordinates them. Two details guard the
+  edges — the split takes the **last** separator, so a hyphen inside a design's
+  own name stays with the family, and the right-hand side only counts as an
+  alias if it looks like a code (no spaces, ≤20 chars); otherwise the whole
+  column is the family. The
   catalog is also synced in bulk **straight from the external inventory
   system's MySQL** (`POST /products/sync`, no body — it replaced an upload of
   that system's CSV export, so nobody has to export and re-upload a file).
@@ -122,7 +134,16 @@ No cycles, enforced by convention:
   rather than letting reconciliation empty the catalog. What still aborts with
   zero writes is a clash with the catalog itself — a name or code owned by a
   hand-created product — because that's a problem at the destination.
-  `?dryRun=true` runs the whole pass and rolls back.
+  `?dryRun=true` runs the whole pass and rolls back. Separately from `issues`
+  (rows that were skipped), the result carries `warnings` — rows that **were**
+  imported but whose design data can't do its job: an edge banding with no
+  family or no alias, or a family declared on only one of the two categories.
+  None of it blocks the sync; it is reported because board↔edge-banding
+  coordination is an equality match that fails **silently** (a board left on
+  `Cashmere` while its banding moved to `CSH` just returns an empty picker),
+  and the dry run is where an operator would want to see it. A board with no
+  family is deliberately *not* warned — plywood, OSB and MDF fondo have no
+  coordinated banding at all.
 - **`optimizations`** — orchestrates the pure `cutting/` domain. `POST
   /optimize` is **material-source agnostic**: it takes a `materials` stock
   list (catalog boards, company/client offcuts, or manual entries, unified by

@@ -229,7 +229,7 @@ def _board_record(**overrides):
         "gru": "MDP MELAMINA RH",
         "iva": Decimal("15.00"),
         "ven": Decimal("14.650000"),
-        "obs": "CSH - Cashmere",
+        "obs": "Cashmere",
         "est": 1,
         "FecEli": None,
     }
@@ -247,7 +247,7 @@ def _edge_record(**overrides):
         "gru": "CANTO MADERADO",
         "iva": Decimal("15.00"),
         "ven": Decimal("0.350000"),
-        "obs": "CSH - Cashmere",
+        "obs": "Cashmere - CSH",
         "est": 1,
         "FecEli": None,
     }
@@ -278,6 +278,10 @@ def _issues(resp):
     return resp.json()["data"]["issues"]
 
 
+def _warnings(resp):
+    return resp.json()["data"]["warnings"]
+
+
 def test_sync_happy_path_creates_board_and_edge_banding(client, monkeypatch):
     _load_inventory(monkeypatch, _board_record(), _edge_record())
     resp = _sync(client)
@@ -292,6 +296,9 @@ def test_sync_happy_path_creates_board_and_edge_banding(client, monkeypatch):
         "skippedInactive": 0,
         "skippedInvalid": 0,
         "issues": [],
+        # The board writes the family alone ("Cashmere"), the tapacanto appends
+        # its short code ("Cashmere - CSH"): coordinated, nothing to report.
+        "warnings": [],
         "dryRun": False,
     }
 
@@ -646,6 +653,7 @@ def test_sync_dry_run_reports_without_writing(client, monkeypatch):
         "skippedInactive": 0,
         "skippedInvalid": 0,
         "issues": [],
+        "warnings": [],
         "dryRun": True,
     }
     assert client.get("/api/v1/products/").json()["data"] == []
@@ -654,6 +662,61 @@ def test_sync_dry_run_reports_without_writing(client, monkeypatch):
     applied = _sync(client)
     assert applied.json()["data"]["created"] == 2
     assert len(client.get("/api/v1/products/").json()["data"]) == 2
+
+
+def test_sync_warns_when_a_family_has_no_counterpart(client, monkeypatch):
+    """A board whose family no tapacanto shares imports, but can't coordinate.
+
+    The drift this catches is a real one: the family is an equality match, so a
+    board left on "Cashmere" while its tapacanto moved to "CSH" silently stops
+    offering the tapacanto, with no error anywhere. The warning is the only
+    signal — and it must not block or skip anything.
+    """
+    _load_inventory(
+        monkeypatch,
+        _board_record(obs="Cashmere"),
+        _edge_record(obs="CSH - CSH"),
+    )
+    resp = _sync(client)
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+
+    # Both products are in the catalog: this is a warning, not an issue.
+    assert (data["created"], data["skippedInvalid"], data["issues"]) == (2, 0, [])
+    assert len(client.get("/api/v1/products/").json()["data"]) == 2
+
+    messages = {w["code"]: w["message"] for w in _warnings(resp)}
+    assert "'Cashmere' solo aparece en tableros" in messages["1033"]
+    assert "'CSH' solo aparece en tapacantos" in messages["57"]
+    # And the warning is telling the truth: the picker really is empty.
+    board = client.get("/api/v1/products/code/1033").json()["data"]
+    bands = client.get(f"/api/v1/products/{board['id']}/edge-bandings").json()["data"]
+    assert bands == []
+
+
+def test_sync_warns_on_an_edge_banding_without_family_or_alias(client, monkeypatch):
+    _load_inventory(
+        monkeypatch,
+        # A board with no family at all — the plywood/OSB/MDF-fondo shape.
+        _board_record(obs=""),
+        # ...and one that coordinates the CEDRO tapacanto below, so the only
+        # thing left to report about it is the missing short code.
+        _board_record(cin=9001, nom="MDP RH CEDRO (1.83X2.44)M-15MM", obs="Cedro"),
+        _edge_record(cin="57", obs=""),
+        _edge_record(cin="58", nom="TAPACANTO CEDRO 19X0.40MM", obs="Cedro"),
+    )
+    resp = _sync(client)
+    messages = {w["code"]: w["message"] for w in _warnings(resp)}
+
+    # A blank OBS. on a tapacanto is a missing field: it always IS a design.
+    assert "sin familia" in messages["57"]
+    # A family with no short code prints an indistinguishable notation.
+    assert "sin alias" in messages["58"]
+    # ...but a board without a family is NOT warned: plywood/OSB/MDF fondo
+    # legitimately have no coordinated banding, and warning about every one of
+    # them would bury the real problems.
+    assert "1033" not in messages
+    assert "9001" not in messages
 
 
 def test_sync_dry_run_previews_deletions_without_applying_them(client, monkeypatch):

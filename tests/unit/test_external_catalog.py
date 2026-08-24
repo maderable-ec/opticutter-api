@@ -46,7 +46,7 @@ def _record(**overrides):
         "gru": "MDP MELAMINA RH",
         "iva": Decimal("15.00"),
         "ven": Decimal("14.650000"),
-        "obs": "CSH - Cashmere",
+        "obs": "Cashmere - CSH",
         "est": 1,
         "FecEli": None,
     }
@@ -116,7 +116,7 @@ def test_maps_every_column_the_validator_needs():
     assert row.tipo == "MDP"
     assert row.categoria == "TABLEROS"
     assert row.grupo == "MDP MELAMINA RH"
-    assert row.obs == "CSH - Cashmere"
+    assert row.obs == "Cashmere - CSH"
 
 
 def test_numeric_columns_reach_the_validator_as_text():

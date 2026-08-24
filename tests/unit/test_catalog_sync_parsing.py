@@ -1,10 +1,11 @@
-"""Unit: external catalog field parsing (no DB).
+"""Unit: external catalog field parsing and coordination warnings (no DB).
 
 Covers the MEDIO/MEDIA skip token, the strict board/edge-banding dimension
 regexes — against both the confirmed going-forward format and legacy formats
 that must NOT match (see ``catalog_sync.py``'s module docstring for why
-guessing is deliberately avoided rather than "fixed") — and the OBS./IVA
-helpers.
+guessing is deliberately avoided rather than "fixed") — the OBS./IVA helpers,
+and ``_collect_warnings``, which reports the rows that imported but lost their
+board<->tapacanto coordination.
 
 These parse the vendor's free-text columns, so they are independent of where
 the rows come from: they outlived the move off the CSV export unchanged.
@@ -16,10 +17,13 @@ from src.modules.products.catalog_sync import (
     _BOARD_DIMS_RE,
     _EDGE_DIMS_RE,
     _MEDIO_RE,
+    _collect_warnings,
     _external_code,
     _parse_iva_rate,
-    _split_obs,
+    _parse_obs,
+    _ValidRow,
 )
+from src.modules.products.model import ProductType
 
 
 @pytest.mark.parametrize(
@@ -76,16 +80,41 @@ def test_edge_dims_re_rejects_missing_unit():
     assert _EDGE_DIMS_RE.search("TAPACANTO CAPRI 22X1.5") is None
 
 
-def test_split_obs_with_separator():
-    assert _split_obs("CSH - Cashmere") == ("CSH", "Cashmere")
-
-
-def test_split_obs_empty():
-    assert _split_obs("") == (None, None)
-
-
-def test_split_obs_without_separator():
-    assert _split_obs("Cashmere") == (None, None)
+@pytest.mark.parametrize(
+    "obs, expected",
+    [
+        # The minimum case, and the reason the order was inverted: a board has
+        # no alias to write, so the family alone has to be valid input. Under
+        # the old "ALIAS - FAMILIA" this yielded (None, None) and the board
+        # silently lost its coordination key.
+        ("Cashmere", ("Cashmere", None)),
+        ("Cashmere - CSH", ("Cashmere", "CSH")),
+        ("  Cashmere - CSH  ", ("Cashmere", "CSH")),
+        # Split on the LAST separator, so a hyphen inside the design's own name
+        # stays on the family side.
+        ("Roble Barroco - Dorado - RBD", ("Roble Barroco - Dorado", "RBD")),
+        # An alias is a short code: whitespace on the right means this is a
+        # hyphenated family, not an alias. Guards the proforma's "Cantos"
+        # column, which is sized for "2L1C CS CSH".
+        ("Cashmere - Cashmere Claro", ("Cashmere - Cashmere Claro", None)),
+        # ...and so does the 20-char cap (EdgeBandingAttributes.alias): over it,
+        # the text is family, not a truncated alias and not a skipped row.
+        ("Cashmere - " + "X" * 21, ("Cashmere - " + "X" * 21, None)),
+        ("Cashmere - " + "X" * 20, ("Cashmere", "X" * 20)),
+        # The separator is " - ", spaces included: a bare hyphen is part of the
+        # name.
+        ("Cashmere-CSH", ("Cashmere-CSH", None)),
+        # The old workaround for a board (lead with the separator so the
+        # family lands on the right) is now just a family that starts with a
+        # hyphen — it won't match a board written "Cashmere", which the
+        # sync's warnings are there to surface.
+        (" - CSH", ("- CSH", None)),
+        ("", (None, None)),
+        ("   ", (None, None)),
+    ],
+)
+def test_parse_obs(obs, expected):
+    assert _parse_obs(obs) == expected
 
 
 def test_parse_iva_rate_percent():
@@ -116,3 +145,103 @@ def test_external_code_is_namespaced_by_category():
     # code in the vendor's system without colliding here.
     assert _external_code("TABLEROS", "1033") == "TABLEROS:1033"
     assert _external_code("TAPACANTOS", "1033") == "TAPACANTOS:1033"
+
+
+# --- Coordination warnings ----------------------------------------------------
+# Every one of these rows imports fine; what they've lost is the family match
+# that powers GET /products/{board_id}/edge-bandings, which fails silently.
+def _row(product_type, row_no=1, family=None, alias=None, name=None):
+    attributes = {}
+    if family is not None:
+        attributes["family"] = family
+    if alias is not None:
+        attributes["alias"] = alias
+    return _ValidRow(
+        row_no=row_no,
+        codigo=str(1000 + row_no),
+        external_code=f"CAT:{1000 + row_no}",
+        product_type=product_type,
+        name=name or f"ARTICULO {row_no}",
+        description=None,
+        price=10.0,
+        attributes=attributes,
+    )
+
+
+def _board(**kwargs):
+    return _row(ProductType.BOARD, **kwargs)
+
+
+def _banding(**kwargs):
+    return _row(ProductType.EDGE_BANDING, **kwargs)
+
+
+def _messages(rows):
+    return [w.message for w in _collect_warnings(rows)]
+
+
+def test_coordinated_pair_warns_nothing():
+    rows = [
+        _board(family="Cashmere"),
+        _banding(row_no=2, family="Cashmere", alias="CSH"),
+    ]
+    assert _collect_warnings(rows) == []
+
+
+def test_family_match_is_case_and_space_insensitive():
+    # Same normalization as the coordination query, or the warning would fire
+    # on pairs that DO match.
+    rows = [
+        _board(family="CASHMERE"),
+        _banding(row_no=2, family=" cashmere ", alias="CSH"),
+    ]
+    assert _collect_warnings(rows) == []
+
+
+def test_board_without_family_is_not_a_warning():
+    # Plywood/OSB/MDF fondo have no coordinated banding at all; warning about
+    # every one of them would bury the real problems.
+    assert _collect_warnings([_board()]) == []
+
+
+def test_edge_banding_without_family_is_warned():
+    (message,) = _messages([_banding(family=None, alias="CSH")])
+    assert "sin familia" in message
+
+
+def test_edge_banding_without_alias_is_warned():
+    rows = [_board(family="Cashmere"), _banding(row_no=2, family="Cashmere")]
+    (message,) = _messages(rows)
+    assert "sin alias" in message
+
+
+def test_missing_family_supersedes_missing_alias():
+    # One row, one reason: with no family the alias is the lesser problem.
+    messages = _messages([_banding()])
+    assert len(messages) == 1
+    assert "sin familia" in messages[0]
+
+
+def test_board_family_without_any_banding_is_warned():
+    rows = [_board(family="Cashmere"), _banding(row_no=2, family="Ibiza", alias="IBZ")]
+    messages = _messages(rows)
+    assert any("'Cashmere' solo aparece en tableros" in m for m in messages)
+    assert any("'Ibiza' solo aparece en tapacantos" in m for m in messages)
+
+
+def test_orphan_family_is_reported_once_not_per_row():
+    # Anchored to the first article that declared it: a family on 30 boards is
+    # one line, not 30.
+    rows = [_board(row_no=n, family="Cashmere") for n in range(1, 4)]
+    warnings = _collect_warnings(rows)
+    assert len(warnings) == 1
+    assert warnings[0].row_no == 1
+
+
+def test_warnings_are_ordered_by_row():
+    rows = [
+        _banding(row_no=3, family="Ibiza", alias="IBZ"),
+        _banding(row_no=1),
+        _board(row_no=2, family="Cashmere"),
+    ]
+    assert [w.row_no for w in _collect_warnings(rows)] == [1, 2, 3]

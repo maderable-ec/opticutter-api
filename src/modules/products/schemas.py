@@ -66,7 +66,11 @@ class ProductResponse(CamelModel):
 
 
 class ProductSyncIssue(CamelModel):
-    """One source row the sync could not import.
+    """One source row the sync has something to report about.
+
+    Same shape for both severities — ``ProductSyncResult.issues`` (the row was
+    skipped) and ``.warnings`` (the row was imported, but its design data can't
+    coordinate). The severity is the list it lands in, not the payload.
 
     Carries the vendor's own code and article name, because fixing it means
     finding that row in the inventory system — a row number would be useless.
@@ -94,5 +98,12 @@ class ProductSyncResult(CamelModel):
     # can't be "fixed and re-uploaded" before every run. See `issues`.
     skipped_invalid: int = 0
     issues: List[ProductSyncIssue] = []
+    # Rows that WERE imported but whose design data can't do its job: an edge
+    # banding with no family or no alias, or a family declared on only one of
+    # the two categories. None of it skips a row or blocks the sync — it is
+    # reported because board<->edge-banding coordination fails silently
+    # otherwise, and a dry run is where the operator would want to see it.
+    # There's no counter: the list's own length is the count.
+    warnings: List[ProductSyncIssue] = []
     # True when nothing was written — the pass ran and rolled back.
     dry_run: bool = False
