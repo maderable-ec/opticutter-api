@@ -222,7 +222,7 @@ def _load_inventory(monkeypatch, *records):
 def _board_record(**overrides):
     record = {
         "cin": "1033",
-        "nom": "MDP RH ROBLE BARROCO AMBAR (2.07X2.80)M-15MM",
+        "nom": "MDP RH ROBLE BARROCO AMBAR (2.80X2.07)M-15MM",
         "mar": "KRONOSPAN",
         "tip": "MDP",
         "cat": "TABLEROS",
@@ -265,7 +265,7 @@ _MEDIO_RECORD = _board_record(
 
 _OTHER_BOARD_RECORD = _board_record(
     cin=9001,
-    nom="MDP RH OTRO DISEÑO (1.83X2.44)M-15MM",
+    nom="MDP RH OTRO DISEÑO (2.44X1.83)M-15MM",
     obs="",
 )
 
@@ -701,7 +701,7 @@ def test_sync_warns_on_an_edge_banding_without_family_or_alias(client, monkeypat
         _board_record(obs=""),
         # ...and one that coordinates the CEDRO tapacanto below, so the only
         # thing left to report about it is the missing short code.
-        _board_record(cin=9001, nom="MDP RH CEDRO (1.83X2.44)M-15MM", obs="Cedro"),
+        _board_record(cin=9001, nom="MDP RH CEDRO (2.44X1.83)M-15MM", obs="Cedro"),
         _edge_record(cin="57", obs=""),
         _edge_record(cin="58", nom="TAPACANTO CEDRO 19X0.40MM", obs="Cedro"),
     )
@@ -717,6 +717,96 @@ def test_sync_warns_on_an_edge_banding_without_family_or_alias(client, monkeypat
     # them would bury the real problems.
     assert "1033" not in messages
     assert "9001" not in messages
+
+
+def test_sync_warns_when_a_board_has_the_shorter_side_first(client, monkeypatch):
+    """The vendor's convention prints the longer side first; a pair that
+    doesn't is very likely the two sides written backwards, so it gets
+    reported (not corrected) so the operator can check the source row.
+    """
+    _load_inventory(
+        monkeypatch,
+        _board_record(nom="MDP RH ROBLE BARROCO AMBAR (2.07X2.80)M-15MM", obs=""),
+    )
+    resp = _sync(client)
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+
+    # Still imports fine: this is a warning, not an issue.
+    assert (data["created"], data["skippedInvalid"], data["issues"]) == (1, 0, [])
+
+    board = client.get("/api/v1/products/?search=ROBLE BARROCO").json()["data"][0]
+    # The first measure is always stored as the largo, whichever it is.
+    assert board["attributes"]["height"] == 2070
+    assert board["attributes"]["width"] == 2800
+
+    messages = {w["code"]: w["message"] for w in _warnings(resp)}
+    assert "largo" in messages["1033"] and "ancho" in messages["1033"]
+
+
+def test_sync_warns_when_no_stocked_width_covers_the_board(client, monkeypatch):
+    """A design that coordinates on paper but whose only tape is too narrow.
+
+    From the seller's chair this is the same failure as a broken family — an
+    empty picker — so it gets the same treatment: reported, never corrected.
+    """
+    _load_inventory(
+        monkeypatch,
+        _board_record(nom="MDP CARBONO (2.44X1.83)M-36MM", obs="Carbono"),
+        _edge_record(nom="TAPACANTO CARBONO 19X0.40MM", obs="Carbono - CRB"),
+    )
+    resp = _sync(client)
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+
+    # Both products import: this is a warning, not an issue.
+    assert (data["created"], data["skippedInvalid"], data["issues"]) == (2, 0, [])
+
+    messages = {w["code"]: w["message"] for w in _warnings(resp)}
+    assert "no tiene ningún tapacanto que cubra un tablero de 36mm" in messages["1033"]
+    assert "solo hay de 19mm" in messages["1033"]
+    # And the warning is telling the truth: the picker really is empty.
+    board = client.get("/api/v1/products/code/1033").json()["data"]
+    bands = client.get(f"/api/v1/products/{board['id']}/edge-bandings").json()["data"]
+    assert bands == []
+
+
+def test_sync_does_not_warn_when_a_wider_stocked_tape_covers_the_board(
+    client, monkeypatch
+):
+    """The 22mm tape the old rule ignored coordinates a 15mm board perfectly."""
+    _load_inventory(
+        monkeypatch,
+        _board_record(nom="MDP CASHMERE (2.80X2.07)M-15MM", obs="Cashmere"),
+        _edge_record(nom="TAPACANTO CASHMERE 22X1MM", obs="Cashmere - CSH"),
+    )
+    resp = _sync(client)
+    assert _warnings(resp) == []
+
+    board = client.get("/api/v1/products/code/1033").json()["data"]
+    bands = client.get(f"/api/v1/products/{board['id']}/edge-bandings").json()["data"]
+    assert [b["attributes"]["width"] for b in bands] == [22]
+
+
+def test_sync_warns_on_an_edge_banding_thicker_than_it_is_wide(client, monkeypatch):
+    """ "18X45MM" where the siblings say "18X0.45MM": the vendor dropped a
+    decimal point. The row imports — the width is fine — but its thickness is
+    also what the band type is inferred from, so it lands mislabelled.
+    """
+    _load_inventory(
+        monkeypatch,
+        _board_record(nom="MDP AZUL URBANO (2.80X2.07)M-15MM", obs="Azul Urbano"),
+        _edge_record(nom="TAPACANTO AZUL URBANO 18X45MM", obs="Azul Urbano - AUR"),
+    )
+    resp = _sync(client)
+    data = resp.json()["data"]
+    assert (data["created"], data["skippedInvalid"], data["issues"]) == (2, 0, [])
+
+    messages = {w["code"]: w["message"] for w in _warnings(resp)}
+    assert "espesor (45mm) es mayor que el ancho (18mm)" in messages["57"]
+    # One row, one reason: its width still counts as covering the board, so no
+    # second warning claims the family has nothing to offer.
+    assert "1033" not in messages
 
 
 def test_sync_dry_run_previews_deletions_without_applying_them(client, monkeypatch):
@@ -962,7 +1052,12 @@ def _seed_edge(
 
 
 def _seed_cashmere_catalog(client):
-    """Cashmere board 15 and 36 + their coordinated edge bandings (real-seed style)."""
+    """Cashmere board 15 and 36 + their coordinated edge bandings (real-seed style).
+
+    Stocked in two widths for the 15mm board (19 and 22), like the real
+    catalog: the vendor sells the same design in both, and the picker offers
+    both with the narrower one first.
+    """
     _seed_board(client, "MDP-SL-CSH-15", "MDP 15mm Cashmere", 15)
     _seed_board(client, "MDP-SL-CSH-36", "MDP 36mm Cashmere", 36)
     _seed_edge(
@@ -972,6 +1067,15 @@ def _seed_cashmere_catalog(client):
         "Soft",
         0.45,
         19,
+        "Cashmere",
+    )
+    _seed_edge(
+        client,
+        "TAP-SL-CSH-022",
+        "Tapacanto Cashmere Suave 0.45x22mm",
+        "Soft",
+        0.45,
+        22,
         "Cashmere",
     )
     _seed_edge(
@@ -1001,9 +1105,13 @@ def test_edge_bandings_for_15mm_board(client):
     resp = client.get(f"/api/v1/products/{board['id']}/edge-bandings")
     assert resp.status_code == 200
     bands = resp.json()["data"]
-    # 15mm -> width 19: Soft 0.45 and Hard 1.5 (sorted by thickness)
-    assert [b["attributes"]["width"] for b in bands] == [19, 19]
-    assert [b["attributes"]["bandType"] for b in bands] == ["Soft", "Hard"]
+    # Every stocked width that covers 15mm, narrowest first (and by the tape's
+    # own thickness within a width). The 40mm is too wide and stays out.
+    assert [(b["attributes"]["width"], b["attributes"]["bandType"]) for b in bands] == [
+        (19, "Soft"),
+        (19, "Hard"),
+        (22, "Soft"),
+    ]
 
     # The BandType enum accepts case-insensitive input ("soft") and the Spanish
     # alias ("suave"), both normalized to the canonical English value.
@@ -1012,8 +1120,9 @@ def test_edge_bandings_for_15mm_board(client):
             f"/api/v1/products/{board['id']}/edge-bandings",
             params={"band_type": value},
         ).json()["data"]
-        assert len(soft) == 1
-        assert soft[0]["code"] == "TAP-SL-CSH-045"
+        # The narrowest covering tape heads the list: that's what the dashboard
+        # auto-selects, so widening the rule must not change the default pick.
+        assert [b["code"] for b in soft] == ["TAP-SL-CSH-045", "TAP-SL-CSH-022"]
 
 
 def test_edge_bandings_for_36mm_board_only_hard(client):
@@ -1021,7 +1130,7 @@ def test_edge_bandings_for_36mm_board_only_hard(client):
     board = client.get("/api/v1/products/code/MDP-SL-CSH-36").json()["data"]
 
     bands = client.get(f"/api/v1/products/{board['id']}/edge-bandings").json()["data"]
-    # 36mm -> width 40: only the Hard 1.0x40 exists
+    # Only the Hard 1.0x40 covers 36mm; neither 19mm tape does, nor the 22mm.
     assert len(bands) == 1
     assert bands[0]["code"] == "TAP-SL-CSH-100"
     assert bands[0]["attributes"]["width"] == 40
@@ -1031,6 +1140,57 @@ def test_edge_bandings_for_36mm_board_only_hard(client):
         f"/api/v1/products/{board['id']}/edge-bandings", params={"band_type": "Soft"}
     ).json()["data"]
     assert soft == []
+
+
+def test_edge_bandings_for_a_design_stocked_only_in_the_wider_width(client):
+    """The case the real catalog broke on: a 15mm board whose design is only
+    stocked in 22mm used to return an empty picker, because the rule demanded
+    exactly 19mm."""
+    _seed_board(client, "MDP-SL-TVL-15", "MDP 15mm Cuero Tivoli", 15, family="TIVOLI")
+    _seed_edge(
+        client,
+        "TAP-SL-TVL-022",
+        "Tapacanto Cuero Tivoli Suave 0.45x22mm",
+        "Soft",
+        0.45,
+        22,
+        "Cuero Tivoli",
+        family="TIVOLI",
+    )
+    board = client.get("/api/v1/products/code/MDP-SL-TVL-15").json()["data"]
+
+    bands = client.get(f"/api/v1/products/{board['id']}/edge-bandings").json()["data"]
+    assert [b["code"] for b in bands] == ["TAP-SL-TVL-022"]
+
+
+def test_edge_bandings_for_a_thickness_outside_the_old_table(client):
+    """16mm boards (GRAFFO/CINZA) and their 20mm tape were invisible while the
+    rule was a table keyed on 15 and 36."""
+    _seed_board(client, "MDP-SL-GRF-16", "MDP 16mm Graffo", 16, family="GRAFFO")
+    _seed_edge(
+        client,
+        "TAP-SL-GRF-020",
+        "Tapacanto Graffo Suave 0.40x20mm",
+        "Soft",
+        0.40,
+        20,
+        "Graffo",
+        family="GRAFFO",
+    )
+    _seed_edge(
+        client,
+        "TAP-SL-GRF-040",
+        "Tapacanto Graffo Duro 1.5x40mm",
+        "Hard",
+        1.5,
+        40,
+        "Graffo",
+        family="GRAFFO",
+    )
+    board = client.get("/api/v1/products/code/MDP-SL-GRF-16").json()["data"]
+
+    bands = client.get(f"/api/v1/products/{board['id']}/edge-bandings").json()["data"]
+    assert [b["code"] for b in bands] == ["TAP-SL-GRF-020"]
 
 
 def test_edge_bandings_excludes_other_designs(client):
@@ -1067,7 +1227,7 @@ def test_edge_bandings_excludes_inactive(client):
     client.put(f"/api/v1/products/{soft['id']}", json={"isActive": False})
 
     bands = client.get(f"/api/v1/products/{board['id']}/edge-bandings").json()["data"]
-    assert [b["code"] for b in bands] == ["TAP-SL-CSH-150"]
+    assert [b["code"] for b in bands] == ["TAP-SL-CSH-150", "TAP-SL-CSH-022"]
 
 
 def test_edge_bandings_invalid_band_type_returns_422(client):

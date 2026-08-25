@@ -150,12 +150,27 @@ def test_external_code_is_namespaced_by_category():
 # --- Coordination warnings ----------------------------------------------------
 # Every one of these rows imports fine; what they've lost is the family match
 # that powers GET /products/{board_id}/edge-bandings, which fails silently.
-def _row(product_type, row_no=1, family=None, alias=None, name=None):
+def _row(
+    product_type,
+    row_no=1,
+    family=None,
+    alias=None,
+    name=None,
+    height=None,
+    width=None,
+    thickness=None,
+):
     attributes = {}
     if family is not None:
         attributes["family"] = family
     if alias is not None:
         attributes["alias"] = alias
+    if height is not None:
+        attributes["height"] = height
+    if width is not None:
+        attributes["width"] = width
+    if thickness is not None:
+        attributes["thickness"] = thickness
     return _ValidRow(
         row_no=row_no,
         codigo=str(1000 + row_no),
@@ -204,6 +219,19 @@ def test_board_without_family_is_not_a_warning():
     assert _collect_warnings([_board()]) == []
 
 
+def test_board_with_longer_side_first_warns_nothing():
+    assert _collect_warnings([_board(height=2800, width=2070)]) == []
+
+
+def test_board_with_equal_sides_warns_nothing():
+    assert _collect_warnings([_board(height=2000, width=2000)]) == []
+
+
+def test_board_with_shorter_side_first_is_warned():
+    (message,) = _messages([_board(height=2070, width=2800)])
+    assert "largo" in message and "ancho" in message
+
+
 def test_edge_banding_without_family_is_warned():
     (message,) = _messages([_banding(family=None, alias="CSH")])
     assert "sin familia" in message
@@ -236,6 +264,74 @@ def test_orphan_family_is_reported_once_not_per_row():
     warnings = _collect_warnings(rows)
     assert len(warnings) == 1
     assert warnings[0].row_no == 1
+
+
+def _pair(board_thickness, *banding_widths, family="Cashmere"):
+    """A coordinated family: one board plus a banding per stocked width."""
+    return [_board(family=family, thickness=board_thickness)] + [
+        _banding(row_no=n + 2, family=family, alias="CSH", width=w, thickness=0.45)
+        for n, w in enumerate(banding_widths)
+    ]
+
+
+def test_a_covering_width_warns_nothing():
+    assert _collect_warnings(_pair(15, 22, 40)) == []
+
+
+def test_family_with_no_width_that_covers_the_board_is_warned():
+    # The real case: a 36mm board whose design is only stocked in 19mm tape.
+    # Its picker is as empty as a board with a broken family, so it's reported
+    # the same way.
+    (message,) = _messages(_pair(36, 19, 22))
+    assert "no tiene ningún tapacanto que cubra un tablero de 36mm" in message
+    assert "solo hay de 19/22mm" in message
+
+
+def test_width_gap_is_reported_per_thickness_not_per_family():
+    # A design can coordinate at 15mm and have nothing for its 36mm sibling.
+    rows = _pair(15, 19) + [_board(row_no=9, family="Cashmere", thickness=36)]
+    (warning,) = _collect_warnings(rows)
+    assert warning.row_no == 9
+    assert "de 36mm" in warning.message
+
+
+def test_width_gap_is_reported_once_per_thickness():
+    rows = _pair(36, 19) + [
+        _board(row_no=n, family="Cashmere", thickness=36) for n in (8, 9)
+    ]
+    warnings = _collect_warnings(rows)
+    assert len(warnings) == 1
+    assert warnings[0].row_no == 1  # anchored to the first board that needs it
+
+
+def test_family_without_any_banding_is_not_also_reported_as_a_width_gap():
+    # One row, one reason: the orphan-family warning already says it.
+    messages = _messages([_board(family="Cashmere", thickness=15)])
+    assert len(messages) == 1
+    assert "solo aparece en tableros" in messages[0]
+
+
+def test_edge_banding_thicker_than_it_is_wide_is_warned():
+    # "18X45MM" where the siblings say "18X0.45MM": the vendor dropped a
+    # decimal point, and the thickness is what band type is inferred from.
+    rows = [
+        _board(family="Azul Urbano", thickness=15),
+        _banding(row_no=2, family="Azul Urbano", alias="AUR", width=18, thickness=45.0),
+    ]
+    (message,) = _messages(rows)
+    assert "espesor (45mm) es mayor que el ancho (18mm)" in message
+
+
+def test_an_implausible_thickness_does_not_discard_the_row_width():
+    # Only the thickness is broken; dropping its width from the coverage check
+    # would invent a second, false warning about a family that does coordinate.
+    rows = [
+        _board(family="Azul Urbano", thickness=15),
+        _banding(row_no=2, family="Azul Urbano", alias="AUR", width=18, thickness=45.0),
+    ]
+    messages = _messages(rows)
+    assert len(messages) == 1
+    assert "cubra un tablero" not in messages[0]
 
 
 def test_warnings_are_ordered_by_row():

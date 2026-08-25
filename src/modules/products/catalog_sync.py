@@ -32,7 +32,7 @@ from src.modules.orders.model import OrderBoardModel, OrderLineModel, OrderPiece
 from src.modules.products.external_catalog import SourceRow, fetch_rows
 from src.modules.products.model import ProductModel, ProductType
 from src.modules.products.schemas import ProductSyncIssue, ProductSyncResult
-from src.modules.products.service import normalize_family
+from src.modules.products.service import edge_width_fits_board, normalize_family
 from src.modules.products.types.board import BoardAttributes
 from src.modules.products.types.edge_banding import BandType, EdgeBandingAttributes
 from src.shared.exceptions import BulkValidationError
@@ -55,6 +55,13 @@ _MEDIO_RE = re.compile(r"\bMEDI[OA]\b", re.IGNORECASE)
 # truncated meters?) and guessing wrong would silently produce the wrong
 # physical dimensions. Rows that don't match this exact pattern are reported
 # as validation errors, never guessed at.
+#
+# The vendor's own convention prints the LARGO (length) first, ANCHO (width)
+# second — group(1) is always stored as `height`/largo (see
+# ``BoardAttributes.height``'s docstring), group(2) as `width`/ancho. The
+# regex doesn't enforce group(1) > group(2): a shorter-first pair is valid
+# syntax but is very likely the vendor writing the sides backwards, which
+# ``_collect_warnings`` flags instead of silently accepting.
 _BOARD_DIMS_RE = re.compile(
     r"\((\d\.\d{2})[Xx](\d\.\d{2})\)M-(\d+(?:\.\d+)?)MM", re.IGNORECASE
 )
@@ -204,11 +211,24 @@ def _collect_warnings(valid: Sequence[_ValidRow]) -> List[_Issue]:
     * A family is only checked for a counterpart when it was actually
       *declared* — writing one is the statement of intent that makes its
       absence on the other side a mistake.
-    * The thickness->width rule (``BOARD_THICKNESS_TO_EDGE_WIDTH``) is left
-      out on purpose: "no soft banding for a 36 mm board" is a real catalog
-      gap, not a data-entry error. Matching at the family level is what catches
-      the drift this is for — a board left on "Cashmere" while its banding
-      moved to "CSH".
+    * A family that coordinates but whose stocked widths cover none of its
+      own boards (``edge_width_fits_board``) is reported: a 36 mm board whose
+      design only comes in 19 mm tape has a picker as empty as a board with a
+      broken family, and from the seller's chair the two are the same problem.
+      Only families that HAVE bandings are checked, so this never restates the
+      orphan-family warning below.
+    * A **tapacanto thicker than it is wide** is a measurement that cannot
+      exist: the vendor almost certainly dropped a decimal point ("18X45MM"
+      where its siblings say "18X0.45MM"), and the thickness is also what the
+      band type is inferred from, so the row lands in the catalog mislabelled.
+      Reported, not corrected — the fix belongs in the inventory system.
+    * A **board whose largo ended up shorter than its ancho** is flagged too:
+      the vendor's convention prints the longer side first (``_BOARD_DIMS_RE``'s
+      first captured measure is always stored as ``height``/largo), so an
+      inverted pair usually means the source data has the two sides swapped,
+      not that the board is genuinely narrow-first. Reported, not corrected —
+      the sync stores whichever number came first, exactly like every other
+      strict-parsing rule in this module.
     """
     warnings: List[_Issue] = []
 
@@ -230,6 +250,12 @@ def _collect_warnings(valid: Sequence[_ValidRow]) -> List[_Issue]:
         ProductType.BOARD: {},
         ProductType.EDGE_BANDING: {},
     }
+    # Every width a family is stocked in, and the first board that needs each
+    # (family, thickness) combination covered. Keyed by thickness and not just
+    # by family because a design can coordinate perfectly at 15mm and have no
+    # tape wide enough for its 36mm sibling — that's one gap, not two.
+    widths_by_family: Dict[str, set] = {}
+    boards_by_family_thickness: Dict[Tuple[str, float], _ValidRow] = {}
 
     for row in valid:
         family = normalize_family(row.attributes.get("family"))
@@ -238,8 +264,41 @@ def _collect_warnings(valid: Sequence[_ValidRow]) -> List[_Issue]:
             # the sync should not KeyError its way out of a warning.
             first_by_family.setdefault(row.product_type, {}).setdefault(family, row)
 
-        if row.product_type is not ProductType.EDGE_BANDING:
+        if row.product_type is ProductType.BOARD:
+            height = row.attributes.get("height")
+            width = row.attributes.get("width")
+            if height is not None and width is not None and height < width:
+                warn(
+                    row,
+                    f"el largo ({height:g}mm) es menor que el ancho "
+                    f"({width:g}mm): revisar si el proveedor escribió el "
+                    "lado más corto primero",
+                )
+            thickness = row.attributes.get("thickness")
+            if family and thickness is not None:
+                boards_by_family_thickness.setdefault((family, thickness), row)
             continue
+
+        band_width = row.attributes.get("width")
+        band_thickness = row.attributes.get("thickness")
+        if band_width is not None and family:
+            # The width still counts towards coverage even on the row below:
+            # when the two numbers disagree it's the thickness that lost its
+            # decimal point, and a width the family really stocks shouldn't be
+            # dropped from the check on the strength of the other field.
+            widths_by_family.setdefault(family, set()).add(band_width)
+        if (
+            band_width is not None
+            and band_thickness is not None
+            and band_thickness > band_width
+        ):
+            warn(
+                row,
+                f"el espesor ({band_thickness:g}mm) es mayor que el ancho "
+                f"({band_width:g}mm): un tapacanto así no existe, revisar la "
+                "medida en el inventario",
+            )
+
         if not family:
             # An edge banding always *is* a design, so a missing family here is
             # a blank field, not a product that has none.
@@ -271,6 +330,22 @@ def _collect_warnings(valid: Sequence[_ValidRow]) -> List[_Issue]:
                 f"la familia '{row.attributes['family']}' solo aparece en "
                 "tapacantos; ningún tablero la usa",
             )
+
+    for (family, thickness), row in boards_by_family_thickness.items():
+        widths = widths_by_family.get(family)
+        if not widths:
+            # No banding at all on this family: already reported above, and
+            # saying it twice would only make the list harder to read.
+            continue
+        if any(edge_width_fits_board(thickness, w) for w in widths):
+            continue
+        stocked = "/".join(f"{w:g}" for w in sorted(widths))
+        warn(
+            row,
+            f"la familia '{row.attributes['family']}' no tiene ningún "
+            f"tapacanto que cubra un tablero de {thickness:g}mm "
+            f"(solo hay de {stocked}mm)",
+        )
 
     warnings.sort(key=lambda w: w.row_no)
     return warnings
@@ -383,8 +458,8 @@ def _validate(
                 )
                 continue
             attrs = {
-                "width": round(float(match.group(1)) * 1000, 2),
-                "height": round(float(match.group(2)) * 1000, 2),
+                "height": round(float(match.group(1)) * 1000, 2),
+                "width": round(float(match.group(2)) * 1000, 2),
                 "thickness": float(match.group(3)),
             }
             if row.tipo:

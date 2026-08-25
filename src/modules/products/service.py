@@ -12,10 +12,34 @@ from src.shared.crud import CRUDService
 from src.shared.database import get_db
 from src.shared.exceptions import BusinessRuleError
 
-# Business rule: edge banding width (mm) coordinated with the board thickness.
-# The banding must cover the board's edge plus a margin, so a 15 mm board uses
-# 19 mm tape and a 36 mm board uses 40 mm tape.
-BOARD_THICKNESS_TO_EDGE_WIDTH = {15: 19, 36: 40}
+# Business rule: an edge banding covers a board's edge only if it is WIDER than
+# the board is thick — the overhang is what the trimmer shaves off afterwards.
+#
+# This used to be a map of one exact width per thickness ({15: 19, 36: 40}),
+# which held while the catalog was seed data. The vendor stocks the same design
+# in several widths — 18/19/20/22 for 15-16 mm boards, 40/45 for 36 mm — so an
+# exact width left a third of the real catalog uncoordinated (a 15 mm Cashmere
+# board whose family only comes in 22 mm returned an empty picker) and hid the
+# alternatives on the rest. A window absorbs a width the vendor adds later
+# without a table to maintain.
+#
+# The bounds are what makes it a rule rather than "anything wider": the minimum
+# keeps a tape that exactly matches the thickness (nothing left to trim) out,
+# and the maximum keeps a 40 mm tape from being offered for a 15 mm board.
+EDGE_WIDTH_MIN_OVERHANG_MM = 1
+EDGE_WIDTH_MAX_OVERHANG_MM = 10
+
+
+def edge_width_fits_board(board_thickness: float, banding_width: float) -> bool:
+    """Whether a banding of ``banding_width`` mm can cover a board's edge.
+
+    Module-level and free of the DB for the same reason as ``normalize_family``:
+    the catalog sync reports the width gaps this rule leaves behind
+    (``catalog_sync._collect_warnings``) and both sides must agree on what
+    "compatible" means, or the warning would fire on pairs that do coordinate.
+    """
+    overhang = banding_width - board_thickness
+    return EDGE_WIDTH_MIN_OVERHANG_MM <= overhang <= EDGE_WIDTH_MAX_OVERHANG_MM
 
 
 def normalize_family(value: Optional[str]) -> str:
@@ -108,15 +132,23 @@ class ProductService(CRUDService[ProductModel, ProductBase, ProductUpdate]):
     def find_edge_bandings_for_board(
         self, board_id: int, band_type: Optional[BandType] = None
     ) -> List[ProductModel]:
-        """Edge bandings coordinated with a board (same family and correct width).
+        """Edge bandings coordinated with a board (same family, covering width).
 
         Matches on the explicit ``family`` attribute shared by the board and its
-        edge bandings (user-configurable, unlike the editable ``code``) and
-        applies the thickness→width rule (``BOARD_THICKNESS_TO_EDGE_WIDTH``).
+        edge bandings (user-configurable, unlike the editable ``code``) and keeps
+        every width that fits the board's thickness (``edge_width_fits_board``).
         Optionally filters by band type (``BandType``). Inactive products are
-        never coordinated. Returns ``[]`` when the board has no family, no width
-        rule applies, or there's no match for that combination (a real catalog
-        gap, e.g. soft banding for a 36 mm board).
+        never coordinated. Returns ``[]`` when the board has no family or no
+        stocked width covers it (a real catalog gap — a 36 mm board whose design
+        only comes in 19 mm tape).
+
+        Ordered by width, then by the banding's own thickness, so the narrowest
+        tape that covers the edge comes first: that's the one the shop uses, and
+        the dashboard auto-selects the head of this list. The wider alternatives
+        the same design is stocked in follow it instead of being hidden. ``id``
+        breaks any remaining tie, because the candidate query has no ``ORDER BY``
+        and equal keys would otherwise come back in whatever order the engine
+        chose.
         """
         board = self.get_or_404(board_id)
         if board.type != ProductType.BOARD.value:
@@ -126,11 +158,7 @@ class ProductService(CRUDService[ProductModel, ProductBase, ProductUpdate]):
         if not board_family:
             return []
 
-        target_width = BOARD_THICKNESS_TO_EDGE_WIDTH.get(
-            int(board.attributes["thickness"])
-        )
-        if target_width is None:
-            return []
+        thickness = float(board.attributes["thickness"])
 
         candidates = (
             self.db.query(ProductModel)
@@ -145,10 +173,17 @@ class ProductService(CRUDService[ProductModel, ProductBase, ProductUpdate]):
             p
             for p in candidates
             if normalize_family(p.attributes.get("family")) == board_family
-            and p.attributes.get("width") == target_width
+            and edge_width_fits_board(thickness, p.attributes.get("width", 0))
             and (band_type is None or p.attributes.get("bandType") == band_type.value)
         ]
-        return sorted(matches, key=lambda p: p.attributes.get("thickness", 0))
+        return sorted(
+            matches,
+            key=lambda p: (
+                p.attributes.get("width", 0),
+                p.attributes.get("thickness", 0),
+                p.id,
+            ),
+        )
 
 
 def product_service(db: Session = Depends(get_db)) -> ProductService:
