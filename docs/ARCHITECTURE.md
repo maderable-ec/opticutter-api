@@ -87,10 +87,14 @@ No cycles, enforced by convention:
   Add a new product type by registering a schema under `products/types/` —
   no migration needed. Only `board`-typed products feed the optimizer.
   `GET /products/{board_id}/edge-bandings` matches the edge bandings designed
-  for a given board by the explicit `family` attribute they share, then applies
-  a thickness→width rule (over active products only). It is **advisory for the
-  UI**: nothing downstream requires a piece's edge banding to be coordinated,
-  so a contrasting one can be quoted deliberately. Board and edge-banding
+  for a given board by the explicit `family` attribute they share, then keeps
+  every stocked width that covers the board's edge — wider than the board is
+  thick, by between `EDGE_WIDTH_MIN_OVERHANG_MM` and `EDGE_WIDTH_MAX_OVERHANG_MM`
+  (over active products only), narrowest first. A window rather than one exact
+  width per thickness because the vendor stocks the same design in several
+  (18/19/20/22 for a 15 mm board, 40/45 for a 36 mm one). It is **advisory for
+  the UI**: nothing downstream requires a piece's edge banding to be
+  coordinated, so a contrasting one can be quoted deliberately. Board and edge-banding
   attributes also carry an optional `subtype` (material subtype — MDP/MDF/
   Plywood/Pine/... for boards, Wood Grain/Solid/Gloss/... for edge bandings,
   each a closed enum with canonical English values; the external catalog sync
