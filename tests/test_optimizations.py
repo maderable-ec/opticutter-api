@@ -248,6 +248,33 @@ def test_optimize_without_client_is_anonymous(client):
     assert data["optimizationHash"] == with_client["optimizationHash"]
 
 
+def test_marking_a_board_discountable_reprices_without_touching_the_hash(client):
+    """The checkbox re-prices the SAME cut plan; it must never re-run the search.
+
+    The flag is deliberately absent from ``_compute_hash`` (like clientId and
+    priceTierCode), so toggling it has to hit the cache. If this ever fails, the
+    seller pays a full optimization per click.
+    """
+    created_client = _create_client(client)
+    created_board = _create_board(client)
+
+    base = _optimize_payload(created_client["id"], created_board["id"])
+    base["priceTierCode"] = "carpintero"
+    plain = client.post("/api/v1/optimize/", json=base).json()["data"]
+
+    marked = _optimize_payload(created_client["id"], created_board["id"])
+    marked["priceTierCode"] = "carpintero"
+    marked["materials"][0]["applyDiscount"] = True
+    discounted = client.post("/api/v1/optimize/", json=marked).json()["data"]
+
+    assert discounted["optimizationHash"] == plain["optimizationHash"]
+    assert plain["pricing"]["discountBase"] == 0.0
+    assert plain["pricing"]["discountAmount"] == 0.0
+    assert discounted["pricing"]["discountBase"] == discounted["totalBoardsCost"]
+    assert discounted["pricing"]["discountAmount"] > 0
+    assert discounted["pricing"]["total"] < plain["pricing"]["total"]
+
+
 def test_optimize_unknown_client_returns_404(client):
     """If a nonexistent ``clientId`` is sent, the response is 404."""
     created_board = _create_board(client)
