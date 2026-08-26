@@ -110,10 +110,13 @@ class OptimizationService:
             client = self.db.get(ClientModel, request.client_id)
             if client is None:
                 raise EntityNotFoundError("Client", request.client_id)
-        # The discount is applied outside the geometry cache: every tier reuses
-        # the same payload (cache-first) and only differs in the `pricing` block.
+        # The discount is applied outside the geometry cache: every tier — and
+        # every board selection — reuses the same payload (cache-first) and only
+        # differs in the `pricing` block.
         tier = self.settings_service.resolve_price_tier(request.price_tier_code)
-        pricing = build_pricing(payload, tier, additional_services)
+        pricing = build_pricing(
+            payload, tier, additional_services, request.discounted_material_keys
+        )
         return OptimizeResponse(
             id=None,
             client=client,

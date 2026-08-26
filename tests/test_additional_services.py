@@ -27,16 +27,21 @@ def _payload(*, catalog_boards=100.0, edge=0.0):
     return {
         "total_boards_cost": catalog_boards,
         "total_edge_banding_cost": edge,
-        "materials_summary": [{"product_id": 5, "total_cost": catalog_boards}],
+        "materials_summary": [
+            {"material_key": "tablero", "product_id": 5, "total_cost": catalog_boards}
+        ],
     }
 
 
 def test_build_pricing_adds_services_after_discount():
     tier = {"code": "carpintero", "name": "Precio Carpintero", "rate": 0.02}
     services = [{"unit_price": 2.0, "quantity": 3}, {"unit_price": 15.0, "quantity": 1}]
-    p = build_pricing(_payload(catalog_boards=100.0, edge=20.0), tier, services)
+    # The board is marked as discountable: services must land AFTER that discount.
+    p = build_pricing(
+        _payload(catalog_boards=100.0, edge=20.0), tier, services, {"tablero"}
+    )
     assert p["subtotal"] == 120.0  # boards + edge at list price
-    assert p["discount_amount"] == 2.0  # 2% only over catalog boards
+    assert p["discount_amount"] == 2.0  # 2% only over the marked catalog board
     assert p["services_total"] == 21.0  # (2*3) + (15*1), not discounted
     assert p["total"] == 139.0  # 120 - 2 + 21
 

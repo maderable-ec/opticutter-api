@@ -227,6 +227,15 @@ class CatalogMaterialInput(CamelModel):
             "when the board has no pooled offcuts. Affects geometry and the hash."
         ),
     )
+    apply_discount: bool = Field(
+        default=False,
+        description=(
+            "Whether the price tier's discount applies to this board. Defaults to "
+            "false: the seller marks board by board which ones are discounted when "
+            "quoting. Does not affect optimization geometry or hash (like "
+            "clientId/priceTierCode); only the `pricing` block."
+        ),
+    )
 
 
 class InlineMaterialInput(CamelModel):
@@ -405,6 +414,17 @@ class OptimizeRequest(CamelModel):
                     f"'{req.material_key}'; reference its catalog board instead"
                 )
         return self
+
+    @property
+    def discounted_material_keys(self) -> set:
+        """Keys of the catalog boards the seller marked as discountable.
+
+        The single place that reads ``applyDiscount``, so the three callers of
+        ``build_pricing`` (raw optimize, pre-order, order) can't drift apart.
+        Inline materials (offcut/manual) don't carry the flag: they were never
+        discountable and still aren't.
+        """
+        return {m.key for m in self.materials if getattr(m, "apply_discount", False)}
 
 
 class Material(CamelModel):

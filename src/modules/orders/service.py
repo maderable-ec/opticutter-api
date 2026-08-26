@@ -190,13 +190,22 @@ class OrderService(BranchScopedMixin):
         # identical but at a different tier are NOT the same order (the tier
         # isn't part of the hash).
         tier = self.settings_service.resolve_price_tier(data.price_tier_code)
-        pricing = build_pricing(payload, tier, additional_services)
+        pricing = build_pricing(
+            payload,
+            tier,
+            additional_services,
+            opt_request.discounted_material_keys,
+        )
+        # The per-board discount selection isn't in the hash either (same reason as
+        # the tier), so it joins the dedupe key: two orders with the same cuts and
+        # tier but a different set of discounted boards are NOT the same order.
         existing = self._find_active_duplicate(
             branch_id,
             data.client_id,
             optimization_hash,
             tier["code"],
             pricing["services_total"],
+            pricing["discount_amount"],
         )
         if existing is not None:
             return existing
@@ -694,10 +703,16 @@ class OrderService(BranchScopedMixin):
         target = resolve_branch_for_create(self.db, None, target_branch_id)
         if target == order.branch_id:
             return order  # idempotent: same branch, no-op
-        # Invariant: a single active identical order per branch (dedupe key is
-        # branch + client + hash + tier).
+        # Invariant: a single active identical order per branch. The order's own
+        # frozen values complete the dedupe key (services + discount), so moving
+        # it only collides with an order that really is the same bill.
         dup = self._find_active_duplicate(
-            target, order.client_id, order.optimization_hash, order.price_tier_code
+            target,
+            order.client_id,
+            order.optimization_hash,
+            order.price_tier_code,
+            order.additional_services_total or 0.0,
+            order.discount_amount or 0.0,
         )
         if dup is not None and dup.id != order.id:
             raise ConflictError(
@@ -762,14 +777,16 @@ class OrderService(BranchScopedMixin):
         optimization_hash: str,
         price_tier_code: str,
         additional_services_total: float = 0.0,
+        discount_amount: float = 0.0,
     ) -> Optional[OrderModel]:
         """Non-terminal order from the same branch+client with the same hash (idempotency).
 
         Includes the branch in the key: the same client can order the same
         thing at two branches and those are different orders. Includes the
-        price tier and the additional-services total: neither is part of the
-        hash, so the same cut at a different tier or with different services
-        counts as two orders.
+        price tier, the additional-services total and the discount amount: none
+        of them is part of the hash, so the same cut at a different tier, with
+        different services, or with a different set of discounted boards counts
+        as two orders.
         """
         terminal = [s.value for s in TERMINAL_STATUSES]
         return (
@@ -780,6 +797,7 @@ class OrderService(BranchScopedMixin):
                 OrderModel.optimization_hash == optimization_hash,
                 OrderModel.price_tier_code == price_tier_code,
                 OrderModel.additional_services_total == additional_services_total,
+                OrderModel.discount_amount == discount_amount,
                 OrderModel.status.not_in(terminal),
             )
             .first()

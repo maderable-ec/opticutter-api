@@ -264,9 +264,20 @@ class PreOrderService(BranchScopedMixin):
         return self.optimization_service.compute(self.build_request(preorder))
 
     def build_pricing_for(self, preorder: PreOrderModel, payload: dict) -> dict:
-        """Live discount block for the pre-order's price tier (incl. services)."""
+        """Live discount block for the pre-order's price tier (incl. services).
+
+        The discounted boards are read back through ``build_request``: the stored
+        ``materials`` are raw JSON, and validating them through the same union the
+        re-optimization already uses is what keeps ``applyDiscount`` from being
+        parsed by hand here.
+        """
         tier = self.settings_service.resolve_price_tier(preorder.price_tier_code)
-        return build_pricing(payload, tier, preorder.additional_services)
+        return build_pricing(
+            payload,
+            tier,
+            preorder.additional_services,
+            self.build_request(preorder).discounted_material_keys,
+        )
 
     def build_optimize_response(self, preorder: PreOrderModel) -> OptimizeResponse:
         """Optimization response (with client) for the internal detail view.
