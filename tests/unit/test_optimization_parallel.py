@@ -19,7 +19,12 @@ from src.cutting.models import BinSpec, Piece
 from src.cutting.search import ExactConfig, SearchBudget
 from src.modules.optimizations import parallel
 from src.modules.optimizations.materials import ResolvedMaterial
-from src.modules.optimizations.parallel import PoolJob, run_pool_job, run_pool_jobs
+from src.modules.optimizations.parallel import (
+    PoolJob,
+    run_pool_job,
+    run_pool_jobs,
+    runs_in_process,
+)
 from src.modules.optimizations.schemas import PoolFillOrder
 from src.shared.config import config
 from src.shared.exceptions import ValidationError
@@ -87,7 +92,15 @@ def _job(key="board", *, pieces=None, offcuts=(), half_spec=None, material=None)
     )
 
 
-def _dicts(layouts):
+def _dicts(result):
+    """Comparable geometry from a ``PoolResult`` (or a bare layout list).
+
+    Accepting both keeps every determinism assertion in this file phrased about
+    geometry alone. That is the point, not convenience: ``PoolResult.seconds`` is
+    wall clock, so comparing whole results would make the byte-identical claims
+    below flaky for a reason that has nothing to do with the engine.
+    """
+    layouts = getattr(result, "layouts", result)
     return [layout.to_dict() for layout in layouts]
 
 
@@ -304,3 +317,51 @@ def test_shutdown_actually_terminates_the_workers(monkeypatch):
     for process in processes:
         process.join(timeout=15)
         assert not process.is_alive()
+
+
+def test_pool_result_carries_the_time_the_search_actually_took():
+    """The timing has to be measured where the work runs, not around the call.
+
+    In the parallel path the parent only observes *completion* order, so a clock
+    read on that side attributes queueing time to whichever pool finished last —
+    precisely inverting the attribution on the requests worth explaining.
+    """
+    result = run_pool_job(_job())
+
+    assert result.seconds > 0
+    assert result.layouts
+
+
+def test_runs_in_process_matches_what_run_pool_jobs_does(monkeypatch):
+    """The predicate the latency log labels the path with must not drift.
+
+    It exists so ``OptimizationService`` can name the path without restating the
+    condition; if the two ever disagreed, the log would mislabel exactly the slow
+    requests it is there to explain.
+    """
+    monkeypatch.setattr(config, "OPT_POOL_WORKERS", 2)
+    monkeypatch.setattr(
+        parallel, "_get_executor", lambda: pytest.fail("executor was built")
+    )
+
+    # One material: in-process, and the executor is never even constructed.
+    assert runs_in_process([_job()]) is True
+    run_pool_jobs([_job()])
+
+    # Two materials with the breaker open: same in-process path.
+    parallel._trip_breaker()
+    try:
+        assert runs_in_process([_job("a"), _job("b")]) is True
+        run_pool_jobs([_job("a"), _job("b")])
+    finally:
+        parallel._disabled_until = 0.0
+
+    # Two materials, healthy: the pool path (asserted without running it).
+    assert runs_in_process([_job("a"), _job("b")]) is False
+
+
+def test_one_worker_reports_the_in_process_path(monkeypatch):
+    """``OPT_POOL_WORKERS=1`` is the kill switch, and the log must say so."""
+    monkeypatch.setattr(config, "OPT_POOL_WORKERS", 1)
+
+    assert runs_in_process([_job("a"), _job("b")]) is True

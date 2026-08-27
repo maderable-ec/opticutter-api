@@ -78,6 +78,7 @@ from src.cutting import (  # noqa: E402
     SearchBudget,
     exact_available,
     optimize_bins,
+    rust_backend,  # noqa: E402
 )
 from src.cutting.search import ENGINE_VERSION  # noqa: E402
 
@@ -635,8 +636,15 @@ def main():
         f"máquina : {platform.machine()} · {os.cpu_count()} cores · "
         f"{platform.system()} · python {platform.python_version()}"
     )
+    backend = rust_backend.status()
+    packing = (
+        f"{backend['effective']} (wheel {backend['wheel_version']})"
+        if backend["wheel_importable"]
+        else f"{backend['effective']} (sin wheel)"
+    )
     print(
-        f"motor   : ENGINE_VERSION={ENGINE_VERSION} · "
+        f"motor   : packing={packing} (pedido={backend['requested']}) · "
+        f"ENGINE_VERSION={ENGINE_VERSION} · "
         f"CP-SAT={'sí' if exact_available() else 'NO (sólo heurísticas)'}"
     )
     print(
