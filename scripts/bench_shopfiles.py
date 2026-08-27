@@ -9,12 +9,23 @@ the same number of boards or fewer, on every material of every job.
 Unlike ``bench_battery.py`` (synthetic jobs, guards against *regressions*), this
 one measures us against the competitor on real work.
 
-The XML carries only ``<parts>`` — sheet size, kerf and trims come from the
-app's own settings, so this script reads them from the database exactly as
+The XML carries only ``<parts>`` — kerf and trims come from the app's own
+settings, so this script reads them from the database exactly as
 ``OptimizationService`` would, and resolves each part's ``<material>`` name
 against the local product catalog. Names that have no catalog entry fall back to
-a same-thickness stand-in: only geometry and price matter here, and every MDP
-sheet in the catalog is 2070x2800.
+a same-thickness stand-in.
+
+**The sheet is the measurement, not a detail.** An earlier version of this file
+asserted "every MDP sheet in the catalog is 2070x2800" and matched on the
+``family`` attribute plus a ``code.endswith("R")`` test for woodgrain. Against
+the real SIFAC catalog both are false — sheets come in 2440x2070, 2440x2150,
+2750x1850 and 2500x2140, codes are numeric, and the 15mm Blanco Nieve boards
+carry the family ``"Blanco"``, not ``"Blanco Nieve"`` — so every row silently
+fell through to a stand-in and the harness stopped comparing anything real. It
+now matches on the product **name** (decor + thickness + ``RH``) and prints the
+sheet it chose on every row: the board count moves ~14% between two sheets of
+the same decor, so a comparison that does not name the sheet is not a
+comparison.
 
 Usage::
 
@@ -78,17 +89,27 @@ EXPECTED: Dict[str, "OrderedDict[str, float]"] = {
             ("BLANCO NORMAL", 1),
         ]
     ),
+    "12 Y MEDIO BLANCOS RH 15MM_23-06-26.xml": OrderedDict([("BLANCO RH", 12.5)]),
+    "3 BLANCOS RH 15MM_1 Y MEDIO JAPANDI RH 15MM_1 CASHEMERE RH 15MM_11-08-2026.xml": (
+        OrderedDict([("BLANCO RH", 3), ("JAPANDI RH", 1.5), ("CASHMERE", 1)])
+    ),
 }
 
-# The shop's material names vs the catalog's ``family`` attribute. "BLANCO" is
-# the shop's shorthand for Blanco Nieve; "RISTRETTO" (also spelled RISTRETO in
-# one export) is the Barroco Ristretto decor.
-FAMILY_ALIASES = [
-    ("JAPANDI", "Japandi"),
-    ("CASHMERE", "Cashmere"),
-    ("BLANCO", "Blanco Nieve"),
-    ("RISTRETTO", "Barroco Ristretto"),
-    ("RISTRETO", "Barroco Ristretto"),
+# The shop's material names vs the decor as the catalog *names* it. Matching on
+# the name rather than on ``family`` is deliberate: ``family`` is the
+# board<->tapacanto coordination key and is edited for that purpose (the 15mm
+# Blanco Nieve boards carry ``"Blanco"``), while the name is what the vendor
+# ships and what a human recognises. Ordered longest-decor-first so RISTRETTO
+# cannot be shadowed by a shorter token.
+#
+# "BLANCO" is the shop's shorthand for Blanco Nieve; "RISTRETTO" (also spelled
+# RISTRETO in one export) is the Roble Barroco Ristretto decor; "CASHEMERE"
+# appears misspelled in one filename.
+DECOR_ALIASES = [
+    (("RISTRETTO", "RISTRETO"), "ROBLE BARROCO RISTRETTO"),
+    (("JAPANDI",), "JAPANDI"),
+    (("CASHMERE", "CASHEMERE"), "CASHMERE"),
+    (("BLANCO",), "BLANCO NIEVE"),
 ]
 
 
@@ -121,33 +142,39 @@ def parse_parts(path: str) -> "OrderedDict[str, List[Piece]]":
 def resolve_board(db, material: str) -> Tuple[ProductModel, bool]:
     """Catalog board for a shop material name; ``False`` if it is a stand-in.
 
-    Matches on the catalog ``family`` plus the two axes the name really encodes:
-    thickness (``36MM``) and whether it is a woodgrain (``RH``) sheet, which is
-    what makes the price differ.
+    Matches on the product **name** along the three axes the shop's name encodes:
+    the decor, the thickness (``36MM``) and whether it is a woodgrain (``RH``)
+    sheet — which is the axis that moves the price (an RH board bills 15-20%
+    over its smooth sibling). Ties are broken by the shortest name, so a plain
+    ``MDP RH JAPANDI`` wins over ``MDP RH ROBLE JAPANDI``.
     """
     upper = material.upper()
     thickness = 36 if "36" in upper else 15
     grain = bool(re.search(r"\bRH\b", upper))
 
     # ``attributes`` is a plain JSON column, so the thickness filter happens in
-    # Python; the board catalog is a few dozen rows.
+    # Python; the board catalog is a few hundred rows. Compared as a float: the
+    # vendor sells fractional millimetres (OSB 9.5, MDF fondo 5.5).
     boards = [
         b
         for b in db.query(ProductModel).filter(ProductModel.type == "board").all()
-        if int((b.attributes or {}).get("thickness", 0)) == thickness
+        if float((b.attributes or {}).get("thickness", 0) or 0) == thickness
     ]
-    grained = [b for b in boards if b.code.endswith("R")]
-    plain = [b for b in boards if not b.code.endswith("R")]
-    candidates = (grained if grain else plain) or boards
-
-    for token, family in FAMILY_ALIASES:
-        if token in upper:
-            for board in candidates:
-                if (board.attributes or {}).get("family") == family:
-                    return board, True
-    # No catalog entry for this decor: any same-thickness sheet has the same
-    # geometry, so the board count is unaffected.
-    return candidates[0], False
+    for tokens, decor in DECOR_ALIASES:
+        if not any(token in upper for token in tokens):
+            continue
+        candidates = [b for b in boards if decor in b.name.upper()]
+        # The RH filter is a preference, not a requirement: a decor stocked in
+        # only one finish should still match rather than fall to a stand-in.
+        same_finish = [
+            b for b in candidates if (" RH " in f" {b.name.upper()} ") == grain
+        ]
+        best = same_finish or candidates
+        if best:
+            return sorted(best, key=lambda b: (len(b.name), b.code))[0], True
+    # No catalog entry for this decor: a same-thickness sheet keeps the run
+    # going, but the sheet is NOT the same geometry, so the row is flagged.
+    return sorted(boards, key=lambda b: b.code)[0], False
 
 
 def run_file(path: str, params: CuttingParameters, markup: float, db) -> dict:
@@ -224,7 +251,8 @@ def run_file(path: str, params: CuttingParameters, markup: float, db) -> dict:
             f"  {material:<20}{instances:>7}{label:>9}"
             f"{('-' if theirs is None else _fmt(theirs)):>11}"
             f"{elapsed:>8.2f}s{used / capacity * 100:>7.1f}%  "
-            f"{board.code}{'' if exact_match else ' (sustituto)'}  {verdict}"
+            f"{full.width:.0f}x{full.height:.0f} {board.code}"
+            f"{'' if exact_match else ' (sustituto)'}  {verdict}"
         )
         rows.append(
             {

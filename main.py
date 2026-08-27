@@ -13,6 +13,11 @@ from src.modules.branches.router import router as branches_router
 from src.modules.clients.router import router as clients_router
 from src.modules.notifications.router import router as notifications_router
 from src.modules.optimization_drafts.router import router as optimization_drafts_router
+from src.modules.optimizations.engine_info import (
+    backend_name,
+    degraded_warning,
+    engine_summary,
+)
 from src.modules.optimizations.parallel import (
     shutdown_pool_executor,
     warmup_pool_executor,
@@ -44,10 +49,19 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     """Application lifecycle handling"""
     logger.info("Starting FastAPI application")
+    # WARNING, not INFO: production runs at LOG_LEVEL=WARNING, and this line is
+    # the only evidence of which engine the box actually runs. Both the native
+    # packing kernel and CP-SAT degrade silently when their optional dependency
+    # is missing, and the packing one costs ~3x.
+    logger.warning("%s", engine_summary())
+    degraded = degraded_warning()
+    if degraded:
+        logger.warning("%s", degraded)
     # Pay for the forkserver and its ortools preload now, not on a customer's
     # first quote. Best-effort by construction: the pool falls back to in-process
-    # optimization, so booting must never depend on it.
-    warmup_pool_executor()
+    # optimization, so booting must never depend on it. The warm-up doubles as
+    # the worker's own engine report — the packing happens in those children.
+    warmup_pool_executor(parent_packing=backend_name())
     yield
     shutdown_pool_executor()
     logger.info("Shutting down FastAPI application")

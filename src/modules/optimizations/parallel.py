@@ -39,6 +39,7 @@ from src.cutting.enums import PackingStrategy
 from src.cutting.models import BinSpec, CuttingLayout, Piece
 from src.cutting.parameters import CuttingParameters
 from src.cutting.search import ExactConfig, SearchBudget, optimize_bins
+from src.modules.optimizations.engine_info import probe_worker
 from src.modules.optimizations.materials import ResolvedMaterial
 from src.modules.optimizations.pool import optimize_pool
 from src.shared.config import config
@@ -76,6 +77,21 @@ _disabled_until = 0.0
 
 
 @dataclass(frozen=True)
+class PoolResult:
+    """One material's layouts plus what they cost to produce.
+
+    The timing rides back with the layouts instead of being taken around the
+    call: in the parallel path the parent only sees *completion* order, so a
+    ``perf_counter`` on this side would measure queueing, not the search. It is
+    measured where the work happens and crosses the pickle boundary as a float,
+    which keeps ``run_pool_job`` the single implementation for both paths.
+    """
+
+    layouts: List[CuttingLayout]
+    seconds: float
+
+
+@dataclass(frozen=True)
 class PoolJob:
     """Everything one material's optimization needs, and nothing else.
 
@@ -104,14 +120,23 @@ class PoolJob:
     exact_config: ExactConfig
 
 
-def run_pool_job(job: PoolJob) -> List[CuttingLayout]:
+def run_pool_job(job: PoolJob) -> PoolResult:
     """Optimizes ONE material. The single implementation of that verb.
 
     Runs identically in-process and in a pool worker — that identity *is* the
     determinism argument. Deliberately pure: no logging (a forkserver child never
     imports ``main``, so it has no logging config and no request context), no
-    cache, no DB, no globals.
+    cache, no DB, no globals. The ``perf_counter`` around the body respects all
+    of that — it reads a clock and returns the number, so the caller can attribute
+    latency per material without this function learning where the log goes.
     """
+    started = time.perf_counter()
+    layouts = _optimize_job(job)
+    return PoolResult(layouts=layouts, seconds=time.perf_counter() - started)
+
+
+def _optimize_job(job: PoolJob) -> List[CuttingLayout]:
+    """The optimization itself, split out so the timing wraps exactly the work."""
     pieces = list(job.pieces)
     if job.offcuts:
         # Pool: pack across the catalog board + its finite offcuts.
@@ -149,17 +174,28 @@ def run_pool_job(job: PoolJob) -> List[CuttingLayout]:
     )[0]
 
 
-def run_pool_jobs(jobs: Sequence[PoolJob]) -> List[List[CuttingLayout]]:
-    """Runs every job and returns the layouts IN THE SAME ORDER as ``jobs``.
+def runs_in_process(jobs: Sequence[PoolJob]) -> bool:
+    """Whether this batch skips the executor entirely.
+
+    One material has nothing to overlap with, and the executor would cost a
+    forkserver on a box that may never need one. Public so the caller can name
+    the path in its latency log without restating the condition — a duplicated
+    predicate would drift and then mislabel exactly the slow requests it exists
+    to explain. Note ``run_pool_jobs`` can still fall back mid-batch after a pool
+    failure; that path logs its own warning, so the two lines together are true.
+    """
+    return len(jobs) <= 1 or config.OPT_POOL_WORKERS <= 1 or _breaker_open()
+
+
+def run_pool_jobs(jobs: Sequence[PoolJob]) -> List[PoolResult]:
+    """Runs every job and returns the results IN THE SAME ORDER as ``jobs``.
 
     Parallel when it pays and the executor is healthy, in-process otherwise.
     Never raises for an infrastructure reason — only domain errors escape.
     """
     if not jobs:
         return []
-    if len(jobs) == 1 or config.OPT_POOL_WORKERS <= 1 or _breaker_open():
-        # One material has nothing to overlap with, and the executor costs a
-        # forkserver on a box that may never need one.
+    if runs_in_process(jobs):
         return [run_pool_job(job) for job in jobs]
 
     executor = _get_executor()
@@ -194,13 +230,20 @@ def run_pool_jobs(jobs: Sequence[PoolJob]) -> List[List[CuttingLayout]]:
         return [run_pool_job(job) for job in jobs]
 
 
-def warmup_pool_executor() -> None:
+def warmup_pool_executor(parent_packing: Optional[str] = None) -> None:
     """Starts the forkserver and the workers ahead of the first real request.
 
     ``ProcessPoolExecutor`` spawns workers lazily, so merely constructing it
     starts nothing; one trivial submit is what pays for the forkserver and its
     preload (``ortools`` is the expensive import). Best-effort by construction —
     a failure here must never stop the application from booting.
+
+    The warm-up payload is ``probe_worker`` rather than a no-op because the fork
+    is paid either way and the child is the only thing that can answer which
+    engine the *packing* actually runs on: workers resolve the backend in their
+    own process. ``parent_packing`` lets the caller assert they agree — a child
+    that disagrees is a real deployment fault (a stale forkserver preload, a
+    per-process environment difference) that would otherwise be invisible.
     """
     if config.OPT_POOL_WORKERS <= 1:
         return
@@ -208,10 +251,21 @@ def warmup_pool_executor() -> None:
     if executor is None:
         return
     try:
-        executor.submit(_noop).result(timeout=30)
-        logger.info(
-            "optimization pool ready (%s workers)", max(1, config.OPT_POOL_WORKERS)
+        probe = executor.submit(probe_worker).result(timeout=30)
+        logger.warning(
+            "optimization pool ready (%s workers) · packing=%s · CP-SAT=%s",
+            max(1, config.OPT_POOL_WORKERS),
+            probe["packing"],
+            "sí" if probe["cpsat"] else "NO",
         )
+        if parent_packing is not None and probe["packing"] != parent_packing:
+            logger.warning(
+                "el worker del pool corre packing=%s pero el proceso padre "
+                "corre packing=%s: las optimizaciones multi-material no usan "
+                "el mismo motor que el resto",
+                probe["packing"],
+                parent_packing,
+            )
     except Exception as exc:  # noqa: BLE001 - boot must not depend on this
         logger.warning(
             "could not warm up the optimization pool (%s: %s); "
@@ -335,10 +389,6 @@ def _init_worker() -> None:  # pragma: no cover - runs in a child process
         pass
     # Ctrl-C in dev otherwise produces a traceback storm from every child.
     signal.signal(signal.SIGINT, signal.SIG_IGN)
-
-
-def _noop() -> None:  # pragma: no cover - runs in a child process
-    """Warm-up payload: the point is starting the worker, not the work."""
 
 
 def _trip_breaker() -> None:

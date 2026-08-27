@@ -1,8 +1,10 @@
 import dataclasses
 import hashlib
 import json
+import logging
+import time
 from collections import Counter, defaultdict
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from fastapi import Depends
 from sqlalchemy.orm import Session
@@ -18,9 +20,15 @@ from src.cutting import (
     exact_available,
 )
 from src.modules.clients.model import ClientModel
+from src.modules.optimizations.engine_info import backend_name
 from src.modules.optimizations.labels import edge_banding_notation
 from src.modules.optimizations.materials import MaterialResolver, ResolvedMaterial
-from src.modules.optimizations.parallel import PoolJob, run_pool_jobs
+from src.modules.optimizations.parallel import (
+    PoolJob,
+    PoolResult,
+    run_pool_jobs,
+    runs_in_process,
+)
 from src.modules.optimizations.patterns import group_layouts
 from src.modules.optimizations.pricing import build_pricing
 from src.modules.optimizations.schemas import (
@@ -44,6 +52,8 @@ from src.shared.exceptions import (
     EntityNotFoundError,
     ValidationError,
 )
+
+logger = logging.getLogger(__name__)
 
 # Edge relocation when a piece comes out rotated from the optimizer. Convention:
 # 90° clockwise rotation (top→right→bottom→left→top). The optimizer only swaps
@@ -142,7 +152,14 @@ class OptimizationService:
         requirements + cutting parameters + edge-banding prices). Doesn't write to
         the DB: the orders module reuses it to freeze the snapshot without depending
         on the cache. Returns ``(payload, optimization_hash)``.
+
+        Timed from here — before the cache lookup, not around the search — because
+        the question the log has to answer is "why was that quote slow", and a
+        Redis that has started failing open (``src/shared/cache.py`` swallows every
+        ``RedisError``) turns every request into a cold compute without any other
+        symptom.
         """
+        started = time.perf_counter()
         if not request.requirements:
             raise ValidationError("La lista de piezas no puede estar vacía")
 
@@ -196,6 +213,7 @@ class OptimizationService:
 
         cached = cache.get_json(optimization_hash)
         if cached is not None:
+            self._log_compute(optimization_hash, started, hit=True, jobs=(), results=())
             return cached, optimization_hash
 
         strategy = STRATEGY_TO_PACKING[request.strategy]
@@ -239,16 +257,63 @@ class OptimizationService:
             # optimizer has no use for them.
             maps.append((edge_map, net_map))
 
+        pool_results = run_pool_jobs(jobs)
         results = [
-            (edge_map, net_map, layouts)
-            for (edge_map, net_map), layouts in zip(maps, run_pool_jobs(jobs))
+            (edge_map, net_map, pool.layouts)
+            for (edge_map, net_map), pool in zip(maps, pool_results)
         ]
 
         payload = self._build_result_payload(
             request, results, resolved, eb_products, waste_factor
         )
         cache.set_json(optimization_hash, payload)
+        self._log_compute(
+            optimization_hash, started, hit=False, jobs=jobs, results=pool_results
+        )
         return payload, optimization_hash
+
+    def _log_compute(
+        self,
+        optimization_hash: str,
+        started: float,
+        *,
+        hit: bool,
+        jobs: Sequence[PoolJob],
+        results: Sequence[PoolResult],
+    ) -> None:
+        """One greppable line per optimization: where the time went, and why.
+
+        Emitted on both the cache hit and the cold compute, because the ratio
+        between them is the first thing worth knowing when quotes get slow — a
+        collapsed hit rate and a genuinely heavier job look identical from the
+        outside, and only one of them is fixed by touching the engine.
+
+        Level is INFO normally and WARNING past ``OPT_SLOW_LOG_SECONDS``:
+        production runs at ``LOG_LEVEL=WARNING``, so the slow tail has to raise
+        its own level or it is never seen. Never let this raise — a broken log
+        line must not fail a computed quote.
+        """
+        try:
+            elapsed = time.perf_counter() - started
+            pools = " ".join(
+                f"{job.material_key}={len(job.pieces)}pzs/{result.seconds:.1f}s"
+                for job, result in zip(jobs, results)
+            )
+            threshold = config.OPT_SLOW_LOG_SECONDS
+            slow = threshold > 0 and elapsed >= threshold
+            logger.log(
+                logging.WARNING if slow else logging.INFO,
+                "optimize %s cache=%s pools=%d path=%s backend=%s %.2fs%s",
+                optimization_hash[:12],
+                "hit" if hit else "miss",
+                len(jobs),
+                "-" if hit else ("in-process" if runs_in_process(jobs) else "pool"),
+                backend_name(),
+                elapsed,
+                f" · {pools}" if pools else "",
+            )
+        except Exception:  # noqa: BLE001 - observability must never break a quote
+            logger.debug("could not log the optimization timing", exc_info=True)
 
     def _resolve_edge_banding_products(
         self, requirements: List[Requirement]

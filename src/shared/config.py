@@ -200,6 +200,25 @@ class Config:
     # to the OS. Under forkserver a respawn costs milliseconds.
     OPT_POOL_MAX_TASKS_PER_CHILD = env.int("OPT_POOL_MAX_TASKS_PER_CHILD", 4)
 
+    # Packing kernel: ``auto`` (native wheel when it imported), ``rust`` or
+    # ``python``. Declared here ONLY so it is discoverable and reportable — the
+    # authority is ``src/cutting/rust_backend.py``, which reads it straight from
+    # ``os.environ`` because ``src/cutting/`` must not import ``src.shared``.
+    # Reading it twice is deliberate and safe: both readers see the same process
+    # environment, and nothing writes it at runtime.
+    #
+    # *** DELIBERATELY ABSENT FROM THE OPTIMIZATION HASH *** — same reason as
+    # OPT_POOL_WORKERS: the crate is a transliteration that produces byte-identical
+    # layouts, so a box without the wheel reproduces the geometry and can read the
+    # same cache entries.
+    OPT_ENGINE_BACKEND = env("OPT_ENGINE_BACKEND", "auto")
+    # Above this many seconds a single optimization logs at WARNING instead of
+    # INFO. Production runs at LOG_LEVEL=WARNING, so this is what makes the slow
+    # tail visible without turning up the level for everything. 0 disables the
+    # promotion (the INFO line is still emitted). Not in the hash either: it
+    # changes what gets logged, never what gets computed.
+    OPT_SLOW_LOG_SECONDS = env.float("OPT_SLOW_LOG_SECONDS", 10.0)
+
     # Order attachments (anexos): PDFs/screenshots stored on local disk under
     # ATTACHMENTS_DIR (one subfolder per order). Only their metadata lives in
     # Postgres; the bytes stay on the filesystem (a Docker volume in prod).

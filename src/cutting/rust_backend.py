@@ -88,6 +88,41 @@ def available() -> bool:
     return _ENABLED
 
 
+def requested() -> str:
+    """The backend the environment ASKED for: ``auto`` / ``rust`` / ``python``.
+
+    Deliberately separate from ``available()``: a box that asks for ``rust`` and
+    has no wheel runs Python, and reporting only the effective answer would make
+    that degradation indistinguishable from a deliberate ``python``.
+    """
+    return os.environ.get("OPT_ENGINE_BACKEND", "auto").strip().lower()
+
+
+def status() -> Dict[str, object]:
+    """What this process would actually run, and what it was asked to run.
+
+    Pure and cheap: returns data, never logs. ``src/cutting/`` has no logging at
+    all and stays that way — the caller decides where this goes. Callers outside
+    the domain layer (``main``'s startup line, the pool worker probe, the bench
+    scripts) are the ones that render it.
+    """
+    return {
+        "requested": requested(),
+        "effective": "rust" if available() else "python",
+        "wheel_importable": opticutter_core is not None,
+        "wheel_version": getattr(opticutter_core, "__version__", None),
+    }
+
+
+def degraded() -> bool:
+    """``True`` when ``rust`` was demanded but the wheel could not be imported.
+
+    The silent failure this whole reporting path exists for: ``_resolve`` checks
+    the wheel BEFORE the variable, so the demand is dropped without an error.
+    """
+    return requested() == "rust" and opticutter_core is None
+
+
 def set_enabled(value: Optional[bool]) -> None:
     """Forces the backend choice; ``None`` re-resolves from the environment.
 
