@@ -350,3 +350,27 @@ def test_list_preorders_filter_by_created_day_range(client, db_session):
         "/api/v1/preorders/", params={"createdFrom": today.isoformat()}
     ).json()
     assert [p["id"] for p in since["data"]] == [p2["id"]]
+
+
+def test_preorder_carries_whole_board_through_the_recompute(client):
+    """The flag rides in the stored ``materials`` JSON, with no column of its own.
+
+    A pre-order re-optimizes on every read, so a commercial flag that lives
+    outside the hash only survives if it round-trips through ``build_request``.
+    """
+    c, b = _setup(client)
+    payload = _order_payload(c["id"], b["id"], height=300, width=300, quantity=1)
+    payload["materials"][0]["wholeBoard"] = True
+    created = client.post("/api/v1/preorders/", json=payload).json()["data"]
+
+    assert created["materials"][0]["wholeBoard"] is True
+    line = created["optimization"]["materialsSummary"][0]
+    assert line["halfBoard"] is False
+    assert line["costPerUnit"] == 45.5
+
+    # Re-read: the recompute (cache hit) has to promote it again.
+    fetched = client.get(f"/api/v1/preorders/{created['id']}").json()["data"]
+    sheet = fetched["optimization"]["layouts"][0]["material"]
+    assert sheet["halfBoard"] is False
+    assert sheet["width"] == 1220
+    assert fetched["optimization"]["totalBoardsCost"] == 45.5

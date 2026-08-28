@@ -752,6 +752,58 @@ def test_order_freezes_chosen_packing_strategy(client, db_session):
     assert order_default.optimization_snapshot["strategy"] == "default"
 
 
+def test_order_freezes_whole_board_line_and_plan(client, db_session):
+    """The same small job, sold whole: full price, full sheet, half handed over.
+
+    The mirror of ``test_order_freezes_half_board_line_and_plan``: the client
+    asked for the entire board, so the line, the physical board and the leftover
+    the workshop sees all have to say so.
+    """
+    c = _create_client(client)
+    b = _create_board(client)  # 2440×1220, price 45.5
+
+    payload = _order_payload(c["id"], b["id"], height=300, width=300, quantity=1)
+    payload["materials"][0]["wholeBoard"] = True
+    data = _create_order(client, db_session, payload)
+
+    line = data["lines"][0]
+    assert line["halfBoard"] is False
+    assert line["unitPriceSnapshot"] == 45.5
+    assert line["lineTotal"] == 45.5
+    assert not line["productName"].endswith("(medio tablero)")
+    assert data["total"] == data["subtotal"] == 45.5
+
+    plan = client.get(f"/api/v1/orders/{data['id']}/cutting-plan").json()["data"]
+    board = plan["boards"][0]
+    assert board["halfBoard"] is False
+    assert board["width"] == 1220
+    # The uncut half reaches the workshop as one leftover, with the rip cut that
+    # frees it — no new column, it rides in the snapshot.
+    assert {"x": 610.0, "y": 0.0, "width": 610.0, "height": 2440.0} in [
+        {k: float(v) for k, v in r.items()} for r in board["remainders"]
+    ]
+
+
+def test_two_orders_differing_only_in_whole_board_are_not_duplicates(
+    client, db_session
+):
+    """``wholeBoard`` isn't in the hash, so the subtotal is what separates them."""
+    c = _create_client(client)
+    b = _create_board(client)
+
+    plain = _order_payload(c["id"], b["id"], height=300, width=300, quantity=1)
+    whole = _order_payload(c["id"], b["id"], height=300, width=300, quantity=1)
+    whole["materials"][0]["wholeBoard"] = True
+
+    half_order = _mint_order(db_session, plain)
+    whole_order = _mint_order(db_session, whole)
+    assert half_order.id != whole_order.id
+    assert half_order.optimization_hash == whole_order.optimization_hash
+
+    # Idempotency itself is untouched: the same request still dedupes.
+    assert _mint_order(db_session, whole).id == whole_order.id
+
+
 def test_order_freezes_half_board_line_and_plan(client, db_session):
     """A small catalog job freezes the line and the board as a half."""
     c = _create_client(client)
