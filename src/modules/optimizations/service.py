@@ -41,6 +41,8 @@ from src.modules.optimizations.schemas import (
     PricingSummary,
     Requirement,
 )
+from src.modules.optimizations.summary import build_materials_summary
+from src.modules.optimizations.whole_boards import apply_whole_boards
 from src.modules.products.model import ProductModel, ProductType
 from src.modules.products.service import ProductService
 from src.modules.settings.service import SettingsService
@@ -214,7 +216,7 @@ class OptimizationService:
         cached = cache.get_json(optimization_hash)
         if cached is not None:
             self._log_compute(optimization_hash, started, hit=True, jobs=(), results=())
-            return cached, optimization_hash
+            return self._apply_commercial_overrides(cached, request), optimization_hash
 
         strategy = STRATEGY_TO_PACKING[request.strategy]
         exact_config = _exact_config()
@@ -266,11 +268,27 @@ class OptimizationService:
         payload = self._build_result_payload(
             request, results, resolved, eb_products, waste_factor
         )
+        # Cached BEFORE the overrides: Redis has to hold the canonical payload
+        # for this hash, or the next request with the flag off would be served a
+        # whole board nobody asked for, for a whole OPT_RESULT_TTL_SECONDS.
         cache.set_json(optimization_hash, payload)
         self._log_compute(
             optimization_hash, started, hit=False, jobs=jobs, results=pool_results
         )
-        return payload, optimization_hash
+        return self._apply_commercial_overrides(payload, request), optimization_hash
+
+    @staticmethod
+    def _apply_commercial_overrides(payload: dict, request: OptimizeRequest) -> dict:
+        """Reshapes the cached plan for the flags that live outside the hash.
+
+        Applied on BOTH paths (cache hit and cold compute) through this single
+        helper so the two can't drift, and after ``_log_compute`` so a bug here
+        can never break the log's promise that it never fails a quote. Today
+        that means promoting the half boards the seller sold whole; the discount
+        is the other half of the pair and is applied later, by ``build_pricing``
+        over the summary this already rebuilt.
+        """
+        return apply_whole_boards(payload, request.whole_board_material_keys)
 
     def _log_compute(
         self,
@@ -616,62 +634,6 @@ class OptimizationService:
             )
         return summary, round(total_cost, 2)
 
-    def _build_materials_summary(
-        self,
-        layouts: List[CuttingLayout],
-        resolved: Dict[str, ResolvedMaterial],
-    ) -> List[dict]:
-        """Aggregates the layouts by material with metrics and costs (any source).
-
-        Carries the origin metadata (``material_key``/``source`` and, for catalog
-        materials only, ``product_id``/``product_code``/``product_name``). For
-        inline materials it falls back to the key as code and the dimensions as a
-        readable name, so the proforma renders without special handling.
-        """
-        # Composite key (material, half?) so full and half boards of the same
-        # material end up as separate billing lines (different width, cost, label).
-        summary: Dict[Tuple[str, bool], dict] = {}
-        for layout in layouts:
-            key = layout.material.id
-            is_half = layout.material.half_board
-            group = (key, is_half)
-            if group not in summary:
-                rm = resolved.get(key)
-                dims_label = f"{layout.material.width:g}×{layout.material.height:g}"
-                base_name = rm.name if rm and rm.name else dims_label
-                summary[group] = {
-                    "material_key": key,
-                    "source": rm.source if rm else None,
-                    "product_id": rm.product_id if rm else None,
-                    "product_code": (rm.code if rm and rm.code else key),
-                    "product_name": (
-                        f"{base_name} (medio tablero)" if is_half else base_name
-                    ),
-                    "width": layout.material.width,
-                    "height": layout.material.height,
-                    "thickness": layout.material.thickness,
-                    "count": 0,
-                    "total_area_m2": 0.0,
-                    "_efficiencies": [],
-                    "cost_per_unit": layout.material.cost_per_unit,
-                    "total_cost": 0.0,
-                    "half_board": is_half,
-                }
-            entry = summary[group]
-            entry["count"] += 1
-            entry["total_area_m2"] += round(layout.material.area / 1_000_000, 4)
-            entry["_efficiencies"].append(layout.efficiency * 100)
-            entry["total_cost"] += layout.material.cost_per_unit
-
-        result = []
-        for entry in summary.values():
-            effs = entry.pop("_efficiencies")
-            entry["avg_efficiency"] = round(sum(effs) / len(effs), 2) if effs else 0.0
-            entry["total_area_m2"] = round(entry["total_area_m2"], 4)
-            entry["total_cost"] = round(entry["total_cost"], 2)
-            result.append(entry)
-        return result
-
     @staticmethod
     def _dump_requirement(
         req: Requirement,
@@ -767,6 +729,10 @@ class OptimizationService:
                 request.requirements, eb_products, waste_factor
             )
         )
+        # Serialized once: the payload carries them AND the summary aggregates
+        # over them (``build_materials_summary`` reads dicts so it can also run
+        # after a cache read, where no ``CuttingLayout`` exists).
+        material_dicts = [rm.to_dict() for rm in resolved.values()]
         return {
             "strategy": request.strategy.value,
             "variant": request.variant,
@@ -775,13 +741,13 @@ class OptimizationService:
             "total_edge_banding_cost": total_edge_banding_cost,
             "total_cut_linear_m": round(total_cut_linear_m, 2),
             "total_edge_banding_linear_m": round(total_edge_banding_linear_m, 2),
-            "materials": [rm.to_dict() for rm in resolved.values()],
+            "materials": material_dicts,
             "requirements": [
                 self._dump_requirement(r, resolved, eb_products)
                 for r in request.requirements
             ],
             "layouts": layout_dicts,
-            "materials_summary": self._build_materials_summary(all_layouts, resolved),
+            "materials_summary": build_materials_summary(layout_dicts, material_dicts),
             "edge_bandings_summary": edge_bandings_summary,
             "layout_groups": group_layouts(layout_dicts),
         }

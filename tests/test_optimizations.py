@@ -1009,3 +1009,204 @@ def test_optimize_endpoint_works_with_parallelism_enabled(
     data = resp.json()["data"]
     assert {m["materialKey"] for m in data["materialsSummary"]} == {"m0", "m1", "m2"}
     assert data["totalBoardsUsed"] >= 3
+
+
+# --------------------------------------------------------------------------- #
+# Whole board: a half board the client buys entire
+# --------------------------------------------------------------------------- #
+def _sparse_payload(client_id, product_id, whole_board=False):
+    """The sparse job of ``test_optimize_charges_half_board_for_sparse_job``.
+
+    One 300x300 piece on a 2440x1220 catalog board: the search bills it as a
+    half board, which is exactly the situation ``wholeBoard`` overrides.
+    """
+    material = {"key": "b1", "source": "catalog", "productId": product_id}
+    if whole_board:
+        material["wholeBoard"] = True
+    return {
+        "clientId": client_id,
+        "materials": [material],
+        "requirements": [
+            {
+                "priority": 0,
+                "height": 300,
+                "width": 300,
+                "quantity": 1,
+                "materialKey": "b1",
+                "label": "Repisa",
+                "canRotate": True,
+            }
+        ],
+    }
+
+
+def test_marking_a_board_whole_reshapes_without_touching_the_hash(client):
+    """The checkbox re-forms the SAME cut plan; it must never re-run the search.
+
+    The flag is deliberately absent from ``_compute_hash`` (like clientId and
+    priceTierCode): re-optimizing without the half spec would let the beam
+    re-partition the pool and move pieces the client already approved.
+    """
+    created_client = _create_client(client)
+    created_board = _create_board(client)  # 2440x1220, price 45.5
+
+    half = client.post(
+        "/api/v1/optimize/",
+        json=_sparse_payload(created_client["id"], created_board["id"]),
+    ).json()["data"]
+    whole = client.post(
+        "/api/v1/optimize/",
+        json=_sparse_payload(
+            created_client["id"], created_board["id"], whole_board=True
+        ),
+    ).json()["data"]
+
+    assert whole["optimizationHash"] == half["optimizationHash"]
+    # Same plan: not one piece moved.
+    assert whole["layouts"][0]["placedPieces"] == half["layouts"][0]["placedPieces"]
+
+    assert half["layouts"][0]["material"]["halfBoard"] is True
+    assert half["layouts"][0]["material"]["width"] == 610
+    assert whole["layouts"][0]["material"]["halfBoard"] is False
+    assert whole["layouts"][0]["material"]["width"] == 1220
+
+    assert half["totalBoardsCost"] == 25.03
+    assert whole["totalBoardsCost"] == 45.5
+    assert whole["totalBoardsUsed"] == half["totalBoardsUsed"] == 1
+
+    summary = whole["materialsSummary"]
+    assert len(summary) == 1
+    assert summary[0]["halfBoard"] is False
+    assert not summary[0]["productName"].endswith("(medio tablero)")
+    assert summary[0]["costPerUnit"] == 45.5
+    # The diagram reads layoutGroups, so the promotion has to reach them too.
+    assert whole["layoutGroups"][0]["layout"]["material"]["halfBoard"] is False
+
+
+def test_whole_board_never_poisons_the_cached_plan(client):
+    """Redis keeps the canonical (half) payload; the promotion is applied after.
+
+    Otherwise the next quote with the flag off would be served a whole board
+    nobody asked for, for a whole ``OPT_RESULT_TTL_SECONDS``.
+    """
+    created_client = _create_client(client)
+    created_board = _create_board(client)
+    marked = _sparse_payload(
+        created_client["id"], created_board["id"], whole_board=True
+    )
+    plain = _sparse_payload(created_client["id"], created_board["id"])
+
+    assert (
+        client.post("/api/v1/optimize/", json=marked).json()["data"]["layouts"][0][
+            "material"
+        ]["halfBoard"]
+        is False
+    )
+    # Cache hit now, and it must come back as a half board again.
+    back = client.post("/api/v1/optimize/", json=plain).json()["data"]
+    assert back["layouts"][0]["material"]["halfBoard"] is True
+    assert back["totalBoardsCost"] == 25.03
+    # And promoting again off the cached payload still works.
+    again = client.post("/api/v1/optimize/", json=marked).json()["data"]
+    assert again["layouts"][0]["material"]["halfBoard"] is False
+    assert again["layoutGroups"][0]["layout"]["material"]["halfBoard"] is False
+    assert again["totalBoardsCost"] == 45.5
+
+
+def test_whole_board_ships_the_untouched_half_and_its_rip_cut(client):
+    """What the client takes home: one clean leftover, plus the cut that frees it."""
+    created_client = _create_client(client)
+    created_board = _create_board(client)
+
+    half = client.post(
+        "/api/v1/optimize/",
+        json=_sparse_payload(created_client["id"], created_board["id"]),
+    ).json()["data"]
+    whole = client.post(
+        "/api/v1/optimize/",
+        json=_sparse_payload(
+            created_client["id"], created_board["id"], whole_board=True
+        ),
+    ).json()["data"]
+
+    remainders = whole["layouts"][0]["remainders"]
+    assert len(remainders) == len(half["layouts"][0]["remainders"]) + 1
+    assert {"x": 610.0, "y": 0.0, "width": 610.0, "height": 2440.0} in [
+        {k: float(v) for k, v in r.items()} for r in remainders
+    ]
+
+    cuts = whole["layouts"][0]["cuts"]
+    assert cuts[0]["x"] == 610
+    assert cuts[0]["length"] == 2440
+    assert cuts[0]["isHorizontal"] is False
+    assert whole["totalCutLinearM"] == round(half["totalCutLinearM"] + 2.44, 2)
+
+    # The delivered half is charged as waste: efficiency halves, honestly.
+    assert (
+        whole["layouts"][0]["statistics"]["efficiency"]
+        < half["layouts"][0]["statistics"]["efficiency"]
+    )
+    assert (
+        whole["materialsSummary"][0]["avgEfficiency"]
+        < half["materialsSummary"][0]["avgEfficiency"]
+    )
+
+
+def test_whole_board_is_a_noop_when_nothing_was_half(client):
+    """A material the optimizer never halved is unaffected by the flag."""
+    created_client = _create_client(client)
+    created_board = _create_board(client)
+
+    plain = _full_board_payload(created_client["id"], created_board["id"])
+    marked = _full_board_payload(created_client["id"], created_board["id"])
+    marked["materials"][0]["wholeBoard"] = True
+
+    a = client.post("/api/v1/optimize/", json=plain).json()["data"]
+    b = client.post("/api/v1/optimize/", json=marked).json()["data"]
+    assert a == b
+
+
+def test_whole_board_is_ignored_on_inline_materials(client):
+    """Offcuts/manual measurements are never halved, so the flag can't apply."""
+    created_client = _create_client(client)
+
+    def _payload(whole_board=False):
+        material = _manual_material(cost=30.0)
+        if whole_board:
+            material["wholeBoard"] = True
+        return {
+            "clientId": created_client["id"],
+            "materials": [material],
+            "requirements": [
+                {
+                    "priority": 0,
+                    "height": 400,
+                    "width": 300,
+                    "quantity": 1,
+                    "materialKey": "m1",
+                    "label": "Repisa",
+                    "canRotate": True,
+                }
+            ],
+        }
+
+    a = client.post("/api/v1/optimize/", json=_payload()).json()["data"]
+    b = client.post("/api/v1/optimize/", json=_payload(whole_board=True)).json()["data"]
+    assert a == b
+
+
+def test_whole_board_and_discount_compose(client):
+    """Promote first, discount after: the base is what is actually charged."""
+    created_client = _create_client(client)
+    created_board = _create_board(client)
+
+    payload = _sparse_payload(
+        created_client["id"], created_board["id"], whole_board=True
+    )
+    payload["priceTierCode"] = "carpintero"
+    payload["materials"][0]["applyDiscount"] = True
+    data = client.post("/api/v1/optimize/", json=payload).json()["data"]
+
+    assert data["totalBoardsCost"] == 45.5
+    assert data["pricing"]["discountBase"] == 45.5
+    assert data["pricing"]["discountAmount"] > 0

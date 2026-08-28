@@ -199,6 +199,9 @@ class OrderService(BranchScopedMixin):
         # The per-board discount selection isn't in the hash either (same reason as
         # the tier), so it joins the dedupe key: two orders with the same cuts and
         # tier but a different set of discounted boards are NOT the same order.
+        # The subtotal joins it for the same reason: `wholeBoard` reshapes the
+        # cached plan without touching the hash, and a promoted half board shows
+        # up only there.
         existing = self._find_active_duplicate(
             branch_id,
             data.client_id,
@@ -206,6 +209,7 @@ class OrderService(BranchScopedMixin):
             tier["code"],
             pricing["services_total"],
             pricing["discount_amount"],
+            pricing["subtotal"],
         )
         if existing is not None:
             return existing
@@ -704,8 +708,8 @@ class OrderService(BranchScopedMixin):
         if target == order.branch_id:
             return order  # idempotent: same branch, no-op
         # Invariant: a single active identical order per branch. The order's own
-        # frozen values complete the dedupe key (services + discount), so moving
-        # it only collides with an order that really is the same bill.
+        # frozen values complete the dedupe key (services + discount + subtotal),
+        # so moving it only collides with an order that really is the same bill.
         dup = self._find_active_duplicate(
             target,
             order.client_id,
@@ -713,6 +717,7 @@ class OrderService(BranchScopedMixin):
             order.price_tier_code,
             order.additional_services_total or 0.0,
             order.discount_amount or 0.0,
+            order.subtotal or 0.0,
         )
         if dup is not None and dup.id != order.id:
             raise ConflictError(
@@ -778,15 +783,20 @@ class OrderService(BranchScopedMixin):
         price_tier_code: str,
         additional_services_total: float = 0.0,
         discount_amount: float = 0.0,
+        subtotal: float = 0.0,
     ) -> Optional[OrderModel]:
         """Non-terminal order from the same branch+client with the same hash (idempotency).
 
         Includes the branch in the key: the same client can order the same
         thing at two branches and those are different orders. Includes the
-        price tier, the additional-services total and the discount amount: none
-        of them is part of the hash, so the same cut at a different tier, with
-        different services, or with a different set of discounted boards counts
-        as two orders.
+        price tier, the additional-services total, the discount amount and the
+        subtotal: none of them is part of the hash, so the same cut at a
+        different tier, with different services, with a different set of
+        discounted boards, or with a half board sold whole counts as two orders.
+        The subtotal is what catches ``wholeBoard`` (a promoted board costs
+        more); two different selections that happen to add up to the same
+        subtotal still collapse, the same approximation already accepted for
+        the discount amount.
         """
         terminal = [s.value for s in TERMINAL_STATUSES]
         return (
@@ -798,6 +808,7 @@ class OrderService(BranchScopedMixin):
                 OrderModel.price_tier_code == price_tier_code,
                 OrderModel.additional_services_total == additional_services_total,
                 OrderModel.discount_amount == discount_amount,
+                OrderModel.subtotal == subtotal,
                 OrderModel.status.not_in(terminal),
             )
             .first()

@@ -236,6 +236,17 @@ class CatalogMaterialInput(CamelModel):
             "clientId/priceTierCode); only the `pricing` block."
         ),
     )
+    whole_board: bool = Field(
+        default=False,
+        description=(
+            "Whether a sheet the optimizer billed as a half board is delivered "
+            "(and charged) as a whole board, the client keeping the uncut half. "
+            "Does not affect the search or the hash: the cached plan is reshaped "
+            "afterwards, so the pieces stay exactly where they were and the "
+            "untouched half becomes one clean leftover plus the rip cut that "
+            "separates it. No-op for a material the optimizer didn't halve."
+        ),
+    )
 
 
 class InlineMaterialInput(CamelModel):
@@ -425,6 +436,18 @@ class OptimizeRequest(CamelModel):
         discountable and still aren't.
         """
         return {m.key for m in self.materials if getattr(m, "apply_discount", False)}
+
+    @property
+    def whole_board_material_keys(self) -> set:
+        """Keys of the catalog boards the client takes whole, half or not.
+
+        The single place that reads ``wholeBoard``, mirroring
+        ``discounted_material_keys``: both are commercial flags kept out of
+        ``_compute_hash`` so a checkbox reshapes/re-prices the cached plan
+        instead of re-running the search. Inline materials (offcut/manual) don't
+        carry the flag — they are never halved in the first place.
+        """
+        return {m.key for m in self.materials if getattr(m, "whole_board", False)}
 
 
 class Material(CamelModel):
