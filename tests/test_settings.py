@@ -8,7 +8,7 @@ from src.shared.config import config
 def _create_client(client):
     return client.post(
         "/api/v1/clients/",
-        json={"identifier": "0991112233", "firstName": "Ada", "phone": "0991112233"},
+        json={"identifier": "0100000397", "firstName": "Ada", "phone": "0100000397"},
     ).json()["data"]
 
 
@@ -193,17 +193,17 @@ def test_patch_company_persists(client):
     resp = client.patch(
         "/api/v1/settings/company",
         json={
-            "phone": "0987654321",
+            "phone": "0100000017",
             "branches": [{"name": "Matriz", "address": "Av. Siempre Viva 123"}],
         },
     )
     assert resp.status_code == 200
     data = resp.json()["data"]
-    assert data["phone"] == "0987654321"
+    assert data["phone"] == "0100000017"
     assert data["branches"] == [{"name": "Matriz", "address": "Av. Siempre Viva 123"}]
 
     after = client.get("/api/v1/settings/company").json()["data"]
-    assert after["phone"] == "0987654321"
+    assert after["phone"] == "0100000017"
     assert after["branches"][0]["name"] == "Matriz"
 
 

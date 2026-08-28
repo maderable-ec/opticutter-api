@@ -38,7 +38,7 @@ def _change_branch(client, oid, branch_id, **kw):
 
 def test_admin_moves_confirmed_order_to_another_branch(client, db_session: Session):
     """A confirmed order moves to another active branch; documents reprint there."""
-    order = _order_with_banding(client, db_session, identifier="0990000101")
+    order = _order_with_banding(client, db_session, identifier="0100000280")
     branch2 = _make_branch(db_session)
 
     resp = _change_branch(client, order["id"], branch2.id)
@@ -61,7 +61,7 @@ def test_admin_moves_confirmed_order_to_another_branch(client, db_session: Sessi
 
 def test_seller_can_change_branch(client, db_session: Session):
     """The seller (global scope, ``orders:write``) can also rebalance a branch."""
-    order = _order_with_banding(client, db_session, identifier="0990000102")
+    order = _order_with_banding(client, db_session, identifier="0100000298")
     branch2 = _make_branch(db_session)
     seller = _token_for(client, db_session, "vendedor")
 
@@ -72,7 +72,7 @@ def test_seller_can_change_branch(client, db_session: Session):
 
 def test_moving_queued_order_notifies_new_branch_operators(client, db_session: Session):
     """A queued order landing in the new branch notifies that branch's operators."""
-    order = _order_with_banding(client, db_session, identifier="0990000103")
+    order = _order_with_banding(client, db_session, identifier="0100000306")
     assert _patch_status(client, order["id"], "queued").status_code == 200
     branch2 = _make_branch(db_session)
     # Operator of the NEW branch, created before the move so they're a recipient.
@@ -88,7 +88,7 @@ def test_moving_queued_order_notifies_new_branch_operators(client, db_session: S
 
 def test_cannot_change_branch_once_cutting_started(client, db_session: Session):
     """Frozen once the shop floor starts: 'cutting' rejects the move (422)."""
-    order = _order_with_banding(client, db_session, identifier="0990000104")
+    order = _order_with_banding(client, db_session, identifier="0100000314")
     _to_cutting(client, order["id"])  # confirmed → queued → cutting
     branch2 = _make_branch(db_session)
 
@@ -96,21 +96,21 @@ def test_cannot_change_branch_once_cutting_started(client, db_session: Session):
 
 
 def test_change_branch_rejects_inactive_target(client, db_session: Session):
-    order = _order_with_banding(client, db_session, identifier="0990000105")
+    order = _order_with_banding(client, db_session, identifier="0100000322")
     inactive = _make_branch(db_session, code="SUCI", name="Inactiva", active=False)
 
     assert _change_branch(client, order["id"], inactive.id).status_code == 422
 
 
 def test_change_branch_rejects_unknown_target(client, db_session: Session):
-    order = _order_with_banding(client, db_session, identifier="0990000106")
+    order = _order_with_banding(client, db_session, identifier="0100000330")
 
     assert _change_branch(client, order["id"], 999999).status_code == 404
 
 
 def test_operator_cannot_change_branch(client, db_session: Session):
     """The operator lacks ``orders:write`` → 403 (can't move load between branches)."""
-    order = _order_with_banding(client, db_session, identifier="0990000107")
+    order = _order_with_banding(client, db_session, identifier="0100000348")
     branch2 = _make_branch(db_session)
     op = _token_for(client, db_session, "operador")
 
@@ -122,7 +122,7 @@ def test_operator_cannot_change_branch(client, db_session: Session):
 def test_change_branch_conflicts_with_active_duplicate(client, db_session: Session):
     """Preserves the "one active identical order per branch" invariant (409)."""
     branch2 = _make_branch(db_session)
-    c = _create_client(client, identifier="0990000108")
+    c = _create_client(client, identifier="0100000355")
     b = _create_board(client, code="MEL0108")
     eb = _create_edge_banding(client, code="TAP0108")
     payload = {

@@ -275,15 +275,15 @@ def test_list_preorders_defaults_to_newest_first(client):
 
 def test_list_preorders_search_by_code_id_and_client(client):
     c1 = _create_client(client)
-    c2 = _create_client(client, identifier="0987654321", phone="0987654321")
+    c2 = _create_client(client, identifier="0100000017", phone="0100000017")
     # Distinguish the second client: _create_client always names them Ada Lovelace.
     client.put(
         f"/api/v1/clients/{c2['id']}",
         json={
-            "identifier": "0987654321",
+            "identifier": "0100000017",
             "firstName": "Grace",
             "lastName": "Hopper",
-            "phone": "0987654321",
+            "phone": "0100000017",
         },
     )
     b = _create_board(client)
@@ -299,7 +299,7 @@ def test_list_preorders_search_by_code_id_and_client(client):
     assert [p["id"] for p in by_client["data"]] == [p2["id"]]
 
     # By client identifier.
-    by_ident = client.get("/api/v1/preorders/", params={"search": "0987654321"}).json()
+    by_ident = client.get("/api/v1/preorders/", params={"search": "0100000017"}).json()
     assert [p["id"] for p in by_ident["data"]] == [p2["id"]]
 
     # An all-digit term also matches the pre-order id exactly.
@@ -314,7 +314,7 @@ def test_list_preorders_search_by_code_id_and_client(client):
 
 def test_list_preorders_filter_by_client(client):
     c1 = _create_client(client)
-    c2 = _create_client(client, identifier="0987654321", phone="0987654321")
+    c2 = _create_client(client, identifier="0100000017", phone="0100000017")
     b = _create_board(client)
     p1 = _create_preorder(client, c1, b, width=600).json()["data"]
     p2 = _create_preorder(client, c2, b, width=500).json()["data"]

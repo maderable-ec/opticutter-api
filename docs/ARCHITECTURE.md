@@ -35,7 +35,7 @@ src/
 ├── modules/                    One slice per resource: {model,schemas,service,router}.py
 │   ├── users/                   Staff users, auth (JWT + refresh), RBAC source of truth
 │   ├── branches/                Branch CRUD (multi-branch isolation)
-│   ├── clients/                 Client management (CRUD)
+│   ├── clients/                 Client management (CRUD + SIFAC sync)
 │   ├── products/                Unified product catalog (board / edge_banding / hardware)
 │   ├── optimizations/           Cutting optimizer orchestration, PDF documents, diagrams
 │   ├── optimization_drafts/     Saved, named, mutable optimizer inputs (work in progress)
@@ -80,7 +80,12 @@ No cycles, enforced by convention:
 - **`branches`** — CRUD for physical locations. Orders, pre-orders and
   optimization drafts are scoped to a branch; clients and the product catalog
   stay global. See [`MULTI_BRANCH.md`](MULTI_BRANCH.md).
-- **`clients`** — client CRUD, search by phone/identifier.
+- **`clients`** — client CRUD, search by phone/identifier, and `POST /clients/sync`,
+  which pulls the client list from the vendor's SIFAC MySQL (`mcliente`) matched by
+  cédula/RUC. Creates and updates only — a client the source stops bringing is never
+  removed, since orders and pre-orders reference them. `identifier` is validated as an
+  Ecuadorian cédula/RUC when it is all digits (a passport carries letters and is taken
+  as typed); see `clients/tax_id.py`.
 - **`products`** — a single `products` table backs every catalog item
   (`type`: `board` / `edge_banding` / `hardware`), with type-specific fields
   validated by a Pydantic discriminated union over a JSON `attributes` column.

@@ -6,7 +6,7 @@ from src.modules.orders.schemas import OrderCreate
 from src.modules.orders.service import OrderService
 
 
-def _create_client(client, identifier="0991112233", phone="0991112233"):
+def _create_client(client, identifier="0100000397", phone="0100000397"):
     return client.post(
         "/api/v1/clients/",
         json={

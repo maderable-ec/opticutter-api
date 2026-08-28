@@ -14,10 +14,10 @@ def _create_client(client):
     return client.post(
         "/api/v1/clients/",
         json={
-            "identifier": "0991112233",
+            "identifier": "0100000397",
             "firstName": "Ada",
             "lastName": "Lovelace",
-            "phone": "0991112233",
+            "phone": "0100000397",
         },
     ).json()["data"]
 
@@ -1210,3 +1210,61 @@ def test_whole_board_and_discount_compose(client):
     assert data["totalBoardsCost"] == 45.5
     assert data["pricing"]["discountBase"] == 45.5
     assert data["pricing"]["discountAmount"] > 0
+
+
+# --- Sheet order: the whole boards first, the half board last ---------------
+
+
+def test_optimize_puts_the_half_board_after_the_whole_ones(client):
+    """The shop cuts the whole boards first and the half last, so the payload is
+    ordered that way — the engine has no opinion (``half_downgrade`` swaps a
+    fill in place, so a half keeps the position of the board it replaced).
+
+    Asserted as an invariant rather than an exact list: which sheet the search
+    downgrades is its business, but a whole board must never follow a half one.
+    This covers the pipeline (layouts -> groups -> summary); that the engine
+    really does emit a half first is pinned separately, on a pool that does, in
+    ``tests/unit/test_layout_ordering.py``.
+    """
+    created_client = _create_client(client)
+    board = _create_board(client)  # 2440x1220
+
+    payload = {
+        "clientId": created_client["id"],
+        "materials": [{"key": "b1", "source": "catalog", "productId": board["id"]}],
+        "requirements": [
+            # Both sides > 610, so these force whole boards: two per sheet.
+            {
+                "priority": 0,
+                "height": 1100,
+                "width": 1100,
+                "quantity": 4,
+                "materialKey": "b1",
+                "label": "Puerta",
+                "canRotate": True,
+            },
+            # Small enough to live on a half board of its own.
+            {
+                "priority": 0,
+                "height": 300,
+                "width": 300,
+                "quantity": 1,
+                "materialKey": "b1",
+                "label": "Repisa",
+                "canRotate": True,
+            },
+        ],
+    }
+    data = client.post("/api/v1/optimize/", json=payload).json()["data"]
+
+    halves = [x["material"]["halfBoard"] for x in data["layouts"]]
+    assert True in halves, "this job is only meaningful if it produces a half board"
+    assert halves == sorted(halves), f"a whole board follows a half one: {halves}"
+
+    # The diagram reads `layoutGroups`, not `layouts`.
+    group_halves = [g["layout"]["material"]["halfBoard"] for g in data["layoutGroups"]]
+    assert group_halves == sorted(group_halves)
+
+    # And the costs table, whose order comes from first appearance in `layouts`.
+    summary_halves = [m["halfBoard"] for m in data["materialsSummary"]]
+    assert summary_halves == sorted(summary_halves)

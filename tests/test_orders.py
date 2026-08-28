@@ -16,7 +16,7 @@ from src.modules.orders.service import OrderService
 from src.shared.exceptions import BusinessRuleError, EntityNotFoundError
 
 
-def _create_client(client, identifier="0991112233", phone="0991112233"):
+def _create_client(client, identifier="0100000397", phone="0100000397"):
     return client.post(
         "/api/v1/clients/",
         json={
@@ -127,7 +127,7 @@ def test_create_order_blocked_without_client_phone(client, db_session):
     b = _create_board(client)
     no_phone = client.post(
         "/api/v1/clients/",
-        json={"identifier": "0990000000", "firstName": "Sin", "lastName": "Tel"},
+        json={"identifier": "0100000025", "firstName": "Sin", "lastName": "Tel"},
     ).json()["data"]
 
     with pytest.raises(BusinessRuleError) as exc:
@@ -352,15 +352,15 @@ def test_list_orders_sort_recent_reverses_the_fifo_order(client, db_session):
 
 def test_list_orders_search_by_code_id_and_client(client, db_session):
     c1 = _create_client(client)
-    c2 = _create_client(client, identifier="0987654321", phone="0987654321")
+    c2 = _create_client(client, identifier="0100000017", phone="0100000017")
     # Distinguish the second client: _create_client always names them Ada Lovelace.
     client.put(
         f"/api/v1/clients/{c2['id']}",
         json={
-            "identifier": "0987654321",
+            "identifier": "0100000017",
             "firstName": "Grace",
             "lastName": "Hopper",
-            "phone": "0987654321",
+            "phone": "0100000017",
         },
     )
     b = _create_board(client)
@@ -376,7 +376,7 @@ def test_list_orders_search_by_code_id_and_client(client, db_session):
     assert [o["id"] for o in by_client["data"]] == [o2["id"]]
 
     # By client identifier.
-    by_ident = client.get("/api/v1/orders/", params={"search": "0987654321"}).json()
+    by_ident = client.get("/api/v1/orders/", params={"search": "0100000017"}).json()
     assert [o["id"] for o in by_ident["data"]] == [o2["id"]]
 
     # An all-digit term also matches the order id exactly ("order 42").
@@ -391,7 +391,7 @@ def test_list_orders_search_by_code_id_and_client(client, db_session):
 
 def test_list_orders_filter_by_client(client, db_session):
     c1 = _create_client(client)
-    c2 = _create_client(client, identifier="0987654321", phone="0987654321")
+    c2 = _create_client(client, identifier="0100000017", phone="0100000017")
     b = _create_board(client)
     o1 = _create_order(client, db_session, _order_payload(c1["id"], b["id"], width=600))
     o2 = _create_order(client, db_session, _order_payload(c2["id"], b["id"], width=500))
@@ -740,14 +740,14 @@ def test_non_catalog_order_renders_document_and_production_sheet(client, db_sess
 def test_order_freezes_chosen_packing_strategy(client, db_session):
     """The chosen strategy freezes into the order's immutable snapshot."""
     b = _create_board(client)
-    c1 = _create_client(client, identifier="0991110001", phone="0991110001")
+    c1 = _create_client(client, identifier="0100000371", phone="0100000371")
     order = _mint_order(
         db_session, _order_payload(c1["id"], b["id"], strategy="longOffcuts")
     )
     assert order.optimization_snapshot["strategy"] == "longOffcuts"
 
     # Omitting the strategy freezes the default behavior.
-    c2 = _create_client(client, identifier="0991110002", phone="0991110002")
+    c2 = _create_client(client, identifier="0100000389", phone="0100000389")
     order_default = _mint_order(db_session, _order_payload(c2["id"], b["id"]))
     assert order_default.optimization_snapshot["strategy"] == "default"
 

@@ -18,7 +18,7 @@ _PWD = "pw-supersecret"
 _BRANCH = 1  # default branch seeded by conftest
 
 
-def _create_client(client, identifier="0991112233"):
+def _create_client(client, identifier="0100000397"):
     return client.post(
         "/api/v1/clients/",
         json={
@@ -62,7 +62,7 @@ def _order_payload(client_id, product_id, width=600):
     }
 
 
-def _mint_order(client, db_session, identifier="0991112233", code="MEL18", width=600):
+def _mint_order(client, db_session, identifier="0100000397", code="MEL18", width=600):
     """Creates an order via the service (born ``confirmed``); reads it back via GET."""
     c = _create_client(client, identifier=identifier)
     b = _create_board(client, code=code)

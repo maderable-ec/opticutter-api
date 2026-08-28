@@ -15,7 +15,7 @@ _PWD = "pw-supersecret"
 _BRANCH = 1  # default branch seeded by conftest
 
 
-def _create_client(client, identifier="0991112233"):
+def _create_client(client, identifier="0100000397"):
     return client.post(
         "/api/v1/clients/",
         json={
@@ -59,7 +59,7 @@ def _order_payload(client_id, product_id, width=600):
     }
 
 
-def _mint_order(client, db_session, identifier="0991112233", code="MEL18", width=600):
+def _mint_order(client, db_session, identifier="0100000397", code="MEL18", width=600):
     """Mints through the service (HTTP creation was removed) and reads it back via GET."""
     c = _create_client(client, identifier=identifier)
     b = _create_board(client, code=code)
@@ -133,11 +133,13 @@ def test_dispatch_from_completed_freezes_metadata(client, db_session):
 
 def test_shop_floor_cannot_dispatch(client, db_session):
     """operador and canteador cannot register the dispatch (commercial act, admin/seller only)."""
+    # A distinct (valid) cédula per role: the identifier is unique per client.
+    cedulas = ("0100000900", "0100000918")
     for idx, role in enumerate(("operador", "canteador")):
         order = _mint_order(
             client,
             db_session,
-            identifier=f"099000010{idx}",
+            identifier=cedulas[idx],
             code=f"MELR{idx}",
             width=600 - idx * 50,
         )
@@ -155,7 +157,7 @@ def test_shop_floor_cannot_dispatch(client, db_session):
 def test_seller_can_dispatch(client, db_session):
     """The seller (a commercial role) can register the dispatch."""
     order = _mint_order(
-        client, db_session, identifier="0990000199", code="MELS0", width=550
+        client, db_session, identifier="0100000363", code="MELS0", width=550
     )
     _to_completed(client, order["id"])
     headers = _token_for(client, db_session, "vendedor")

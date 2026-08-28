@@ -48,12 +48,17 @@ class Config:
     DB_MAX_OVERFLOW = env.int("DB_MAX_OVERFLOW", 10)
     DB_POOL_RECYCLE_SECONDS = env.int("DB_POOL_RECYCLE_SECONDS", 1800)
 
-    # External inventory (SIFAC) MySQL: read-only source of the product catalog
-    # sync (src/modules/products/external_catalog.py). The `marticulo` table is
-    # latin1, so the charset belongs in the URL — without it the accents in the
-    # product names and the OBS. column come back mangled.
+    # External (SIFAC) MySQL: read-only source of BOTH syncs — the product
+    # catalog (src/modules/products/external_catalog.py, `marticulo`) and the
+    # client list (src/modules/clients/external_clients.py, `mcliente`). They
+    # are tables of the same database, so there is one URL and one credential;
+    # the name is catalog-era and kept because renaming it would break the
+    # production .env, which lives in `opticutter-infra`.
+    # Both tables are latin1, so the charset belongs in the URL — without it the
+    # accents in the product names, the OBS. column and the client names come
+    # back mangled.
     #   mysql+pymysql://user:pass@host:port/db?charset=latin1
-    # Empty by default: the sync endpoint answers a clear 503 instead of the
+    # Empty by default: the sync endpoints answer a clear 503 instead of the
     # process failing at import time on deployments that don't use it.
     EXTERNAL_CATALOG_URL = env("EXTERNAL_CATALOG_URL", "")
     EXTERNAL_CATALOG_CONNECT_TIMEOUT_SECONDS = env.int(
