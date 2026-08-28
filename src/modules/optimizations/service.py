@@ -29,7 +29,7 @@ from src.modules.optimizations.parallel import (
     run_pool_jobs,
     runs_in_process,
 )
-from src.modules.optimizations.patterns import group_layouts
+from src.modules.optimizations.patterns import group_layouts, order_sheets
 from src.modules.optimizations.pricing import build_pricing
 from src.modules.optimizations.schemas import (
     STRATEGY_TO_PACKING,
@@ -707,7 +707,10 @@ class OptimizationService:
         total_cut_linear_m = 0.0
         total_edge_banding_linear_m = 0.0
         for edge_map, net_map, layouts in results:
-            for layout in layouts:
+            # Each `results` entry is one material's pool, so ordering inside
+            # the loop puts a material's half board last without interleaving
+            # two materials. See `order_sheets`.
+            for layout in order_sheets(layouts):
                 layout_dict = layout.to_dict()
                 if edge_map:
                     self._enrich_layout_pieces(layout_dict, edge_map, eb_products)

@@ -34,13 +34,13 @@ def _billed_linear_m(db_session, order_id: int) -> float:
 
 def test_workshop_queue_lists_queued_through_cut(client, db_session):
     """Orders in queued / cutting / cut all appear, with a self-sufficient projection."""
-    queued = _order_with_banding(client, db_session, identifier="0990000021")
+    queued = _order_with_banding(client, db_session, identifier="0100000181")
     assert _patch_status(client, queued["id"], "queued").status_code == 200
 
-    cutting = _order_with_banding(client, db_session, identifier="0990000022")
+    cutting = _order_with_banding(client, db_session, identifier="0100000199")
     _to_cutting(client, cutting["id"])
 
-    cut = _order_with_banding(client, db_session, identifier="0990000023")
+    cut = _order_with_banding(client, db_session, identifier="0100000207")
     _to_cutting(client, cut["id"])
     _cut_all_pieces(client, cut["id"])
     assert _patch_status(client, cut["id"], "cut").status_code == 200
@@ -53,14 +53,14 @@ def test_workshop_queue_lists_queued_through_cut(client, db_session):
     assert item["status"] == "cut"
     assert item["bandingStatus"] == "pending"
     assert item["client"]["firstName"] == "Ada"
-    # 1 board, one piece 500×1000mm fits on a single (half) MEL0023 sheet.
+    # 1 board, one piece 500×1000mm fits on a single (half) MEL0207 sheet.
     assert item["boardUsage"] == [
-        {"name": "Melamina MEL0023 (medio tablero)", "count": 1}
+        {"name": "Melamina MEL0207 (medio tablero)", "count": 1}
     ]
-    # suffix "0023" → product "Tapacanto TAP0023", bandType Suave.
+    # suffix "0207" → product "Tapacanto TAP0207", bandType Suave.
     assert item["bandingUsage"] == [
         {
-            "name": "Tapacanto TAP0023 (Suave)",
+            "name": "Tapacanto TAP0207 (Suave)",
             "linearM": _billed_linear_m(db_session, cut["id"]),
         }
     ]
@@ -110,9 +110,9 @@ def test_workshop_queue_carries_the_branch_printing_switch(client, db_session):
 
 def test_workshop_queue_excludes_confirmed_and_completed(client, db_session):
     """The board only spans the active shop-floor window (queued..cut)."""
-    confirmed = _order_with_banding(client, db_session, identifier="0990000024")
+    confirmed = _order_with_banding(client, db_session, identifier="0100000215")
 
-    completed = _order_with_banding(client, db_session, identifier="0990000025")
+    completed = _order_with_banding(client, db_session, identifier="0100000223")
     _to_cutting(client, completed["id"])
     assert _patch_banding(client, completed["id"], "in_progress").status_code == 200
     assert _patch_banding(client, completed["id"], "done").status_code == 200
@@ -129,17 +129,17 @@ def test_workshop_queue_lists_banding_usage(client, db_session):
     """The card lists billed linear meters per tapacanto type (+ Suave/Duro) so the
     canteador knows how much material to prepare; an order without banding yields
     an empty list."""
-    banded = _order_with_banding(client, db_session, identifier="0990000030")
+    banded = _order_with_banding(client, db_session, identifier="0100000272")
     assert _patch_status(client, banded["id"], "queued").status_code == 200
 
     plain = _order_without_banding(client, db_session)
     assert _patch_status(client, plain["id"], "queued").status_code == 200
 
     by_id = {i["orderId"]: i for i in client.get(_URL).json()["data"]}
-    # suffix "0030" → product "Tapacanto TAP0030", bandType Suave.
+    # suffix "0272" → product "Tapacanto TAP0272", bandType Suave.
     assert by_id[banded["id"]]["bandingUsage"] == [
         {
-            "name": "Tapacanto TAP0030 (Suave)",
+            "name": "Tapacanto TAP0272 (Suave)",
             "linearM": _billed_linear_m(db_session, banded["id"]),
         }
     ]
@@ -147,8 +147,8 @@ def test_workshop_queue_lists_banding_usage(client, db_session):
 
 
 def test_workshop_queue_is_fifo_oldest_first(client, db_session):
-    o1 = _order_with_banding(client, db_session, identifier="0990000026")
-    o2 = _order_with_banding(client, db_session, identifier="0990000027")
+    o1 = _order_with_banding(client, db_session, identifier="0100000231")
+    o2 = _order_with_banding(client, db_session, identifier="0100000249")
     _to_cutting(client, o1["id"])
     _to_cutting(client, o2["id"])
     board = client.get(_URL).json()["data"]
@@ -158,7 +158,7 @@ def test_workshop_queue_is_fifo_oldest_first(client, db_session):
 
 def test_workshop_queue_is_branch_scoped(client, db_session: Session):
     """The board is branch-isolated: workshop roles see only their own branch."""
-    order = _order_with_banding(client, db_session, identifier="0990000029")
+    order = _order_with_banding(client, db_session, identifier="0100000264")
     _to_cutting(client, order["id"])
 
     db_session.add(BranchModel(code="SUCW", name="Sucursal Taller", is_active=True))
@@ -184,7 +184,7 @@ def test_workshop_queue_is_branch_scoped(client, db_session: Session):
 
 def test_workshop_queue_rbac(client, db_session):
     """Operator + canteador reach the board; seller (no ``orders:workshop``) can't."""
-    order = _order_with_banding(client, db_session, identifier="0990000028")
+    order = _order_with_banding(client, db_session, identifier="0100000256")
     _to_cutting(client, order["id"])
 
     # The canteador reaches it despite lacking ``orders:read`` (embedded client proves it).

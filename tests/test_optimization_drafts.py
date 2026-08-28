@@ -32,7 +32,7 @@ def _payload(name="Cocina Pérez", payload=None, client_id=None):
     return body
 
 
-def _make_client(client, identifier="0991112233"):
+def _make_client(client, identifier="0100000397"):
     return client.post(
         "/api/v1/clients/",
         json={"identifier": identifier, "firstName": "Ada"},

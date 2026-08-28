@@ -56,7 +56,7 @@ def test_client_update_stamps_updated_by_only(client, db_session):
     admin = _admin(db_session)
     client.put(
         f"/api/v1/clients/{created['id']}",
-        json={"identifier": "0991112233", "firstName": "Grace"},
+        json={"identifier": "0100000397", "firstName": "Grace"},
     )
 
     db_session.expire_all()

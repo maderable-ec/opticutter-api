@@ -828,10 +828,10 @@ def _mint_order_referencing(client, db_session, board_id, eb_id):
     c = client.post(
         "/api/v1/clients/",
         json={
-            "identifier": "0991112233",
+            "identifier": "0100000397",
             "firstName": "Ada",
             "lastName": "Lovelace",
-            "phone": "0991112233",
+            "phone": "0100000397",
         },
     ).json()["data"]
     return OrderService(db_session).create(

@@ -15,7 +15,7 @@ _BRANCH = 1  # default branch seeded by conftest
 # --------------------------------------------------------------------------- #
 # Catalog / order helpers (same pattern as test_edge_banding.py)
 # --------------------------------------------------------------------------- #
-def _create_client(client, identifier="0991112233"):
+def _create_client(client, identifier="0100000397"):
     return client.post(
         "/api/v1/clients/",
         json={
@@ -65,7 +65,7 @@ def _mint_order(client, db_session, payload):
     return client.get(f"/api/v1/orders/{order.id}").json()["data"]
 
 
-def _order_with_banding(client, db_session, branch_id=_BRANCH, identifier="0991112233"):
+def _order_with_banding(client, db_session, branch_id=_BRANCH, identifier="0100000397"):
     c = _create_client(client, identifier=identifier)
     suffix = identifier[-4:]  # unique product codes per order (avoids 409)
     b = _create_board(client, code=f"MEL{suffix}")

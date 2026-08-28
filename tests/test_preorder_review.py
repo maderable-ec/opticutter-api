@@ -125,7 +125,7 @@ def test_public_review_detail_is_sanitized(client):
     assert data["pieces"][0]["height"] == 800
 
     # Sanitization: no contact info, internal identifiers, or raw inputs.
-    assert "0991112233" not in resp.text
+    assert "0100000397" not in resp.text
     for leaked in ("identifier", "phone", "email", "clientId", "materials"):
         assert leaked not in data
 

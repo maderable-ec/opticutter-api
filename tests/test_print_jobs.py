@@ -38,14 +38,14 @@ def _print_env(tmp_path, monkeypatch):
 
 
 # --- seeding (same pattern as test_order_cutting_plan) ----------------------
-def _create_client(client, identifier="0991112233"):
+def _create_client(client, identifier="0100000397"):
     return client.post(
         "/api/v1/clients/",
         json={
             "identifier": identifier,
             "firstName": "Ada",
             "lastName": "Lovelace",
-            "phone": "0991112233",
+            "phone": "0100000397",
         },
     ).json()["data"]
 
@@ -64,7 +64,7 @@ def _create_board(client, code="MEL18"):
 
 
 def _create_order(
-    client, db_session, branch_id=1, identifier="0991112233", board_code="MEL18"
+    client, db_session, branch_id=1, identifier="0100000397", board_code="MEL18"
 ):
     c = _create_client(client, identifier)
     b = _create_board(client, board_code)
@@ -615,7 +615,7 @@ def test_switches_are_per_branch(client, db_session):
     db_session.add(b2)
     db_session.commit()
     order_b2 = _create_order(
-        client, db_session, branch_id=b2.id, identifier="0992223344", board_code="MEL15"
+        client, db_session, branch_id=b2.id, identifier="0100000405", board_code="MEL15"
     )
     _set_branch_printing(db_session, branch_id=1, consolidated=False)
     svc = PrintJobService(db_session)

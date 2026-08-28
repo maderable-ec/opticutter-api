@@ -30,7 +30,7 @@ def _attachments_dir(tmp_path, monkeypatch):
 
 
 # --- order/user helpers ---------------------------------------------------------
-def _create_client(client, identifier="0991112233"):
+def _create_client(client, identifier="0100000397"):
     return client.post(
         "/api/v1/clients/",
         json={
@@ -74,7 +74,7 @@ def _order_payload(client_id, product_id, width=600):
     }
 
 
-def _mint_order(client, db_session, identifier="0991112233", code="MEL18", width=600):
+def _mint_order(client, db_session, identifier="0100000397", code="MEL18", width=600):
     c = _create_client(client, identifier=identifier)
     b = _create_board(client, code=code)
     order = OrderService(db_session).create(
@@ -163,7 +163,7 @@ def test_upload_pdf_list_and_download(client, db_session):
 
 
 def test_upload_png_screenshot(client, db_session):
-    order = _mint_order(client, db_session, identifier="0990000001", code="MELP")
+    order = _mint_order(client, db_session, identifier="0100000033", code="MELP")
     png = _png_bytes()
     resp = _upload(client, order["id"], "captura.png", png, "image/png")
     assert resp.status_code == 201
@@ -175,7 +175,7 @@ def test_download_filename_with_non_latin1_chars(client, db_session):
 
     The download must not 500 building the Content-Disposition header (regression).
     """
-    order = _mint_order(client, db_session, identifier="0990000014", code="MELU")
+    order = _mint_order(client, db_session, identifier="0100000165", code="MELU")
     oid = order["id"]
     weird = "Captura de pantalla.png"  # U+202F, as Finder names them
     png = _png_bytes()
@@ -193,27 +193,27 @@ def test_download_filename_with_non_latin1_chars(client, db_session):
 # Validation
 # --------------------------------------------------------------------------- #
 def test_reject_unsupported_type(client, db_session):
-    order = _mint_order(client, db_session, identifier="0990000002", code="MELT")
+    order = _mint_order(client, db_session, identifier="0100000041", code="MELT")
     resp = _upload(client, order["id"], "notas.txt", b"hola", "text/plain")
     assert resp.status_code == 422
 
 
 def test_reject_corrupt_image(client, db_session):
-    order = _mint_order(client, db_session, identifier="0990000003", code="MELC")
+    order = _mint_order(client, db_session, identifier="0100000058", code="MELC")
     resp = _upload(client, order["id"], "fake.png", b"not-a-real-image", "image/png")
     assert resp.status_code == 422
 
 
 def test_reject_oversize(client, db_session, monkeypatch):
     monkeypatch.setattr(config, "MAX_ATTACHMENT_MB", 1)
-    order = _mint_order(client, db_session, identifier="0990000004", code="MELO")
+    order = _mint_order(client, db_session, identifier="0100000066", code="MELO")
     big = b"%PDF-1.4" + b"0" * (2 * 1024 * 1024)  # ~2 MB, over the 1 MB cap
     resp = _upload(client, order["id"], "grande.pdf", big, "application/pdf")
     assert resp.status_code == 422
 
 
 def test_reject_empty_file(client, db_session):
-    order = _mint_order(client, db_session, identifier="0990000005", code="MELE")
+    order = _mint_order(client, db_session, identifier="0100000074", code="MELE")
     resp = _upload(client, order["id"], "vacio.pdf", b"", "application/pdf")
     assert resp.status_code == 422
 
@@ -222,14 +222,14 @@ def test_reject_empty_file(client, db_session):
 # Terminal-state gate: no attach/delete once the order is closed
 # --------------------------------------------------------------------------- #
 def test_cannot_attach_when_completed(client, db_session):
-    order = _mint_order(client, db_session, identifier="0990000006", code="MELX")
+    order = _mint_order(client, db_session, identifier="0100000082", code="MELX")
     _to_completed(client, order["id"])
     resp = _upload(client, order["id"], "tarde.pdf", _PDF_BYTES, "application/pdf")
     assert resp.status_code == 422
 
 
 def test_cannot_delete_when_completed(client, db_session):
-    order = _mint_order(client, db_session, identifier="0990000007", code="MELY")
+    order = _mint_order(client, db_session, identifier="0100000090", code="MELY")
     oid = order["id"]
     att_id = _upload(client, oid, "a.pdf", _PDF_BYTES, "application/pdf").json()[
         "data"
@@ -246,7 +246,7 @@ def test_cannot_delete_when_completed(client, db_session):
 # Delete (happy path) + not-found
 # --------------------------------------------------------------------------- #
 def test_delete_attachment(client, db_session, _attachments_dir):
-    order = _mint_order(client, db_session, identifier="0990000008", code="MELD")
+    order = _mint_order(client, db_session, identifier="0100000108", code="MELD")
     oid = order["id"]
     att = _upload(client, oid, "borrar.pdf", _PDF_BYTES, "application/pdf").json()[
         "data"
@@ -263,7 +263,7 @@ def test_delete_attachment(client, db_session, _attachments_dir):
 
 
 def test_attachment_not_found(client, db_session):
-    order = _mint_order(client, db_session, identifier="0990000009", code="MELN")
+    order = _mint_order(client, db_session, identifier="0100000116", code="MELN")
     assert (
         client.get(f"/api/v1/orders/{order['id']}/attachments/999999").status_code
         == 404
@@ -271,8 +271,8 @@ def test_attachment_not_found(client, db_session):
 
 
 def test_attachment_of_another_order_is_404(client, db_session):
-    o1 = _mint_order(client, db_session, identifier="0990000010", code="MELA1")
-    o2 = _mint_order(client, db_session, identifier="0990000011", code="MELA2")
+    o1 = _mint_order(client, db_session, identifier="0100000124", code="MELA1")
+    o2 = _mint_order(client, db_session, identifier="0100000132", code="MELA2")
     att = _upload(client, o1["id"], "x.pdf", _PDF_BYTES, "application/pdf").json()[
         "data"
     ]
@@ -285,7 +285,7 @@ def test_attachment_of_another_order_is_404(client, db_session):
 # RBAC: upload/delete are admin+seller; operator can read but not write
 # --------------------------------------------------------------------------- #
 def test_operator_cannot_upload_but_can_read(client, db_session):
-    order = _mint_order(client, db_session, identifier="0990000012", code="MELR")
+    order = _mint_order(client, db_session, identifier="0100000140", code="MELR")
     oid = order["id"]
     # Seed an attachment as admin so the operator has something to read.
     _upload(client, oid, "ref.pdf", _PDF_BYTES, "application/pdf")
@@ -301,7 +301,7 @@ def test_operator_cannot_upload_but_can_read(client, db_session):
 
 
 def test_seller_can_upload(client, db_session):
-    order = _mint_order(client, db_session, identifier="0990000013", code="MELS")
+    order = _mint_order(client, db_session, identifier="0100000157", code="MELS")
     headers = _token_for(client, db_session, "vendedor")
     resp = _upload(client, order["id"], "v.pdf", _PDF_BYTES, "application/pdf", headers)
     assert resp.status_code == 201
@@ -345,7 +345,7 @@ def test_consolidated_has_diagram_only_no_repeated_lists(client, db_session):
     """
     from pypdf import PdfReader
 
-    order = _mint_order(client, db_session, identifier="0990000023", code="MELDIAG")
+    order = _mint_order(client, db_session, identifier="0100000207", code="MELDIAG")
     content = client.get(f"/api/v1/orders/{order['id']}/consolidated").content
     text = _all_text(content)
 
@@ -368,7 +368,7 @@ def test_consolidated_has_diagram_only_no_repeated_lists(client, db_session):
 
 
 def test_consolidated_pdf_includes_attachments(client, db_session):
-    order = _mint_order(client, db_session, identifier="0990000020", code="MELCON")
+    order = _mint_order(client, db_session, identifier="0100000173", code="MELCON")
     oid = order["id"]
 
     # Baseline: the three base documents (order + production + dispatch), no annexes.
@@ -389,7 +389,7 @@ def test_consolidated_pdf_includes_attachments(client, db_session):
 
 
 def test_consolidated_pdf_base64(client, db_session):
-    order = _mint_order(client, db_session, identifier="0990000021", code="MELB64")
+    order = _mint_order(client, db_session, identifier="0100000181", code="MELB64")
     resp = client.get(
         f"/api/v1/orders/{order['id']}/consolidated", params={"format": "base64"}
     )
@@ -402,7 +402,7 @@ def test_consolidated_pdf_base64(client, db_session):
 
 def test_consolidated_skips_corrupt_pdf_annex(client, db_session):
     """A corrupt PDF annex is skipped, not fatal: the packet still renders."""
-    order = _mint_order(client, db_session, identifier="0990000022", code="MELCOR")
+    order = _mint_order(client, db_session, identifier="0100000199", code="MELCOR")
     oid = order["id"]
     base_pages = _page_count(client.get(f"/api/v1/orders/{oid}/consolidated").content)
 

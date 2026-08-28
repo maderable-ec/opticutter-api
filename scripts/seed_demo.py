@@ -94,11 +94,11 @@ SEED_SOURCE = "seed"
 
 # 5 clients: (identifier, first name, last name, phone, email).
 CLIENTS = [
-    ("0102030405", "María", "González", "0991111111", "maria.gonzalez@example.com"),
+    ("0102030400", "María", "González", "0991111111", "maria.gonzalez@example.com"),
     ("0203040506", "Carlos", "Pérez", "0992222222", "carlos.perez@example.com"),
-    ("0304050607", "Lucía", "Vásquez", "0993333333", "lucia.vasquez@example.com"),
+    ("0304050602", "Lucía", "Vásquez", "0993333333", "lucia.vasquez@example.com"),
     ("0405060708", "Jorge", "Mendoza", "0994444444", None),
-    ("0506070809", "Ana", "Torres", "0995555555", "ana.torres@example.com"),
+    ("0506070804", "Ana", "Torres", "0995555555", "ana.torres@example.com"),
 ]
 
 # Demo boards (only created if the catalog is empty): (code, name, height, width,

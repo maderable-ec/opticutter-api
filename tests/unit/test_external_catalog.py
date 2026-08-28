@@ -12,13 +12,9 @@ from decimal import Decimal
 import pytest
 from sqlalchemy.exc import OperationalError
 
-from src.modules.products.external_catalog import (
-    ExternalCatalogSource,
-    _check_url,
-    _is_retired,
-    _text,
-)
+from src.modules.products.external_catalog import ExternalCatalogSource
 from src.shared.exceptions import ExternalServiceError
+from src.shared.external_db import check_external_url, is_retired, text_value
 
 _COLUMNS = (
     "cin",
@@ -166,7 +162,7 @@ def test_row_no_counts_read_position():
     ],
 )
 def test_is_retired(est, fec_eli, expected):
-    assert _is_retired(est, fec_eli) is expected
+    assert is_retired(est, fec_eli) is expected
 
 
 def test_retired_rows_are_split_out_not_dropped():
@@ -214,10 +210,10 @@ def test_unconfigured_url_raises(monkeypatch):
 
 
 def test_text_helper():
-    assert _text(None) == ""
-    assert _text(Decimal("0.350000")) == "0.350000"
-    assert _text(57) == "57"
-    assert _text("  hola  ") == "hola"
+    assert text_value(None) == ""
+    assert text_value(Decimal("0.350000")) == "0.350000"
+    assert text_value(57) == "57"
+    assert text_value("  hola  ") == "hola"
 
 
 # --------------------------------------------------------------------------- #
@@ -228,7 +224,7 @@ _GOOD = "mysql+pymysql://user:%40secreto%40@10.0.0.1:33061/inv?charset=latin1"
 
 
 def test_check_url_accepts_a_properly_encoded_password():
-    _check_url(_GOOD)
+    check_external_url(_GOOD)
 
 
 @pytest.mark.parametrize(
@@ -244,13 +240,13 @@ def test_check_url_accepts_a_properly_encoded_password():
 )
 def test_check_url_rejects_unencoded_credentials(url):
     with pytest.raises(ExternalServiceError):
-        _check_url(url)
+        check_external_url(url)
 
 
 def test_check_url_allows_a_slash_in_the_password():
     """Only '@' actually breaks the split, so don't reject what works: a lone
     slash leaves a single '@' and parses correctly."""
-    _check_url("mysql+pymysql://user:pass/word@10.0.0.1:33061/inv")
+    check_external_url("mysql+pymysql://user:pass/word@10.0.0.1:33061/inv")
 
 
 def test_malformed_url_error_never_echoes_the_password(monkeypatch):
