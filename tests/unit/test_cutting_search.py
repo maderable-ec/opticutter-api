@@ -53,6 +53,7 @@ production build with ``make benchmark``; CI runs ``-m "not benchmark"``.
 """
 
 import json
+from collections import Counter
 
 import pytest
 
@@ -493,3 +494,262 @@ def test_battery_job_never_gets_more_expensive(job_index, max_cost):
     assert (
         total <= max_cost + 1e-6
     ), f"battery job {job_index} now bills ${total:.2f}, was ${max_cost:.2f}"
+
+
+# --- Pre-order 3 (BLANCO RH): what the relaxed-kerf repair exists for -------
+#
+# The shop's export ``4 BLANCO 2YMEDIO RSITRETTO-17-08-2026.xml`` billed 4 boards
+# on the commercial program. Uploaded through the dashboard as pre-order 3 — same
+# usable rectangle (2050x2420), same 4 mm blade, same per-piece rotation flags,
+# since they come from that same XML — this engine used to bill 4 full boards
+# plus a half, and that half was NOT the geometry refusing.
+#
+# The failure shape, worth remembering because the repair is built around it: the
+# beam opens with a very dense first board and strands a tail it cannot
+# recompose, closing on a half board filled to 13.5%. The right partition is
+# *even* instead (91.9 / 94.3 / 94.5 / 90.9%), so its opening board ranks worse
+# and is evicted early. Nothing in the ordinary search recovers it — not 8
+# variants, not 6x the budget, not CP-SAT unmetered — and LNS cannot either: no
+# ruin of two or three bins of the returned plan reaches the answer.
+#
+# A second, independent witness that this was the search and not the geometry:
+# the result was NON-MONOTONIC in the blade. 3 mm billed 4 boards, 2 mm billed
+# 4.5, 1 mm and 0 mm billed 4. Any plan that fits with a 3 mm kerf fits with a
+# 2 mm one, so the 4.5 at 2 mm was a feasible solution the search failed to find.
+#
+# That non-monotonicity is exactly the lever ``_relaxed_kerf_repair`` pulls, and
+# this pool is its regression test in both directions: the partition below is a
+# hand-checked certificate that 4 boards are reachable, and the parity test is
+# that the engine now gets there on its own.
+#
+# MDP BLANCO NIEVE 2070x2440 at $47.50; the half board is width/2 at
+# price/2 * (1 + 10% markup).
+FULL_3 = BinSpec(
+    key="board", width=2070, height=2440, thickness=15, cost_per_unit=47.50
+)
+HALF_3 = BinSpec(
+    key="board",
+    width=1035,
+    height=2440,
+    thickness=15,
+    cost_per_unit=26.13,
+    half_board=True,
+)
+
+# The pre-order's 24 requirement rows, IN ITS OWN ORDER, expanded below to one
+# instance per piece — the shape ``OptimizationService._build_pieces`` feeds the
+# engine. Order is load-bearing here and not cosmetic: piece ids are the final
+# tiebreak of every comparator in ``SORT_KEYS``, so re-sorting these rows yields
+# a different (equally valid, equally priced) plan whose emptiest sheet sits
+# above ``_REPAIR_FILL_GATE`` — and then the repair never fires and this file
+# would be testing a pool the shop never quotes.
+# (width, height, quantity, can_rotate); the 29 non-rotatable instances carry
+# the board's grain and the constraint is real.
+PREORDER_3_BLANCO = [
+    (615, 865, 1, False),
+    (615, 825, 2, False),
+    (350, 1250, 6, True),
+    (350, 710, 12, True),
+    (600, 663, 2, False),
+    (600, 890, 1, False),
+    (600, 735, 2, False),
+    (520, 663, 2, False),
+    (800, 679, 2, False),
+    (700, 679, 2, False),
+    (800, 912, 1, False),
+    (825, 290, 2, False),
+    (615, 290, 2, False),
+    (825, 185, 2, False),
+    (615, 185, 2, False),
+    (615, 80, 2, False),
+    (825, 80, 2, False),
+    (800, 735, 2, False),
+    (735, 70, 16, True),
+    (633, 70, 6, True),
+    (648, 70, 6, True),
+    (881, 70, 3, True),
+    (861, 70, 3, True),
+    (825, 585, 3, True),
+]
+
+_P3_ROTATION = {(w, h): rotatable for w, h, _, rotatable in PREORDER_3_BLANCO}
+
+# The witness: a 4-board partition of exactly that pool, as (width, height,
+# quantity) per board. Pieces of one type are interchangeable, so the split is
+# expressed by type and re-attached to instances at pack time.
+PREORDER_3_PARTITION = [
+    [
+        (735, 70, 15),
+        (881, 70, 3),
+        (861, 70, 3),
+        (825, 585, 3),
+        (800, 735, 2),
+        (825, 185, 1),
+        (800, 912, 1),
+    ],
+    [
+        (825, 290, 2),
+        (825, 80, 2),
+        (800, 679, 2),
+        (600, 735, 2),
+        (615, 290, 2),
+        (825, 185, 1),
+        (735, 70, 1),
+        (600, 890, 1),
+        (615, 865, 1),
+        (615, 825, 1),
+        (615, 80, 1),
+    ],
+    [
+        (350, 710, 6),
+        (648, 70, 5),
+        (600, 663, 2),
+        (520, 663, 2),
+        (700, 679, 2),
+        (615, 825, 1),
+        (615, 185, 1),
+    ],
+    [
+        (350, 1250, 6),
+        (350, 710, 6),
+        (633, 70, 6),
+        (615, 185, 1),
+        (615, 80, 1),
+        (648, 70, 1),
+    ],
+]
+
+# What the search bills today: 4 full boards + 1 half (4 * 47.50 + 26.13). Pinned
+# as a CEILING, like the battery jobs: the proven target is 190.00 (4 boards), so
+# a search that closes this gap makes the test pass, and only a regression fails.
+PREORDER_3_BLANCO_COST = 216.13
+PREORDER_3_BLANCO_PROVEN_COST = 190.00
+
+
+def _pieces_by_type(spec):
+    """Pieces from ``(width, height, quantity)``, rotation read off the pool."""
+    return [
+        Piece(
+            id=f"p{i}",
+            width=w,
+            height=h,
+            quantity=q,
+            can_rotate=_P3_ROTATION[(w, h)],
+        )
+        for i, (w, h, q) in enumerate(spec)
+    ]
+
+
+def _pieces_as_service_builds_them(spec):
+    """One ``quantity=1`` instance per piece, ids as ``_build_pieces`` makes them.
+
+    The engine is fed this shape in production, and the shape matters: ids are
+    the last tiebreak of every sort key, so a pool of ``quantity=n`` pieces packs
+    differently from the same pool expanded. Testing the production shape is the
+    difference between pinning the shop's quote and pinning a lookalike.
+    """
+    pieces = []
+    for i, (w, h, q, rotatable) in enumerate(spec):
+        for k in range(q):
+            label = f"piece_{i + 1}"
+            pieces.append(
+                Piece(
+                    id=f"{label}#{k + 1}" if q > 1 else label,
+                    width=w,
+                    height=h,
+                    quantity=1,
+                    can_rotate=rotatable,
+                )
+            )
+    return pieces
+
+
+def test_preorder_3_partition_covers_the_pool_exactly():
+    """The witness is a partition of the pool — no piece invented or dropped."""
+    pool = Counter()
+    for w, h, q, _ in PREORDER_3_BLANCO:
+        pool[(w, h)] += q
+    split = Counter()
+    for group in PREORDER_3_PARTITION:
+        for w, h, q in group:
+            split[(w, h)] += q
+    assert split == pool
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("board", range(len(PREORDER_3_PARTITION)))
+def test_preorder_3_four_board_plan_is_constructively_reachable(board):
+    """Each board of the witness closes in ONE full sheet at the shop's kerf.
+
+    Four groups, four boards. This is the hand-checked certificate that 190.00 is
+    reachable, and it is deliberately independent of whether the repair fires: it
+    asks the constructors to pack one *given* board, which no solver tie-break
+    and no build decides, so it must hold everywhere. If the parity test below
+    ever goes red, this one says whether the target was lost or merely missed.
+    """
+    group = PREORDER_3_PARTITION[board]
+    pieces = _pieces_by_type(group)
+    instances = sum(q for _, _, q in group)
+    layouts, unplaced = optimize_bins(
+        pieces,
+        [FULL_3],
+        cutting_params=PARAMS_KERF4,
+        budget=SearchBudget.scaled(instances, tries_per_board=48, iterations=40),
+    )
+    assert unplaced == []
+    assert_valid_layouts(layouts, unplaced, PARAMS_KERF4, instances)
+    assert len(layouts) == 1
+
+
+@pytest.mark.slow
+def test_preorder_3_reaches_commercial_parity_at_kerf_4():
+    """4 boards, no half — the number the commercial program billed.
+
+    Reached only through ``_relaxed_kerf_repair``: the plain search closes on a
+    half board filled to 13.5% and bills 216.13. Pinned as an equality on the
+    board count and a ceiling on the cost, so the day something finds a cheaper
+    plan this still passes.
+    """
+    pieces = _pieces_as_service_builds_them(PREORDER_3_BLANCO)
+    instances = _total_instances(PREORDER_3_BLANCO)
+    assert len(pieces) == instances
+    layouts, unplaced = optimize_bins(
+        pieces,
+        [FULL_3, HALF_3],
+        cutting_params=PARAMS_KERF4,
+        budget=SearchBudget.scaled(instances, tries_per_board=48, iterations=40),
+    )
+    assert unplaced == []
+    assert_valid_layouts(layouts, unplaced, PARAMS_KERF4, instances)
+    assert len(layouts) == 4
+    assert not any(layout.material.half_board for layout in layouts)
+    cost = sum(layout.material.cost_per_unit for layout in layouts)
+    assert cost <= PREORDER_3_BLANCO_PROVEN_COST + 1e-6
+
+
+@pytest.mark.slow
+def test_relaxed_kerf_repair_only_returns_plans_valid_at_the_real_kerf():
+    """The repair's whole safety argument: a hint is re-cut before it is adopted.
+
+    A relaxed plan is not necessarily cuttable at the real blade, so every board
+    is re-packed at the real parameters and the repair is dropped whole if one
+    fails. Asserting validity of the returned layouts *at kerf 4* is what would
+    catch a future refactor that adopts the hint directly.
+    """
+    pieces = _pieces_as_service_builds_them(PREORDER_3_BLANCO)
+    instances = _total_instances(PREORDER_3_BLANCO)
+    layouts, unplaced = optimize_bins(
+        pieces,
+        [FULL_3, HALF_3],
+        cutting_params=PARAMS_KERF4,
+        budget=SearchBudget.scaled(instances, tries_per_board=48, iterations=40),
+    )
+    assert_valid_layouts(layouts, unplaced, PARAMS_KERF4, instances)
+    # The repair fired, so the emptiest sheet is no longer the 13.5% one that
+    # opened the gate; if this stops holding the gate stopped doing its job.
+    emptiest = min(
+        layout.used_area / layout.material.area
+        for layout in layouts
+        if layout.material.area
+    )
+    assert emptiest > 0.30

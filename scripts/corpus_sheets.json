@@ -1,0 +1,1620 @@
+{
+  "_comment": "Generado por bench_corpus.py --refresh-sheets. 'overrides' es la parte escrita a mano y sobrevive al refresh; 'sheets' se re-deriva. 'candidates' > 1 marca un empate que el nombre no resolvió.",
+  "overrides": {
+    "BLANCO RH@15": "155",
+    "BLANCO@15": "155",
+    "BLANCO NORMAL@15": "381"
+  },
+  "sheets": {
+    "AGAVE@15": {
+      "code": "752",
+      "name": "PELIKANO RH MATE AGAVE (2.44X2.15)M-15MM",
+      "width": 2150.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 91.85,
+      "candidates": 1,
+      "source": "name"
+    },
+    "ALTO BRILLO CASHMERE@15": {
+      "code": "2227",
+      "name": "MDP ALTO BRILLO BLANCO (2.44X1.24)M-15MM",
+      "width": 1240.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 145.0,
+      "candidates": 1,
+      "source": "name"
+    },
+    "AMARETO MATE@15": {
+      "code": "1214",
+      "name": "MDP AMARETTO MATE (2.75X1.85)M-15MM",
+      "width": 1850.0,
+      "height": 2750.0,
+      "thickness": 15.0,
+      "price": 92.75,
+      "candidates": 1,
+      "source": "name"
+    },
+    "AMARETO@15": {
+      "code": "1214",
+      "name": "MDP AMARETTO MATE (2.75X1.85)M-15MM",
+      "width": 1850.0,
+      "height": 2750.0,
+      "thickness": 15.0,
+      "price": 92.75,
+      "candidates": 1,
+      "source": "name"
+    },
+    "AMARETTO RH@15": {
+      "code": "646",
+      "name": "MDP RH AMARETTO MATE (2.75X1.85)M-15MM",
+      "width": 1850.0,
+      "height": 2750.0,
+      "thickness": 15.0,
+      "price": 107.25,
+      "candidates": 1,
+      "source": "name"
+    },
+    "AMARETTO@15": {
+      "code": "1214",
+      "name": "MDP AMARETTO MATE (2.75X1.85)M-15MM",
+      "width": 1850.0,
+      "height": 2750.0,
+      "thickness": 15.0,
+      "price": 92.75,
+      "candidates": 1,
+      "source": "name"
+    },
+    "AMBAR RH@15": {
+      "code": "1291",
+      "name": "MDP RH ROBLE BARROCO AMBAR (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 105.0,
+      "candidates": 1,
+      "source": "name"
+    },
+    "AMBAR@15": {
+      "code": "1291",
+      "name": "MDP RH ROBLE BARROCO AMBAR (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 105.0,
+      "candidates": 1,
+      "source": "name"
+    },
+    "AMBAR@36": {
+      "code": "1319",
+      "name": "MDP RH ROBLE BARROCO AMBAR (2.80X2.07)M-36MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 36.0,
+      "price": 168.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "ANTRACITA RH@15": {
+      "code": "310",
+      "name": "MDP RH ANTRACITA (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 98.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "ANTRACITA@15": {
+      "code": "1992",
+      "name": "MDP ANTRACITA (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 87.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "ANTRACITA@36": {
+      "code": "1991",
+      "name": "MDP RH ANTRACITA (2.80X2.07)M-36MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 36.0,
+      "price": 168.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "ARTESANAL DORADO@15": {
+      "code": "640",
+      "name": "MDP RH ROBLE ARTESANAL DORADO (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 105.0,
+      "candidates": 1,
+      "source": "name"
+    },
+    "ARTESANAL DORADO@36": {
+      "code": "1301",
+      "name": "MDP RH ROBLE ARTESANAL DORADO (2.80X2.07)M-36MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 36.0,
+      "price": 168.75,
+      "candidates": 1,
+      "source": "name"
+    },
+    "AVELLANA RH@15": {
+      "code": "2112",
+      "name": "PELIKANO RH AVELLANA PORO (2.44X2.15)M-15MM",
+      "width": 2150.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 97.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "AVELLANA@15": {
+      "code": "2112",
+      "name": "PELIKANO RH AVELLANA PORO (2.44X2.15)M-15MM",
+      "width": 2150.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 97.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "AVELLANA@36": {
+      "code": "2110",
+      "name": "PELIKANO RH AVELLANA PORO (2.44X2.15)M-36MM",
+      "width": 2150.0,
+      "height": 2440.0,
+      "thickness": 36.0,
+      "price": 152.0,
+      "candidates": 1,
+      "source": "name"
+    },
+    "BARDOLINO RH@15": {
+      "code": "749",
+      "name": "PELIKANO RH ALAMO-BARDOLINO (2.44X2.15)M-15MM",
+      "width": 2150.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 102.75,
+      "candidates": 1,
+      "source": "name"
+    },
+    "BARDOLINO@15": {
+      "code": "749",
+      "name": "PELIKANO RH ALAMO-BARDOLINO (2.44X2.15)M-15MM",
+      "width": 2150.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 102.75,
+      "candidates": 1,
+      "source": "name"
+    },
+    "BARROCO AMBAR RH@15": {
+      "code": "1291",
+      "name": "MDP RH ROBLE BARROCO AMBAR (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 105.0,
+      "candidates": 1,
+      "source": "name"
+    },
+    "BARROCO AMBAR@15": {
+      "code": "1291",
+      "name": "MDP RH ROBLE BARROCO AMBAR (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 105.0,
+      "candidates": 1,
+      "source": "name"
+    },
+    "BARROCO AMBAR@36": {
+      "code": "1319",
+      "name": "MDP RH ROBLE BARROCO AMBAR (2.80X2.07)M-36MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 36.0,
+      "price": 168.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "BARROCO DORADO RH@36": {
+      "code": "1292",
+      "name": "MDP RH ROBLE BARROCO DORADO (2.80X2.07)M-36MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 36.0,
+      "price": 168.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "BARROCO DORADO@15": {
+      "code": "311",
+      "name": "MDP ROBLE BARROCO DORADO (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 87.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "BARROCO DORADO@36": {
+      "code": "536",
+      "name": "MDP ROBLE BARROCO DORADO (2.80X2.07)M-36MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 36.0,
+      "price": 152.75,
+      "candidates": 1,
+      "source": "name"
+    },
+    "BARROCO RISTRETO@15": {
+      "code": "2137",
+      "name": "MDP ROBLE BARROCO RISTRETTO (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 87.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "BARROCO RISTRETTO@15": {
+      "code": "2137",
+      "name": "MDP ROBLE BARROCO RISTRETTO (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 87.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "BARROCO RISTRETTO@36": {
+      "code": "1300",
+      "name": "MDP RH ROBLE BARROCO RISTRETTO (2.80X2.07)M-36MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 36.0,
+      "price": 168.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "BARRROCO AMBAR@15": {
+      "code": "1291",
+      "name": "MDP RH ROBLE BARROCO AMBAR (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 105.0,
+      "candidates": 1,
+      "source": "name"
+    },
+    "BARRROCO DORADO@15": {
+      "code": "311",
+      "name": "MDP ROBLE BARROCO DORADO (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 87.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "BLANCO NORMAL@15": {
+      "code": "381",
+      "name": "MDP BLANCO NIEVE (2.44X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 47.5,
+      "candidates": 1,
+      "source": "override"
+    },
+    "BLANCO RH@15": {
+      "code": "155",
+      "name": "MDP RH BLANCO NIEVE (2.44X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 69.5,
+      "candidates": 1,
+      "source": "override"
+    },
+    "BLANCO RH@36": {
+      "code": "1324",
+      "name": "PELIKANO RH FANT.BLANCO (2.44X2.15)M-36MM",
+      "width": 2150.0,
+      "height": 2440.0,
+      "thickness": 36.0,
+      "price": 152.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "BLANCO@15": {
+      "code": "155",
+      "name": "MDP RH BLANCO NIEVE (2.44X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 69.5,
+      "candidates": 1,
+      "source": "override"
+    },
+    "BRIIXTON@15": {
+      "code": "457",
+      "name": "MDP BRIXTON (2.44X2.10)M-15MM",
+      "width": 2100.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 87.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "BRIXTON RH@15": {
+      "code": "247",
+      "name": "MDP RH BRIXTON (2.44X2.10)M-15MM",
+      "width": 2100.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 96.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "BRIXTON@15": {
+      "code": "457",
+      "name": "MDP BRIXTON (2.44X2.10)M-15MM",
+      "width": 2100.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 87.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "BRUNE RH@15": {
+      "code": "2134",
+      "name": "DP RH MELA 2C BRUNE (2.44X2.15)M-15MM",
+      "width": 2150.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 105.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "CANNOLO CREMONA RH@15": {
+      "code": "2107",
+      "name": "MDP RH CANNOLO CREMONA (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 105.0,
+      "candidates": 1,
+      "source": "name"
+    },
+    "CANNOLO CREMONA@15": {
+      "code": "2107",
+      "name": "MDP RH CANNOLO CREMONA (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 105.0,
+      "candidates": 1,
+      "source": "name"
+    },
+    "CANNOLO CREMONA@36": {
+      "code": "2200",
+      "name": "MDP RH CANNOLO CREMONA (2.80X2.07)M-36MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 36.0,
+      "price": 168.75,
+      "candidates": 1,
+      "source": "name"
+    },
+    "CANNOLO RH@15": {
+      "code": "2107",
+      "name": "MDP RH CANNOLO CREMONA (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 105.0,
+      "candidates": 1,
+      "source": "name"
+    },
+    "CANNOLO RH@36": {
+      "code": "2200",
+      "name": "MDP RH CANNOLO CREMONA (2.80X2.07)M-36MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 36.0,
+      "price": 168.75,
+      "candidates": 1,
+      "source": "name"
+    },
+    "CANNOLO@15": {
+      "code": "2107",
+      "name": "MDP RH CANNOLO CREMONA (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 105.0,
+      "candidates": 1,
+      "source": "name"
+    },
+    "CANOLO RH@15": {
+      "code": "2107",
+      "name": "MDP RH CANNOLO CREMONA (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 105.0,
+      "candidates": 1,
+      "source": "name"
+    },
+    "CAPRI RH@15": {
+      "code": "753",
+      "name": "PELIKANO RH MATE-CAPRI (2.44X2.15)M-15MM",
+      "width": 2150.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 112.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "CAPUCCINO RH@15": {
+      "code": "48",
+      "name": "MDP RH CAPUCCINO (2.44X2.10)M-15MM",
+      "width": 2100.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 96.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "CAPUCCINO@15": {
+      "code": "48",
+      "name": "MDP RH CAPUCCINO (2.44X2.10)M-15MM",
+      "width": 2100.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 96.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "CARBON RH@15": {
+      "code": "98",
+      "name": "MDP RH CARBONO (2.44X2.10)M-15MM",
+      "width": 2100.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 98.5,
+      "candidates": 2,
+      "source": "name"
+    },
+    "CARBONO RH@15": {
+      "code": "98",
+      "name": "MDP RH CARBONO (2.44X2.10)M-15MM",
+      "width": 2100.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 98.5,
+      "candidates": 2,
+      "source": "name"
+    },
+    "CARBONO@15": {
+      "code": "1922",
+      "name": "MDP CARBONO (2.44X2.15)M-15MM",
+      "width": 2150.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 87.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "CARBONO@36": {
+      "code": "599",
+      "name": "MDP CARBONO (2.44X1.83)M-36MM",
+      "width": 1830.0,
+      "height": 2440.0,
+      "thickness": 36.0,
+      "price": 121.16,
+      "candidates": 1,
+      "source": "name"
+    },
+    "CASHEMERE2@15": {
+      "code": "813",
+      "name": "MDP CASHMERE (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 87.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "CASHEMERE@15": {
+      "code": "813",
+      "name": "MDP CASHMERE (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 87.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "CASHMERE RH@15": {
+      "code": "1337",
+      "name": "MDP RH CASHMERE (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 105.0,
+      "candidates": 1,
+      "source": "name"
+    },
+    "CASHMERE RH@36": {
+      "code": "2150",
+      "name": "MDP RH CASHMERE (2.80X2.05)M-36MM",
+      "width": 2050.0,
+      "height": 2800.0,
+      "thickness": 36.0,
+      "price": 168.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "CASHMERE SOBRA@15": {
+      "code": "813",
+      "name": "MDP CASHMERE (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 87.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "CASHMERE@15": {
+      "code": "813",
+      "name": "MDP CASHMERE (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 87.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "CASHMERE@36": {
+      "code": "2150",
+      "name": "MDP RH CASHMERE (2.80X2.05)M-36MM",
+      "width": 2050.0,
+      "height": 2800.0,
+      "thickness": 36.0,
+      "price": 168.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "CATANIA RH@15": {
+      "code": "2135",
+      "name": "DP RH MELA 2C CATANIA (2.44X2.15)M-15MM",
+      "width": 2150.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 118.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "CATANIA@15": {
+      "code": "2135",
+      "name": "DP RH MELA 2C CATANIA (2.44X2.15)M-15MM",
+      "width": 2150.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 118.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "CATANIA@36": {
+      "code": "2162",
+      "name": "DP RH MELA CATANIA (2.44X2.15)M-36MM",
+      "width": 2150.0,
+      "height": 2440.0,
+      "thickness": 36.0,
+      "price": 194.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "CEDRO RH@15": {
+      "code": "248",
+      "name": "MDP RH CEDRO (2.44X2.10)M-15MM",
+      "width": 2100.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 105.0,
+      "candidates": 1,
+      "source": "name"
+    },
+    "CEDRO@15": {
+      "code": "2053",
+      "name": "MDP CEDRO (2.44X2.15)M-15MM",
+      "width": 2150.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 87.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "CHANTILLI RH@15": {
+      "code": "2108",
+      "name": "MDP RH CHANTILLI (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 101.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "CHANTILLI RH@36": {
+      "code": "2266",
+      "name": "MDP RH CHANTILLI (2.80X2.07)M-36MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 36.0,
+      "price": 168.75,
+      "candidates": 1,
+      "source": "name"
+    },
+    "CHANTILLI@15": {
+      "code": "1390",
+      "name": "MDP CHANTILLI (2.44X2.15)M-15MM",
+      "width": 2150.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 87.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "CHANTILLY RH@15": {
+      "code": "2108",
+      "name": "MDP RH CHANTILLI (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 101.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "CHANTILLY@15": {
+      "code": "1390",
+      "name": "MDP CHANTILLI (2.44X2.15)M-15MM",
+      "width": 2150.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 87.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "CHANTILLY@36": {
+      "code": "2266",
+      "name": "MDP RH CHANTILLI (2.80X2.07)M-36MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 36.0,
+      "price": 168.75,
+      "candidates": 1,
+      "source": "name"
+    },
+    "COSTA EVOKE@15": {
+      "code": "1329",
+      "name": "MDP RH ROBLE COSTA EVOKE (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 105.0,
+      "candidates": 1,
+      "source": "name"
+    },
+    "COTTA CREMONA RH@15": {
+      "code": "2105",
+      "name": "MDP RH COTTA CREMONA (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 98.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "COTTA CREMONA RH@36": {
+      "code": "2194",
+      "name": "MDP RH COTTA CREMONA (2.80X2.07)M-36MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 36.0,
+      "price": 168.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "COTTA CREMONA@15": {
+      "code": "2105",
+      "name": "MDP RH COTTA CREMONA (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 98.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "COTTA CREMONA@36": {
+      "code": "2194",
+      "name": "MDP RH COTTA CREMONA (2.80X2.07)M-36MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 36.0,
+      "price": 168.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "CREMONA@15": {
+      "code": "2105",
+      "name": "MDP RH COTTA CREMONA (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 98.5,
+      "candidates": 3,
+      "source": "name"
+    },
+    "DORADO ARTESANAL@15": {
+      "code": "640",
+      "name": "MDP RH ROBLE ARTESANAL DORADO (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 105.0,
+      "candidates": 1,
+      "source": "name"
+    },
+    "DUNA@15": {
+      "code": "227",
+      "name": "PELIKANO RH DUNA (2.44X2.15)M-15MM",
+      "width": 2150.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 115.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "EVOKE RH@15": {
+      "code": "1329",
+      "name": "MDP RH ROBLE COSTA EVOKE (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 105.0,
+      "candidates": 1,
+      "source": "name"
+    },
+    "FUME RH@15": {
+      "code": "1036",
+      "name": "PELIKANO RH OLMO FUME (2.44X2.15)M-15MM",
+      "width": 2150.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 117.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "FUME@15": {
+      "code": "1036",
+      "name": "PELIKANO RH OLMO FUME (2.44X2.15)M-15MM",
+      "width": 2150.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 117.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "FUME@36": {
+      "code": "754",
+      "name": "PELIKANO RH OLMO FUME (2.44X2.15)M-36MM",
+      "width": 2150.0,
+      "height": 2440.0,
+      "thickness": 36.0,
+      "price": 172.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "GRIS RATON RH@15": {
+      "code": "1244",
+      "name": "MDP RH GRIS RATÓN (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 98.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "GRIS RATON SOBRA@15": {
+      "code": "1244",
+      "name": "MDP RH GRIS RATÓN (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 98.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "GRIS RATON@15": {
+      "code": "1244",
+      "name": "MDP RH GRIS RATÓN (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 98.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "HIGH GLOSS AMBAR@15": {
+      "code": "1291",
+      "name": "MDP RH ROBLE BARROCO AMBAR (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 105.0,
+      "candidates": 1,
+      "source": "name"
+    },
+    "HUMO RH@15": {
+      "code": "249",
+      "name": "MDP RH HUMO (2.44X2.10)M-15MM",
+      "width": 2100.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 96.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "HUMO@15": {
+      "code": "249",
+      "name": "MDP RH HUMO (2.44X2.10)M-15MM",
+      "width": 2100.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 96.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "IBIZA LINEAL@15": {
+      "code": "250",
+      "name": "MDP RH IBIZA LINEAL (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 98.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "IBIZA RH@15": {
+      "code": "1938",
+      "name": "MDP RH IBIZA (2.44X2.15)M-15MM",
+      "width": 2150.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 96.5,
+      "candidates": 3,
+      "source": "name"
+    },
+    "IBIZA RH@36": {
+      "code": "2256",
+      "name": "MDP RH IBIZA LINEAL (2.80X2.07)M-36MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 36.0,
+      "price": 168.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "IBIZA@15": {
+      "code": "715",
+      "name": "MDP IBIZA (2.44X2.10)M-15MM",
+      "width": 2100.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 87.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "IBIZA@36": {
+      "code": "2256",
+      "name": "MDP RH IBIZA LINEAL (2.80X2.07)M-36MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 36.0,
+      "price": 168.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "JAPANDI RH@15": {
+      "code": "2067",
+      "name": "MDP RH JAPANDI (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 105.0,
+      "candidates": 2,
+      "source": "name"
+    },
+    "JAPANDI RH@36": {
+      "code": "2243",
+      "name": "MDP RH JAPANDI (2.80X2.07)M-36MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 36.0,
+      "price": 168.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "JAPANDI@15": {
+      "code": "2334",
+      "name": "MDP JAPANDI (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 85.0,
+      "candidates": 2,
+      "source": "name"
+    },
+    "JAPANDI@36": {
+      "code": "2243",
+      "name": "MDP RH JAPANDI (2.80X2.07)M-36MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 36.0,
+      "price": 168.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "KRAFT@15": {
+      "code": "221",
+      "name": "PELIKANO RH NEGRO KRAFT (2.44X2.15)M-15MM",
+      "width": 2150.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 102.75,
+      "candidates": 2,
+      "source": "name"
+    },
+    "NACAR@15": {
+      "code": "1035",
+      "name": "PELIKANO RH SYNC. NOGAL NACAR (2.44X2.15)M-15MM",
+      "width": 2150.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 112.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "NEGRO KRAFT RH@15": {
+      "code": "221",
+      "name": "PELIKANO RH NEGRO KRAFT (2.44X2.15)M-15MM",
+      "width": 2150.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 102.75,
+      "candidates": 2,
+      "source": "name"
+    },
+    "NEGRO KRAFT@15": {
+      "code": "221",
+      "name": "PELIKANO RH NEGRO KRAFT (2.44X2.15)M-15MM",
+      "width": 2150.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 102.75,
+      "candidates": 2,
+      "source": "name"
+    },
+    "NEGRO RH@15": {
+      "code": "153",
+      "name": "MDP RH NEGRO (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 98.5,
+      "candidates": 6,
+      "source": "name"
+    },
+    "NEGRO RH@36": {
+      "code": "2241",
+      "name": "MDP RH NEGRO (2.80X2.07)M-36MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 36.0,
+      "price": 168.5,
+      "candidates": 2,
+      "source": "name"
+    },
+    "NEGRO@15": {
+      "code": "252",
+      "name": "MDP NEGRO (2.44X2.10)M-15MM",
+      "width": 2100.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 82.14,
+      "candidates": 3,
+      "source": "name"
+    },
+    "NIEBLA@15": {
+      "code": "31",
+      "name": "PELIKANO RH PORO NIEBLA (2.44X2.15)M-15MM",
+      "width": 2150.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 116.0,
+      "candidates": 1,
+      "source": "name"
+    },
+    "PANELA RH@15": {
+      "code": "713",
+      "name": "PELIKANO RH OLMO PANELA (2.44X2.15)M-15MM",
+      "width": 2150.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 102.75,
+      "candidates": 1,
+      "source": "name"
+    },
+    "PANELA@15": {
+      "code": "713",
+      "name": "PELIKANO RH OLMO PANELA (2.44X2.15)M-15MM",
+      "width": 2150.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 102.75,
+      "candidates": 1,
+      "source": "name"
+    },
+    "PANELA@36": {
+      "code": "714",
+      "name": "PELIKANO RH OLMO PANELA (2.44X2.15)M-36MM",
+      "width": 2150.0,
+      "height": 2440.0,
+      "thickness": 36.0,
+      "price": 168.75,
+      "candidates": 1,
+      "source": "name"
+    },
+    "PINO@15": {
+      "code": "2169",
+      "name": "PINO NATURAL (2.40X1.20)M-15MM",
+      "width": 1200.0,
+      "height": 2400.0,
+      "thickness": 15.0,
+      "price": 65.0,
+      "candidates": 1,
+      "source": "name"
+    },
+    "PLYWOD@15": {
+      "code": "302",
+      "name": "PLYWOOD OLMO (2.44X1.22)M-15MM",
+      "width": 1220.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 44.92,
+      "candidates": 4,
+      "source": "name"
+    },
+    "PLYWOOD@12": {
+      "code": "297",
+      "name": "PLYWOOD OLMO (2.44X1.22)M-12MM",
+      "width": 1220.0,
+      "height": 2440.0,
+      "thickness": 12.0,
+      "price": 35.89,
+      "candidates": 3,
+      "source": "name"
+    },
+    "PLYWOOD@15": {
+      "code": "302",
+      "name": "PLYWOOD OLMO (2.44X1.22)M-15MM",
+      "width": 1220.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 44.92,
+      "candidates": 4,
+      "source": "name"
+    },
+    "PLYWOOD@4": {
+      "code": "2116",
+      "name": "PLYWOOD SM B/C (2.44X1.22)M-4MM",
+      "width": 1220.0,
+      "height": 2440.0,
+      "thickness": 4.0,
+      "price": 13.0,
+      "candidates": 3,
+      "source": "name"
+    },
+    "PLYWOOD@5": {
+      "code": "1033",
+      "name": "PLYWOOD ESTÁNDAR (2.44X1.22)M-5MM",
+      "width": 1220.0,
+      "height": 2440.0,
+      "thickness": 5.0,
+      "price": 16.85,
+      "candidates": 1,
+      "source": "name"
+    },
+    "PLYWOOD@6": {
+      "code": "2117",
+      "name": "PLYWOOD SM B/C (2.44X1.22)M-6MM",
+      "width": 1220.0,
+      "height": 2440.0,
+      "thickness": 6.0,
+      "price": 17.75,
+      "candidates": 3,
+      "source": "name"
+    },
+    "PLYWOOD@8": {
+      "code": "2118",
+      "name": "PLYWOOD SM B/C (2.44X1.22)M-8MM",
+      "width": 1220.0,
+      "height": 2440.0,
+      "thickness": 8.0,
+      "price": 24.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "PLYWOOD@9": {
+      "code": "300",
+      "name": "PLYWOOD OLMO (2.44X1.22)M-9MM",
+      "width": 1220.0,
+      "height": 2440.0,
+      "thickness": 9.0,
+      "price": 30.29,
+      "candidates": 2,
+      "source": "name"
+    },
+    "R COSTA EVOKE@15": {
+      "code": "1329",
+      "name": "MDP RH ROBLE COSTA EVOKE (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 105.0,
+      "candidates": 1,
+      "source": "name"
+    },
+    "RISTRETO RH@15": {
+      "code": "1293",
+      "name": "MDP RH ROBLE BARROCO RISTRETTO (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 105.0,
+      "candidates": 1,
+      "source": "name"
+    },
+    "RISTRETO RH@36": {
+      "code": "1300",
+      "name": "MDP RH ROBLE BARROCO RISTRETTO (2.80X2.07)M-36MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 36.0,
+      "price": 168.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "RISTRETO@15": {
+      "code": "2137",
+      "name": "MDP ROBLE BARROCO RISTRETTO (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 87.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "RISTRETTO NORMAL@15": {
+      "code": "2137",
+      "name": "MDP ROBLE BARROCO RISTRETTO (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 87.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "RISTRETTO RH T@15": {
+      "code": "1293",
+      "name": "MDP RH ROBLE BARROCO RISTRETTO (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 105.0,
+      "candidates": 1,
+      "source": "name"
+    },
+    "RISTRETTO RH@15": {
+      "code": "1293",
+      "name": "MDP RH ROBLE BARROCO RISTRETTO (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 105.0,
+      "candidates": 1,
+      "source": "name"
+    },
+    "RISTRETTO RH@36": {
+      "code": "1300",
+      "name": "MDP RH ROBLE BARROCO RISTRETTO (2.80X2.07)M-36MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 36.0,
+      "price": 168.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "RISTRETTO@15": {
+      "code": "2137",
+      "name": "MDP ROBLE BARROCO RISTRETTO (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 87.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "RISTRETTO@36": {
+      "code": "1300",
+      "name": "MDP RH ROBLE BARROCO RISTRETTO (2.80X2.07)M-36MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 36.0,
+      "price": 168.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "RISTRRETTO@15": {
+      "code": "2137",
+      "name": "MDP ROBLE BARROCO RISTRETTO (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 87.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "RISTTRETTO RH@15": {
+      "code": "1293",
+      "name": "MDP RH ROBLE BARROCO RISTRETTO (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 105.0,
+      "candidates": 1,
+      "source": "name"
+    },
+    "RISTTRETTO RH@36": {
+      "code": "1300",
+      "name": "MDP RH ROBLE BARROCO RISTRETTO (2.80X2.07)M-36MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 36.0,
+      "price": 168.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "RISTTRETTO@15": {
+      "code": "2137",
+      "name": "MDP ROBLE BARROCO RISTRETTO (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 87.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "RISTTRETTO@36": {
+      "code": "1300",
+      "name": "MDP RH ROBLE BARROCO RISTRETTO (2.80X2.07)M-36MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 36.0,
+      "price": 168.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "ROBLE AMBAR RH@15": {
+      "code": "1291",
+      "name": "MDP RH ROBLE BARROCO AMBAR (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 105.0,
+      "candidates": 1,
+      "source": "name"
+    },
+    "ROBLE AMBAR RH@36": {
+      "code": "1319",
+      "name": "MDP RH ROBLE BARROCO AMBAR (2.80X2.07)M-36MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 36.0,
+      "price": 168.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "ROBLE AMBAR@15": {
+      "code": "1291",
+      "name": "MDP RH ROBLE BARROCO AMBAR (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 105.0,
+      "candidates": 1,
+      "source": "name"
+    },
+    "ROBLE BARROCO AMBAR@15": {
+      "code": "1291",
+      "name": "MDP RH ROBLE BARROCO AMBAR (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 105.0,
+      "candidates": 1,
+      "source": "name"
+    },
+    "ROBLE COSTA EVOKE@15": {
+      "code": "1329",
+      "name": "MDP RH ROBLE COSTA EVOKE (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 105.0,
+      "candidates": 1,
+      "source": "name"
+    },
+    "ROBLE EVOKE@15": {
+      "code": "1329",
+      "name": "MDP RH ROBLE COSTA EVOKE (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 105.0,
+      "candidates": 1,
+      "source": "name"
+    },
+    "ROBLE RISTRETTO@15": {
+      "code": "2137",
+      "name": "MDP ROBLE BARROCO RISTRETTO (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 87.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "SBRA EVOKE@15": {
+      "code": "1329",
+      "name": "MDP RH ROBLE COSTA EVOKE (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 105.0,
+      "candidates": 1,
+      "source": "name"
+    },
+    "SOBRA AMARETTO@15": {
+      "code": "1214",
+      "name": "MDP AMARETTO MATE (2.75X1.85)M-15MM",
+      "width": 1850.0,
+      "height": 2750.0,
+      "thickness": 15.0,
+      "price": 92.75,
+      "candidates": 1,
+      "source": "name"
+    },
+    "SOBRA AMBAR@15": {
+      "code": "1291",
+      "name": "MDP RH ROBLE BARROCO AMBAR (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 105.0,
+      "candidates": 1,
+      "source": "name"
+    },
+    "SOBRA AMBAR@36": {
+      "code": "1319",
+      "name": "MDP RH ROBLE BARROCO AMBAR (2.80X2.07)M-36MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 36.0,
+      "price": 168.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "SOBRA BRUNE@15": {
+      "code": "2134",
+      "name": "DP RH MELA 2C BRUNE (2.44X2.15)M-15MM",
+      "width": 2150.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 105.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "SOBRA CASHMERE@15": {
+      "code": "813",
+      "name": "MDP CASHMERE (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 87.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "SOBRA CATANIA@15": {
+      "code": "2135",
+      "name": "DP RH MELA 2C CATANIA (2.44X2.15)M-15MM",
+      "width": 2150.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 118.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "SOBRA FUME@15": {
+      "code": "1036",
+      "name": "PELIKANO RH OLMO FUME (2.44X2.15)M-15MM",
+      "width": 2150.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 117.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "TAUPE@15": {
+      "code": "2111",
+      "name": "PELIKANO RH MATE TAUPE (2.44X2.15)M-15MM",
+      "width": 2150.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 118.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "TIVOLI@15": {
+      "code": "597",
+      "name": "PELIKANO RH CUERO TIVOLI (2.44X2.15)M-15MM",
+      "width": 2150.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 91.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "TOQUILLA@15": {
+      "code": "782",
+      "name": "PELIKANO CUERO TOQUILLA (2.44X2.15)M-15MM",
+      "width": 2150.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 80.0,
+      "candidates": 1,
+      "source": "name"
+    },
+    "TORRO CREMONA@15": {
+      "code": "2106",
+      "name": "MDP RH TORRO CREMONA (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 98.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "TORRO RH@15": {
+      "code": "2106",
+      "name": "MDP RH TORRO CREMONA (2.80X2.07)M-15MM",
+      "width": 2070.0,
+      "height": 2800.0,
+      "thickness": 15.0,
+      "price": 98.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "VERDE SILVESTRE@15": {
+      "code": "2141",
+      "name": "MDP RH MELA 2C VERDE SILVESTRE (2.18X2.15)M-15MM",
+      "width": 2150.0,
+      "height": 2180.0,
+      "thickness": 15.0,
+      "price": 118.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "VIENES NORMAL@15": {
+      "code": "1937",
+      "name": "MDP VIENES (2.44X2.15)M-15MM",
+      "width": 2150.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 87.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "VIENES RH@15": {
+      "code": "254",
+      "name": "MDP RH VIENES (2.44X2.10)M-15MM",
+      "width": 2100.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 96.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "VIENES@15": {
+      "code": "1937",
+      "name": "MDP VIENES (2.44X2.15)M-15MM",
+      "width": 2150.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 87.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "VISON RH@15": {
+      "code": "2143",
+      "name": "MDP RH MELA 2C VISÓN (2.18X2.15)M-15MM",
+      "width": 2150.0,
+      "height": 2180.0,
+      "thickness": 15.0,
+      "price": 105.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "VISON RH@36": {
+      "code": "2142",
+      "name": "MDP RH MELA 2C VISÓN (2.18X2.15)M-36MM",
+      "width": 2150.0,
+      "height": 2180.0,
+      "thickness": 36.0,
+      "price": 176.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "WENGUE NORMAL@15": {
+      "code": "2055",
+      "name": "MDP WENGUE (2.44X2.10)M-15MM",
+      "width": 2100.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 87.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "WENGUE RH@15": {
+      "code": "239",
+      "name": "MDP RH WENGUE (2.44X2.10)M-15MM",
+      "width": 2100.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 96.5,
+      "candidates": 1,
+      "source": "name"
+    },
+    "WENGUE@15": {
+      "code": "2055",
+      "name": "MDP WENGUE (2.44X2.10)M-15MM",
+      "width": 2100.0,
+      "height": 2440.0,
+      "thickness": 15.0,
+      "price": 87.5,
+      "candidates": 1,
+      "source": "name"
+    }
+  }
+}

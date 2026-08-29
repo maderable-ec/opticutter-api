@@ -75,9 +75,14 @@ from src.cutting.parameters import CuttingParameters
 # its maximizing entry gets its own small work budget
 # (``ExactConfig.root_deterministic_time``) and stops being consulted after
 # ``root_patience`` fruitless LNS rounds, which changes which opening board the
-# beam is seeded with on tight pools. Also bump this when the pinned ortools
-# version moves, since a solver upgrade can return a different solution.
-ENGINE_VERSION = 6
+# beam is seeded with on tight pools; 8 = the relaxed-kerf repair
+# (``_REPAIR_FILL_GATE``) re-partitions plans that close on a nearly empty
+# sheet; 7 = the solver's call allowance drops from
+# 40 to 20 (``ExactConfig.max_calls``), which changes the layout of any pool that
+# used to ask more than twenty times -- the bill is identical on all 584 real
+# pools, the geometry is not. Also bump this when the pinned ortools version
+# moves, since a solver upgrade can return a different solution.
+ENGINE_VERSION = 8
 
 # A half bin is only worth opening near the end of a job: gate it by remaining
 # area so early states don't waste decodes on fills the cost objective would
@@ -105,6 +110,39 @@ _RESTART_PATIENCE = 2
 # solver-seeded opening is kept because it demonstrably *does* still win boards
 # at this stage (a 62-piece pool that ends at 3 boards instead of 4).
 _RESTART_FLAVORS = (True,)
+
+# --- Relaxed-kerf repair ----------------------------------------------------
+#
+# The beam can open with a board so dense that the tail it strands no longer
+# recomposes, and it then closes on a nearly empty sheet. The partition that
+# would have worked is *even* rather than front-loaded, so its opening board
+# ranks worse and gets evicted long before the cost of that choice is visible.
+# LNS does not save it: on the case that motivated this (pre-order 3's white
+# pool, pinned in ``tests/unit/test_cutting_search.py``) no ruin of two or three
+# bins reaches the answer, and neither does 6x the budget, 8 variants or CP-SAT
+# unmetered.
+#
+# What does reach it is solving a RELAXATION and repairing it. A thinner blade
+# is a true relaxation -- every plan feasible at kerf k is feasible at kerf
+# k - d -- so the relaxed search explores partitions this one evicts. Its answer
+# is only a *hint*: it may not be cuttable at the real kerf, so every board is
+# re-packed at the real kerf before the plan is adopted, and the repair is
+# dropped whole if any board fails. That re-validation is what keeps the result
+# honest; without it this would emit layouts the saw cannot cut.
+#
+# It is GATED because it is not free: it costs one extra search plus one
+# single-board re-pack per sheet. Measured over the shop's 584-pool corpus, the
+# repair wins 2 boards of 1528.5, and firing it on every pool costs 2.6x the
+# engine. The gate is the symptom itself -- a plan that ends on a sheet filled
+# below ``_REPAIR_FILL_GATE`` -- which fires on 12% of pools (19% of the CPU,
+# they are the expensive ones) and catches all four wins. Denis took that trade
+# on 2026-08-29 knowing the shape of it: +30% engine time for ~1 board in 760.
+#
+# Both numbers are load-bearing. At a 20% gate the cost halves but two of the
+# four wins are lost; the delta of 1mm is what the four winning pools needed
+# (three at -1mm, one at -2mm), and -2mm alone finds fewer.
+_REPAIR_FILL_GATE = 0.30
+_REPAIR_KERF_DELTAS = (1.0, 2.0)
 
 _LEGACY_CONFIG = {
     PackingStrategy.MAX_EFFICIENCY: GreedyConfig(
@@ -196,7 +234,21 @@ class ExactConfig:
 
     enabled: bool = True
     max_pieces: int = 120
-    max_calls: int = 40
+    # 20, not 40, and the corpus is what set it. Over the shop's 584 real pools
+    # the solver is **84% of the engine's CPU** (1716s of it; 271s with
+    # ``enabled=False``) and buys **10 boards** -- 145 seconds per board. The
+    # allowance is where that curve bends: 40 -> 20 bills the identical
+    # 1528.5 boards with no job worse, for 18% less CPU, and halves the tail
+    # that the seller actually feels (worst pool 62.6s -> 30.1s, p99 36.0s ->
+    # 20.7s). Below that it starts costing material: 10 calls is -40% CPU for
+    # +2 boards, 5 calls -45% for +3. The wins come from the early cheap asks
+    # (the half-board downgrade closing a board on a pool that packs in under a
+    # second); what 21..40 buys is LNS re-asking a neighborhood it has already
+    # exhausted. Note ``max_pieces`` gates the **sub-pool**, not the job, so a
+    # 348-piece export still reaches the solver through its LNS neighborhoods --
+    # which is why the allowance, and not the piece cap, is the knob that bounds
+    # the worst case.
+    max_calls: int = 20
     deterministic_time: float = 6.0
     # Budget of the maximizing entry (``exact_best_fill``) alone. See above: it
     # buys a marginally denser opening board, never a proof.
@@ -1049,6 +1101,148 @@ def _sequential_fill(
     return fills, remaining
 
 
+def _to_layouts(fills: Sequence[BinFill]) -> List[CuttingLayout]:
+    """Materializes fills as numbered layouts, in opening order."""
+    return [
+        CuttingLayout(
+            material=fill.spec.to_material(),
+            placed_pieces=fill.placed,
+            remainders=fill.remainders,
+            sheet_number=i + 1,
+            cuts=fill.cuts,
+        )
+        for i, fill in enumerate(fills)
+    ]
+
+
+def _plan_cost(layouts: Sequence[CuttingLayout]) -> float:
+    return sum(layout.material.cost_per_unit for layout in layouts)
+
+
+def _emptiest_sheet(layouts: Sequence[CuttingLayout]) -> float:
+    """Fill of the least-used sheet -- the symptom the repair reacts to."""
+    return min(
+        (
+            layout.used_area / layout.material.area
+            for layout in layouts
+            if layout.material.area > 0
+        ),
+        default=1.0,
+    )
+
+
+def _recut(
+    hint: Sequence[CuttingLayout],
+    params: CuttingParameters,
+    *,
+    budget: SearchBudget,
+    min_rect_size: float,
+    exact_config: ExactConfig,
+) -> Optional[List[CuttingLayout]]:
+    """Re-packs every board of a relaxed plan at the REAL parameters.
+
+    All or nothing, and each board into a sheet of exactly the kind the hint
+    used: a half that no longer closes must never be quietly promoted to a full
+    one, or the repair would return a plan costing more than it claims. Returns
+    ``None`` the moment one board fails, because a partition is only a
+    certificate if every part of it is.
+    """
+    rebuilt: List[CuttingLayout] = []
+    for layout in hint:
+        spec = BinSpec(
+            key=layout.material.id,
+            width=layout.material.width,
+            height=layout.material.height,
+            thickness=layout.material.thickness,
+            cost_per_unit=layout.material.cost_per_unit,
+            half_board=layout.material.half_board,
+        )
+        group = [placed.piece for placed in layout.placed_pieces]
+        packed, spilled = optimize_bins(
+            group,
+            [spec],
+            cutting_params=params,
+            budget=SearchBudget.scaled(
+                len(group),
+                tries_per_board=budget.tries_per_board,
+                iterations=budget.iterations,
+            ),
+            min_rect_size=min_rect_size,
+            exact_config=exact_config,
+            _repair=False,
+        )
+        if spilled or len(packed) != 1:
+            return None
+        rebuilt.append(packed[0])
+    return [
+        CuttingLayout(
+            material=layout.material,
+            placed_pieces=layout.placed_pieces,
+            remainders=layout.remainders,
+            sheet_number=i + 1,
+            cuts=layout.cuts,
+        )
+        for i, layout in enumerate(rebuilt)
+    ]
+
+
+def _relaxed_kerf_repair(
+    pieces: List[Piece],
+    bins: List[BinSpec],
+    params: CuttingParameters,
+    incumbent: Sequence[CuttingLayout],
+    *,
+    budget: SearchBudget,
+    seed: int,
+    min_rect_size: float,
+    max_sheets: int,
+    exact_config: ExactConfig,
+) -> Optional[List[CuttingLayout]]:
+    """Solve a thinner-blade relaxation, then re-cut it at the real blade.
+
+    Returns a cheaper, fully re-validated plan, or ``None`` to keep the
+    incumbent. See ``_REPAIR_FILL_GATE`` for why this is gated and what it buys.
+    """
+    if _emptiest_sheet(incumbent) >= _REPAIR_FILL_GATE:
+        return None
+    target = _plan_cost(incumbent)
+    for delta in _REPAIR_KERF_DELTAS:
+        if params.kerf - delta < 0:
+            continue
+        relaxed = CuttingParameters(
+            kerf=params.kerf - delta,
+            top_trim=params.top_trim,
+            bottom_trim=params.bottom_trim,
+            left_trim=params.left_trim,
+            right_trim=params.right_trim,
+        )
+        hint, spilled = optimize_bins(
+            pieces,
+            bins,
+            cutting_params=relaxed,
+            budget=budget,
+            seed=seed,
+            min_rect_size=min_rect_size,
+            max_sheets=max_sheets,
+            exact_config=exact_config,
+            _repair=False,
+        )
+        # A relaxation that strands a piece says nothing, and one that does not
+        # beat the incumbent is not worth re-cutting.
+        if spilled or _plan_cost(hint) >= target - 1e-6:
+            continue
+        rebuilt = _recut(
+            hint,
+            params,
+            budget=budget,
+            min_rect_size=min_rect_size,
+            exact_config=exact_config,
+        )
+        if rebuilt is not None:
+            return rebuilt
+    return None
+
+
 def optimize_bins(
     pieces: List[Piece],
     bins: List[BinSpec],
@@ -1059,12 +1253,17 @@ def optimize_bins(
     min_rect_size: float = 0.1,
     max_sheets: int = 100,
     exact_config: ExactConfig = None,
+    _repair: bool = True,
 ) -> Tuple[List[CuttingLayout], List[Piece]]:
     """Packs ``pieces`` into the cheapest set of bins drawn from ``bins``.
 
     Returns ``(layouts, unplaced)``; ``unplaced`` holds pieces that fit no bin
     at all (same silent contract as the legacy multi-sheet optimizer). Layouts
     are numbered sequentially in opening order.
+
+    ``_repair`` is private and exists only so the relaxed-kerf repair can call
+    back in without recursing: the relaxed pass and each single-board
+    re-validation run with it off.
     """
     if not pieces or not bins:
         return [], []
@@ -1197,16 +1396,23 @@ def optimize_bins(
     if solution is None:
         return [], unplaced
 
-    layouts = [
-        CuttingLayout(
-            material=fill.spec.to_material(),
-            placed_pieces=fill.placed,
-            remainders=fill.remainders,
-            sheet_number=i + 1,
-            cuts=fill.cuts,
+    layouts = _to_layouts(solution.fills)
+
+    if _repair and placeable and strategy == PackingStrategy.MAX_EFFICIENCY:
+        repaired = _relaxed_kerf_repair(
+            placeable,
+            bins,
+            params,
+            layouts,
+            budget=budget,
+            seed=seed,
+            min_rect_size=min_rect_size,
+            max_sheets=max_sheets,
+            exact_config=exact_config,
         )
-        for i, fill in enumerate(solution.fills)
-    ]
+        if repaired is not None:
+            layouts = repaired
+
     return layouts, unplaced + solution.unplaced
 
 

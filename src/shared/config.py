@@ -163,7 +163,7 @@ class Config:
     # OPT_EXACT_ENABLED=false falls back to the pure-heuristic search.
     OPT_EXACT_ENABLED = env.bool("OPT_EXACT_ENABLED", True)
     OPT_EXACT_MAX_PIECES = env.int("OPT_EXACT_MAX_PIECES", 120)
-    OPT_EXACT_MAX_CALLS = env.int("OPT_EXACT_MAX_CALLS", 40)
+    OPT_EXACT_MAX_CALLS = env.int("OPT_EXACT_MAX_CALLS", 20)
     OPT_EXACT_DETERMINISTIC_TIME = env.float("OPT_EXACT_DETERMINISTIC_TIME", 6.0)
     # The maximizing entry ("give me the densest opening board") gets its own,
     # much smaller allowance: unlike the feasibility one it never terminates on a
