@@ -27,9 +27,12 @@ from src.shared.responses import (
 
 router = APIRouter(prefix="/products", tags=["products"], responses=ERROR_RESPONSES)
 
-# Catalog read: admin + vendedor. Write: admin only.
+# Catalog read: admin + vendedor. Write: admin only. The sync sits in between
+# (admin + vendedor): pulling fresh prices is part of quoting, editing the
+# catalog is not.
 _READ = Depends(require_permission("products:read"))
 _WRITE = Depends(require_permission("products:write"))
+_SYNC = Depends(require_permission("products:sync"))
 
 
 @router.post(
@@ -46,7 +49,7 @@ def create_product(data: ProductCreate, svc: ProductService = Depends(product_se
 @router.post(
     "/sync",
     response_model=DataResponse[ProductSyncResult],
-    dependencies=[_WRITE],
+    dependencies=[_SYNC],
 )
 def sync_products_catalog(
     dry_run: bool = Query(

@@ -37,10 +37,11 @@ class OrderCreate(CamelModel):
         default=None,
         description="Owning branch (inherited from the pre-order on confirmation)",
     )
-    price_tier_code: Optional[str] = Field(
-        default="consumidor",
-        max_length=32,
-        description="Price tier to freeze: consumidor (0%)|carpintero (2%)|efectivo (5%)",
+    price_level: int = Field(
+        default=1,
+        ge=1,
+        le=3,
+        description="Catalog price level to bill the marked boards at (1 = list)",
     )
     strategy: OptimizationStrategy = Field(
         default=OptimizationStrategy.default,
@@ -137,11 +138,13 @@ class OrderExportResponse(CamelModel):
     currency: str
     client: ClientResponse
     lines: List[OrderExportLine]
-    subtotal: float = Field(..., description="Sum at list price (before the discount)")
-    price_tier_code: Optional[str] = None
-    discount_rate: float = Field(default=0.0, description="Frozen discount (0.02 = 2%)")
-    discount_amount: float = Field(default=0.0)
-    total: float = Field(..., description="Subtotal minus the discount")
+    subtotal: float = Field(
+        ..., description="Net sum of the lines (boards + edge banding + services)"
+    )
+    price_level: int = Field(default=1, description="Frozen catalog price level")
+    tax_rate: float = Field(default=0.0, description="Frozen tax rate (0.15 = 15%)")
+    tax_amount: float = Field(default=0.0)
+    total: float = Field(..., description="Subtotal plus tax")
     external_invoice_id: Optional[str] = None
 
 
@@ -207,18 +210,20 @@ class OrderResponse(CamelModel):
     branch: BranchRefResponse = Field(..., description="Owning branch")
     status: OrderStatus
     currency: str
-    subtotal: float = Field(..., description="Sum at list price (before the discount)")
-    price_tier_code: str = Field(default="consumidor")
-    discount_rate: float = Field(default=0.0, description="Frozen discount (0.02 = 2%)")
-    discount_amount: float = Field(default=0.0)
+    subtotal: float = Field(
+        ..., description="Net sum (boards + edge banding + services)"
+    )
+    price_level: int = Field(default=1, description="Frozen catalog price level")
+    tax_rate: float = Field(default=0.0, description="Frozen tax rate (0.15 = 15%)")
+    tax_amount: float = Field(default=0.0)
     additional_services: List[AdditionalServiceLine] = Field(
-        default_factory=list, description="Frozen additional-service lines"
+        default_factory=list,
+        description="Frozen additional-service lines (unit price tax-included)",
     )
     additional_services_total: float = Field(
-        default=0.0,
-        description="Frozen sum of additional services (after the discount)",
+        default=0.0, description="Frozen NET sum of the additional services"
     )
-    total: float = Field(..., description="Subtotal minus discount plus services")
+    total: float = Field(..., description="Subtotal plus tax")
     total_boards_used: int
     optimization_hash: str
     external_invoice_id: Optional[str] = None

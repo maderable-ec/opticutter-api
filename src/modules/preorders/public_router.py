@@ -127,8 +127,8 @@ def _to_review_response(
 ) -> ReviewPreOrderResponse:
     """Sanitized projection of the pre-order + its recomputed optimization.
 
-    Lines are shown at list price; the price tier discount is a single
-    document-level adjustment (``pricing``).
+    Lines are already at the price level the seller chose (the boards they
+    marked); the tax is the single document-level addition (``pricing``).
     """
     client = preorder.client
     client_name = (
@@ -183,10 +183,10 @@ def _to_review_response(
         client_name=client_name,
         currency="USD",
         subtotal=pricing["subtotal"],
-        price_tier_name=pricing.get("price_tier_name"),
-        discount_rate=pricing.get("discount_rate", 0.0),
-        discount_amount=pricing.get("discount_amount", 0.0),
+        price_level_name=pricing.get("price_level_name"),
         services_total=pricing.get("services_total", 0.0),
+        tax_rate=pricing.get("tax_rate", 0.0),
+        tax_amount=pricing.get("tax_amount", 0.0),
         total=pricing["total"],
         total_boards_used=payload.get("total_boards_used", 0),
         total_pieces=sum(p.quantity for p in pieces),

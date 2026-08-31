@@ -146,14 +146,13 @@ class OrderModel(TimestampMixin, AuditMixin, Base):
         Index("ix_orders_client_id", "client_id"),
         CheckConstraint("subtotal >= 0", name="subtotal_non_negative"),
         CheckConstraint("total >= 0", name="total_non_negative"),
-        CheckConstraint("discount_amount >= 0", name="discount_amount_non_negative"),
         CheckConstraint(
             "additional_services_total >= 0",
             name="additional_services_total_non_negative",
         ),
-        CheckConstraint(
-            "discount_rate >= 0 AND discount_rate <= 1", name="discount_rate_ratio"
-        ),
+        CheckConstraint("tax_amount >= 0", name="tax_amount_non_negative"),
+        CheckConstraint("tax_rate >= 0 AND tax_rate <= 1", name="tax_rate_ratio"),
+        CheckConstraint("price_level BETWEEN 1 AND 3", name="price_level_in_range"),
         CheckConstraint("payment_cash_amount >= 0", name="payment_cash_non_negative"),
         CheckConstraint(
             "payment_credit_amount >= 0", name="payment_credit_non_negative"
@@ -175,20 +174,22 @@ class OrderModel(TimestampMixin, AuditMixin, Base):
     optimization_hash: Mapped[str] = mapped_column(String(64))
 
     currency: Mapped[str] = mapped_column(String(8), default="USD")
-    # subtotal = sum at list price (boards + edge banding); total = subtotal minus
-    # the discount of the frozen price tier (price_tier_code/discount_rate). The
-    # rate is frozen here to preserve history even if rates change later.
+    # subtotal = NET sum of everything the document prints (boards + edge
+    # banding + services); total = subtotal + tax_amount. The catalog's price
+    # level chosen when quoting is already baked into the line prices, so it is
+    # frozen here only for the record. The tax rate is frozen with it: the rate
+    # changes by law, and a document already issued must keep the one it was
+    # billed at.
     subtotal: Mapped[float] = mapped_column(Float)
     total: Mapped[float] = mapped_column(Float)
-    price_tier_code: Mapped[str] = mapped_column(
-        String(32), default="consumidor", server_default="consumidor"
+    price_level: Mapped[int] = mapped_column(
+        Integer, default=1, server_default="1", nullable=False
     )
-    discount_rate: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
-    discount_amount: Mapped[float] = mapped_column(
-        Float, default=0.0, server_default="0"
-    )
-    # Frozen sum of additional services (billed on top, after the discount). The
-    # per-line breakdown lives in ``optimization_snapshot["additional_services"]``.
+    tax_rate: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
+    tax_amount: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
+    # Frozen NET sum of additional services (registered tax-included, stored net
+    # so it adds up to ``subtotal``). The per-line breakdown lives in
+    # ``optimization_snapshot["additional_services"]``.
     additional_services_total: Mapped[float] = mapped_column(
         Float, default=0.0, server_default="0"
     )

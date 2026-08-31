@@ -169,6 +169,9 @@ class OrderService(BranchScopedMixin):
             materials=data.materials,
             requirements=data.requirements,
             client_id=data.client_id,
+            # Carried so ``compute`` re-prices the marked boards at this level
+            # before the snapshot is frozen; it does not touch the hash.
+            price_level=data.price_level,
             strategy=data.strategy,
             variant=data.variant,
         )
@@ -178,45 +181,40 @@ class OrderService(BranchScopedMixin):
         # frozen as-is from the snapshot. Their lines/pieces end up with a null
         # ``product_id`` and are identified by ``product_code``/``product_name``.
 
-        # Additional services (billed on top of the total, after the discount).
-        # Not cut geometry: they aren't in the hash, so like the tier they factor
-        # into dedupe (two identical cuts differing only in services aren't the
-        # same order).
+        # Additional services (billed on top, tax-included as staff registers
+        # them). Not cut geometry: they aren't in the hash, so they factor into
+        # dedupe (two identical cuts differing only in services aren't the same
+        # order).
         additional_services = [
             s.model_dump(mode="json") for s in data.additional_services
         ]
-        # Price tier: validated and its rate frozen (historical audit). The
-        # discount factors into dedupe because two orders that are geometrically
-        # identical but at a different tier are NOT the same order (the tier
-        # isn't part of the hash).
-        tier = self.settings_service.resolve_price_tier(data.price_tier_code)
+        # The tax rate is read now and frozen with the order: raising it later
+        # must never rewrite a document already issued.
         pricing = build_pricing(
             payload,
-            tier,
+            data.price_level,
             additional_services,
-            opt_request.discounted_material_keys,
+            self.settings_service.get_tax_rate(),
         )
-        # The per-board discount selection isn't in the hash either (same reason as
-        # the tier), so it joins the dedupe key: two orders with the same cuts and
-        # tier but a different set of discounted boards are NOT the same order.
-        # The subtotal joins it for the same reason: `wholeBoard` reshapes the
-        # cached plan without touching the hash, and a promoted half board shows
-        # up only there.
+        # Everything commercial happens outside the hash — the price level, the
+        # per-board marks, `wholeBoard`, the services — and every one of them
+        # lands in ``subtotal``, so that single number is what tells two
+        # otherwise-identical cut plans apart. ``total`` joins it to catch a
+        # change in the tax rate, which moves nothing else.
         existing = self._find_active_duplicate(
             branch_id,
             data.client_id,
             optimization_hash,
-            tier["code"],
             pricing["services_total"],
-            pricing["discount_amount"],
             pricing["subtotal"],
+            pricing["total"],
         )
         if existing is not None:
             return existing
 
-        # Document-level discount (catalog boards only) + services. Lines are frozen
-        # at list price; the snapshot embeds `pricing` and the service breakdown so
-        # it's self-contained.
+        # Lines are frozen at the level's prices (``compute`` already applied
+        # them); the snapshot embeds `pricing` and the service breakdown so it's
+        # self-contained.
         snapshot = {
             **payload,
             "pricing": pricing,
@@ -242,9 +240,9 @@ class OrderService(BranchScopedMixin):
             currency="USD",
             subtotal=pricing["subtotal"],
             total=pricing["total"],
-            price_tier_code=tier["code"],
-            discount_rate=tier["rate"],
-            discount_amount=pricing["discount_amount"],
+            price_level=pricing["price_level"],
+            tax_rate=pricing["tax_rate"],
+            tax_amount=pricing["tax_amount"],
             additional_services_total=pricing["services_total"],
             total_boards_used=payload["total_boards_used"],
             source=data.source,
@@ -708,16 +706,15 @@ class OrderService(BranchScopedMixin):
         if target == order.branch_id:
             return order  # idempotent: same branch, no-op
         # Invariant: a single active identical order per branch. The order's own
-        # frozen values complete the dedupe key (services + discount + subtotal),
+        # frozen values complete the dedupe key (services + subtotal + total),
         # so moving it only collides with an order that really is the same bill.
         dup = self._find_active_duplicate(
             target,
             order.client_id,
             order.optimization_hash,
-            order.price_tier_code,
             order.additional_services_total or 0.0,
-            order.discount_amount or 0.0,
             order.subtotal or 0.0,
+            order.total or 0.0,
         )
         if dup is not None and dup.id != order.id:
             raise ConflictError(
@@ -768,9 +765,9 @@ class OrderService(BranchScopedMixin):
             client=order.client,
             lines=lines,
             subtotal=order.subtotal,
-            price_tier_code=order.price_tier_code,
-            discount_rate=order.discount_rate,
-            discount_amount=order.discount_amount,
+            price_level=order.price_level,
+            tax_rate=order.tax_rate,
+            tax_amount=order.tax_amount,
             total=order.total,
             external_invoice_id=order.external_invoice_id,
         )
@@ -780,23 +777,22 @@ class OrderService(BranchScopedMixin):
         branch_id: int,
         client_id: int,
         optimization_hash: str,
-        price_tier_code: str,
         additional_services_total: float = 0.0,
-        discount_amount: float = 0.0,
         subtotal: float = 0.0,
+        total: float = 0.0,
     ) -> Optional[OrderModel]:
         """Non-terminal order from the same branch+client with the same hash (idempotency).
 
-        Includes the branch in the key: the same client can order the same
-        thing at two branches and those are different orders. Includes the
-        price tier, the additional-services total, the discount amount and the
-        subtotal: none of them is part of the hash, so the same cut at a
-        different tier, with different services, with a different set of
-        discounted boards, or with a half board sold whole counts as two orders.
-        The subtotal is what catches ``wholeBoard`` (a promoted board costs
-        more); two different selections that happen to add up to the same
-        subtotal still collapse, the same approximation already accepted for
-        the discount amount.
+        Includes the branch in the key: the same client can order the same thing
+        at two branches and those are different orders. Everything commercial
+        lives outside the hash — the price level, which boards are marked for it,
+        ``wholeBoard``, the services — and every one of them moves the
+        **subtotal**, so that single number stands in for all of them. ``total``
+        joins it to catch a change in the tax rate, which moves nothing else, and
+        the services total stays as its own column because it is the one that is
+        also queried on its own. Two genuinely different selections that happen
+        to add up to the same money still collapse into one order — the same
+        approximation this key has always accepted.
         """
         terminal = [s.value for s in TERMINAL_STATUSES]
         return (
@@ -805,10 +801,9 @@ class OrderService(BranchScopedMixin):
                 OrderModel.branch_id == branch_id,
                 OrderModel.client_id == client_id,
                 OrderModel.optimization_hash == optimization_hash,
-                OrderModel.price_tier_code == price_tier_code,
                 OrderModel.additional_services_total == additional_services_total,
-                OrderModel.discount_amount == discount_amount,
                 OrderModel.subtotal == subtotal,
+                OrderModel.total == total,
                 OrderModel.status.not_in(terminal),
             )
             .first()

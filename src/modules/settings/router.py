@@ -1,5 +1,3 @@
-from typing import List
-
 from fastapi import APIRouter, Depends
 
 from src.modules.settings.schemas import (
@@ -9,8 +7,8 @@ from src.modules.settings.schemas import (
     CuttingSettingsUpdate,
     PreOrderSettingsResponse,
     PreOrderSettingsUpdate,
-    PriceTier,
-    PriceTiersUpdate,
+    TaxSettingsResponse,
+    TaxSettingsUpdate,
 )
 from src.modules.settings.service import SettingsService, settings_service
 from src.modules.users.dependencies import require_permission
@@ -23,24 +21,6 @@ router = APIRouter(
     responses=ERROR_RESPONSES,
     dependencies=[Depends(require_permission("settings:manage"))],
 )
-
-# Price-tier reads are needed by whoever quotes (admin/vendedor) to populate the
-# selector, so they live in a separate router gated by the "preorders" permission
-# instead of the "settings:manage" (admin only) used by the configuration router.
-tiers_router = APIRouter(
-    prefix="/settings",
-    tags=["settings"],
-    responses=ERROR_RESPONSES,
-    dependencies=[Depends(require_permission("preorders"))],
-)
-
-
-@tiers_router.get("/price-tiers", response_model=DataResponse[List[PriceTier]])
-def get_price_tiers(svc: SettingsService = Depends(settings_service)):
-    """Active price tiers (for the quote selector), ordered by ``sortOrder``."""
-    tiers = [t for t in svc.get_price_tiers() if t.get("is_active", True)]
-    tiers.sort(key=lambda t: t.get("sort_order", 0))
-    return ok(tiers)
 
 
 @router.get("/cutting", response_model=DataResponse[CuttingSettingsResponse])
@@ -86,10 +66,20 @@ def update_company_settings(
     return ok(svc.get_company())
 
 
-@router.patch("/price-tiers", response_model=DataResponse[List[PriceTier]])
-def update_price_tiers(
-    data: PriceTiersUpdate, svc: SettingsService = Depends(settings_service)
+@router.get("/taxes", response_model=DataResponse[TaxSettingsResponse])
+def get_tax_settings(svc: SettingsService = Depends(settings_service)):
+    """Returns the current sales tax rate (seeded from config if missing).
+
+    Not readable by the seller on purpose: nothing in the quoting UI needs to
+    look the rate up, because every priced response already carries the
+    ``taxRate`` it was computed with.
+    """
+    return ok(svc.get_or_init())
+
+
+@router.patch("/taxes", response_model=DataResponse[TaxSettingsResponse])
+def update_tax_settings(
+    data: TaxSettingsUpdate, svc: SettingsService = Depends(settings_service)
 ):
-    """Replaces the price-tier list (admin only)."""
-    settings = svc.update_price_tiers(data)
-    return ok(settings.price_tiers)
+    """Updates the sales tax rate (admin only)."""
+    return ok(svc.update_taxes(data))

@@ -37,10 +37,11 @@ class PreOrderCreate(CamelModel):
         description="Billed additional services (qty × editable unit price)",
     )
     client_id: int = Field(..., description="Client the quote is for")
-    price_tier_code: Optional[str] = Field(
-        default="consumidor",
-        max_length=32,
-        description="Price tier: consumidor (0%) | carpintero (2%) | efectivo (5%)",
+    price_level: int = Field(
+        default=1,
+        ge=1,
+        le=3,
+        description="Catalog price level billed on the marked boards (1 = list)",
     )
     strategy: OptimizationStrategy = Field(
         default=OptimizationStrategy.default,
@@ -77,7 +78,7 @@ class PreOrderUpdate(CamelModel):
     requirements: Optional[List[Requirement]] = Field(default=None, min_length=1)
     additional_services: Optional[List[AdditionalServiceLine]] = Field(default=None)
     client_id: Optional[int] = None
-    price_tier_code: Optional[str] = Field(default=None, max_length=32)
+    price_level: Optional[int] = Field(default=None, ge=1, le=3)
     strategy: Optional[OptimizationStrategy] = Field(default=None)
     variant: Optional[int] = Field(default=None, ge=0, le=1000)
     notes: Optional[str] = Field(default=None, max_length=512)
@@ -111,8 +112,8 @@ class PreOrderResponse(CamelModel):
     client: ClientResponse = Field(..., description="Client information")
     branch: BranchRefResponse = Field(..., description="Owning branch")
     status: PreOrderStatus
-    price_tier_code: str = Field(
-        default="consumidor", description="Selected price tier (discount level)"
+    price_level: int = Field(
+        default=1, description="Selected catalog price level (1 = list)"
     )
     strategy: OptimizationStrategy = Field(
         default=OptimizationStrategy.default,
@@ -331,18 +332,18 @@ class ReviewPreOrderResponse(CamelModel):
     )
     client_name: Optional[str] = None
     currency: str
-    subtotal: float = Field(..., description="Sum at list price (before the discount)")
-    price_tier_name: Optional[str] = Field(
-        default=None, description="Name of the applied price tier"
+    subtotal: float = Field(
+        ..., description="Net sum (boards + edge banding + services)"
     )
-    discount_rate: float = Field(
-        default=0.0, description="Applied discount (0.02 = 2%)"
+    price_level_name: Optional[str] = Field(
+        default=None, description="Name of the applied price level"
     )
-    discount_amount: float = Field(default=0.0)
     services_total: float = Field(
-        default=0.0, description="Sum of additional services (added after discount)"
+        default=0.0, description="Net sum of the additional services"
     )
-    total: float = Field(..., description="Subtotal minus discount plus services")
+    tax_rate: float = Field(default=0.0, description="Applied tax rate (0.15 = 15%)")
+    tax_amount: float = Field(default=0.0, description="Tax over the subtotal")
+    total: float = Field(..., description="Subtotal plus tax")
     total_boards_used: int
     total_pieces: int = Field(
         default=0, description="Total physical pieces across the cut list"

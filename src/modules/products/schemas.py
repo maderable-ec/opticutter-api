@@ -14,7 +14,18 @@ class ProductBase(CamelModel):
     code: str = Field(..., min_length=1, max_length=32, description="Unique code")
     name: str = Field(..., min_length=1, max_length=128, description="Unique name")
     description: Optional[str] = Field(None, max_length=256, description="Description")
-    price: confloat(ge=0) = Field(..., description="Sale price")
+    # All three NET of tax (see ProductModel). Level 1 is mandatory: it is the
+    # list price everything falls back to. Levels 2/3 are optional — leaving them
+    # out means this product has no reduced price, not that it is free.
+    price: confloat(ge=0) = Field(
+        ..., description="Sale price, level 1 (list), net of tax"
+    )
+    price_2: Optional[confloat(ge=0)] = Field(
+        None, description="Sale price, level 2, net of tax (null = uses level 1)"
+    )
+    price_3: Optional[confloat(ge=0)] = Field(
+        None, description="Sale price, level 3, net of tax (null = uses level 1)"
+    )
     is_active: bool = Field(True, description="Whether the product is active")
 
 
@@ -44,6 +55,8 @@ class ProductUpdate(CamelModel):
     name: Optional[str] = Field(None, min_length=1, max_length=128)
     description: Optional[str] = Field(None, max_length=256)
     price: Optional[confloat(ge=0)] = None
+    price_2: Optional[confloat(ge=0)] = None
+    price_3: Optional[confloat(ge=0)] = None
     is_active: Optional[bool] = None
     attributes: Optional[dict] = None
 
@@ -61,6 +74,8 @@ class ProductResponse(CamelModel):
     name: str
     description: Optional[str] = None
     price: float
+    price_2: Optional[float] = None
+    price_3: Optional[float] = None
     is_active: bool
     attributes: dict
 

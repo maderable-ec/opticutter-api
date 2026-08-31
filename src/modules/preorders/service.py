@@ -143,9 +143,6 @@ class PreOrderService(BranchScopedMixin):
             self.db, branch_scope, data.branch_id, default_branch_id
         )
         self._enforce_open_cap(data.client_id, branch_id)
-        # Validates the price tier (422 if missing/inactive) and normalizes it.
-        tier = self.settings_service.resolve_price_tier(data.price_tier_code)
-
         validity_days = self.settings_service.get_preorder_config()[
             "preorder_validity_days"
         ]
@@ -159,7 +156,7 @@ class PreOrderService(BranchScopedMixin):
             additional_services=[
                 s.model_dump(mode="json") for s in data.additional_services
             ],
-            price_tier_code=tier["code"],
+            price_level=data.price_level,
             strategy=data.strategy.value,
             variant=data.variant,
             source=data.source,
@@ -204,9 +201,8 @@ class PreOrderService(BranchScopedMixin):
             preorder.additional_services = [
                 s.model_dump(mode="json") for s in data.additional_services
             ]
-        if data.price_tier_code is not None:
-            tier = self.settings_service.resolve_price_tier(data.price_tier_code)
-            preorder.price_tier_code = tier["code"]
+        if data.price_level is not None:
+            preorder.price_level = data.price_level
         if data.strategy is not None:
             preorder.strategy = data.strategy.value
         if data.variant is not None:
@@ -246,15 +242,16 @@ class PreOrderService(BranchScopedMixin):
     def build_request(self, preorder: PreOrderModel) -> OptimizeRequest:
         """Rebuilds the ``OptimizeRequest`` from the stored inputs.
 
-        Carries the price tier so ``optimize_response`` attaches the ``pricing``
-        block (it doesn't affect geometry or the hash) and the stored ``strategy``
-        to reproduce the same layout (this one does affect geometry and the hash).
+        Carries the price level so ``compute`` re-prices the marked boards and
+        ``optimize_response`` attaches the ``pricing`` block (it doesn't affect
+        geometry or the hash) and the stored ``strategy`` to reproduce the same
+        layout (this one does affect geometry and the hash).
         """
         return OptimizeRequest(
             materials=preorder.materials,
             requirements=preorder.requirements,
             client_id=preorder.client_id,
-            price_tier_code=preorder.price_tier_code,
+            price_level=preorder.price_level,
             strategy=preorder.strategy,
             variant=preorder.variant or 0,
         )
@@ -264,19 +261,17 @@ class PreOrderService(BranchScopedMixin):
         return self.optimization_service.compute(self.build_request(preorder))
 
     def build_pricing_for(self, preorder: PreOrderModel, payload: dict) -> dict:
-        """Live discount block for the pre-order's price tier (incl. services).
+        """Live money block for the pre-order (incl. services and tax).
 
-        The discounted boards are read back through ``build_request``: the stored
-        ``materials`` are raw JSON, and validating them through the same union the
-        re-optimization already uses is what keeps ``applyDiscount`` from being
-        parsed by hand here.
+        ``payload`` must come from ``compute_payload``, which already re-priced
+        the marked boards at the stored level; this only adds the services and
+        the current tax rate on top.
         """
-        tier = self.settings_service.resolve_price_tier(preorder.price_tier_code)
         return build_pricing(
             payload,
-            tier,
+            preorder.price_level,
             preorder.additional_services,
-            self.build_request(preorder).discounted_material_keys,
+            self.settings_service.get_tax_rate(),
         )
 
     def build_optimize_response(self, preorder: PreOrderModel) -> OptimizeResponse:
