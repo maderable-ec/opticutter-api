@@ -55,25 +55,22 @@ class PreOrderSettingsUpdate(CamelModel):
     max_open_preorders_per_client: Optional[int] = Field(None, ge=1)
 
 
-# --- Price tiers (discount by client type) --------------------------------------
-class PriceTier(CamelModel):
-    """A price tier: a discount (rate) over the boards' base price.
+# --- Taxes ----------------------------------------------------------------------
+class TaxSettingsResponse(CamelModel):
+    """Current sales tax rate applied to every quote and order."""
 
-    ``code`` is the stable identity the API client sends (``priceTierCode``);
-    ``rate`` is the discount fraction (0.02 = 2%). ``consumidor`` (0%) is the base.
+    tax_rate: float = Field(..., ge=0, le=1, description="Sales tax rate (0.15 = 15%)")
+
+
+class TaxSettingsUpdate(CamelModel):
+    """Partial update of the tax settings.
+
+    Catalog prices are stored net, so this rate is what produces every total.
+    Changing it only affects quotes computed from here on: each order freezes
+    the rate it was billed at.
     """
 
-    code: str = Field(..., min_length=1, max_length=32)
-    name: str = Field(..., min_length=1, max_length=64)
-    rate: float = Field(..., ge=0, le=1, description="Discount (0.02 = 2%)")
-    is_active: bool = Field(default=True)
-    sort_order: int = Field(default=0, ge=0)
-
-
-class PriceTiersUpdate(CamelModel):
-    """Replaces the entire price-tier list (admin only)."""
-
-    price_tiers: List[PriceTier] = Field(..., min_length=1)
+    tax_rate: Optional[float] = Field(None, ge=0, le=1)
 
 
 # --- Company data -----------------------------------------------------------------

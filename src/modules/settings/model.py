@@ -37,10 +37,12 @@ class SettingsModel(TimestampMixin, AuditMixin, Base):
     preorder_validity_days: Mapped[int] = mapped_column(Integer)
     max_open_preorders_per_client: Mapped[int] = mapped_column(Integer)
 
-    # Price tiers: list of rates {code, name, rate, is_active, sort_order}.
-    # The discount (rate) is applied to the base price of catalog boards.
-    # Nullable/legacy is tolerated by falling back to config.PRICE_TIERS.
-    price_tiers: Mapped[list] = mapped_column(JSON, default=list)
+    # Sales tax rate (0.15 = 15%). Catalog prices are stored NET, so this is
+    # what turns a quote's subtotal into its total. Editable because the rate
+    # changes by law (Ecuador went 12% -> 15%) and a redeploy is the wrong
+    # response to that; every order freezes the rate it was billed at, so
+    # changing it here never rewrites what was already invoiced.
+    tax_rate: Mapped[float] = mapped_column(Float)
 
     # Company data (proforma letterhead)
     company_name: Mapped[str] = mapped_column(String(128))

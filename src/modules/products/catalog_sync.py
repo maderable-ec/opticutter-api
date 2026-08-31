@@ -35,6 +35,7 @@ from src.modules.products.schemas import ProductSyncIssue, ProductSyncResult
 from src.modules.products.service import edge_width_fits_board, normalize_family
 from src.modules.products.types.board import BoardAttributes
 from src.modules.products.types.edge_banding import BandType, EdgeBandingAttributes
+from src.modules.settings.service import SettingsService
 from src.shared.exceptions import BulkValidationError
 
 _CATEGORIA_TO_TYPE = {
@@ -129,7 +130,16 @@ def _parse_obs(obs: str) -> Tuple[Optional[str], Optional[str]]:
 
 
 def _parse_iva_rate(iva: str) -> Optional[float]:
-    """``"15%"``/``"15.00"`` -> ``0.15``. Blank -> ``0.0``. Malformed -> ``None`` (error)."""
+    """``"15%"``/``"15.00"`` -> ``0.15``. Blank -> ``0.0``. Malformed -> ``None`` (error).
+
+    The catalog stores prices NET, so this rate is no longer applied to anything
+    — the tax is added once, at the document level, from the rate configured in
+    ``settings``. It is still read because a row whose own rate differs from that
+    one would be billed wrong in silence, and saying so is cheap
+    (``_collect_warnings``). A malformed value still skips the row: a price
+    column that can't be trusted next to a tax column that can't be parsed is
+    not a row to import.
+    """
     if not iva.strip():
         return 0.0
     m = _IVA_RE.fullmatch(iva.strip())
@@ -147,6 +157,30 @@ def _external_code(categoria: str, codigo: str) -> str:
     return f"{categoria}:{codigo}"
 
 
+# Sentinel for "this text isn't a number at all", so a level price can return
+# three outcomes: a value, ``None`` (not loaded by the vendor) and malformed.
+_MALFORMED = object()
+
+
+def _parse_level_price(raw: str):
+    """``"76.13"`` -> 76.13. Blank/zero -> ``None``. Malformed -> ``_MALFORMED``.
+
+    Zero is the vendor's own default for a level nobody filled in (the column is
+    ``NOT NULL DEFAULT 0.000000``), so it means "no reduced price at this level",
+    never "free". Storing ``None`` is what makes the fallback to the list price
+    explicit downstream instead of quoting a board at $0 — measured on the live
+    catalog, 11 articles have no level 2 and 30 no level 3.
+    """
+    text = raw.strip()
+    if not text:
+        return None
+    try:
+        value = float(text)
+    except ValueError:
+        return _MALFORMED
+    return round(value, 6) if value > 0 else None
+
+
 @dataclass
 class _ValidRow:
     row_no: int
@@ -155,7 +189,14 @@ class _ValidRow:
     product_type: ProductType
     name: str
     description: Optional[str]
+    # The three NET sale prices. ``price`` (level 1) is always present;
+    # ``price_2``/``price_3`` are ``None`` when the source never loaded them.
     price: float
+    price_2: Optional[float]
+    price_3: Optional[float]
+    # The row's own tax rate, carried only so ``_collect_warnings`` can flag a
+    # row the configured rate would bill wrong. Never applied to the price.
+    iva_rate: float
     attributes: dict
 
 
@@ -193,7 +234,7 @@ def _conflict(row_no: int, codigo: str, message: str) -> dict:
     return {"field": str(row_no), "message": f"Código {codigo}: {message}"}
 
 
-def _collect_warnings(valid: Sequence[_ValidRow]) -> List[_Issue]:
+def _collect_warnings(valid: Sequence[_ValidRow], tax_rate: float) -> List[_Issue]:
     """Rows that imported fine but whose design data can't do its job.
 
     Nothing here skips a row or blocks the sync — these products are in the
@@ -222,6 +263,20 @@ def _collect_warnings(valid: Sequence[_ValidRow]) -> List[_Issue]:
       where its siblings say "18X0.45MM"), and the thickness is also what the
       band type is inferred from, so the row lands in the catalog mislabelled.
       Reported, not corrected — the fix belongs in the inventory system.
+    * A **price level above the one before it** is reported per row: the levels
+      are meant to descend (``ven`` >= ``pv2`` >= ``pv3``), so an inverted pair
+      is a data-entry slip that would make "apply the discount" charge MORE.
+      Two such rows exist in the live catalog, one of them plainly wrong
+      (``ven`` 4.46 against ``pv2`` 61.16).
+    * An article **whose own tax rate isn't the configured one** is reported:
+      the tax is now added once at the document level, so a 0%-rated product
+      would be billed at the configured rate in complete silence.
+    * A level the vendor never loaded is reported **once per level**, anchored
+      on the first article missing it, not once per article: 11 articles have no
+      level 2 and 30 no level 3, and 41 lines would bury everything else. It is
+      also not a defect — falling back to the list price is the correct reading
+      of "this design has no reduced price" — so what the operator needs is to
+      know it happens, not a roll call.
     * A **board whose largo ended up shorter than its ancho** is flagged too:
       the vendor's convention prints the longer side first (``_BOARD_DIMS_RE``'s
       first captured measure is always stored as ``height``/largo), so an
@@ -257,7 +312,35 @@ def _collect_warnings(valid: Sequence[_ValidRow]) -> List[_Issue]:
     widths_by_family: Dict[str, set] = {}
     boards_by_family_thickness: Dict[Tuple[str, float], _ValidRow] = {}
 
+    # Anchors for the once-per-level warnings, plus how many rows they stand for.
+    missing_level: Dict[int, Tuple[_ValidRow, int]] = {}
+
     for row in valid:
+        for level, value in ((2, row.price_2), (3, row.price_3)):
+            if value is None:
+                anchor, count = missing_level.get(level, (row, 0))
+                missing_level[level] = (anchor, count + 1)
+        if row.price_2 is not None and row.price_2 > row.price:
+            warn(
+                row,
+                f"el Precio 2 (${row.price_2:.2f}) es mayor que el de lista "
+                f"(${row.price:.2f}): revisar los precios en el inventario",
+            )
+        upper = row.price_2 if row.price_2 is not None else row.price
+        if row.price_3 is not None and row.price_3 > upper:
+            warn(
+                row,
+                f"el Precio 3 (${row.price_3:.2f}) es mayor que el anterior "
+                f"(${upper:.2f}): revisar los precios en el inventario",
+            )
+        if row.iva_rate != tax_rate:
+            warn(
+                row,
+                f"el IVA del artículo ({row.iva_rate * 100:g}%) no es el "
+                f"configurado ({tax_rate * 100:g}%): se va a facturar con el "
+                "configurado",
+            )
+
         family = normalize_family(row.attributes.get("family"))
         if family:
             # setdefault on the outer dict too: a future ProductType reaching
@@ -314,6 +397,14 @@ def _collect_warnings(valid: Sequence[_ValidRow]) -> List[_Issue]:
                 "despiece no lo va a distinguir de otro diseño",
             )
 
+    for level, (anchor, count) in sorted(missing_level.items()):
+        others = f" (y {count - 1} artículo{'s' if count > 2 else ''} más)"
+        warn(
+            anchor,
+            f"sin Precio {level} en el inventario{others if count > 1 else ''}: "
+            f"se cobra{'n' if count > 1 else ''} al precio de lista",
+        )
+
     boards = first_by_family[ProductType.BOARD]
     bandings = first_by_family[ProductType.EDGE_BANDING]
     for family, row in boards.items():
@@ -353,8 +444,13 @@ def _collect_warnings(valid: Sequence[_ValidRow]) -> List[_Issue]:
 
 def _validate(
     rows: Sequence[SourceRow],
+    tax_rate: float,
 ) -> Tuple[List[_ValidRow], int, List[_Issue], List[_Issue]]:
     """Splits the source rows into what can be imported and what can't.
+
+    ``tax_rate`` is the configured rate the documents will bill at. It is not
+    applied to anything here — prices are stored net — only compared against
+    each row's own rate so a mismatch gets reported instead of silently billed.
 
     Nothing here is fatal: every problem becomes an ``_Issue`` the caller
     reports, so one unusable article can't hold back the whole catalog.
@@ -444,9 +540,23 @@ def _validate(
         if iva_rate is None:
             problem(f"IVA '{row.iva}' no es un porcentaje válido", external_code)
             continue
-        # El precio de venta viene sin IVA; el catálogo guarda el precio final
-        # con impuesto incluido.
-        price = round(price * (1 + iva_rate), 2)
+
+        # Los tres precios se guardan NETOS, tal como los publica el proveedor:
+        # el IVA se suma una sola vez, a nivel de documento, con la tasa
+        # configurada en `settings`. NO se redondea a 2 decimales: el proveedor
+        # escribe 6 justamente para que el precio CON impuesto sea redondo
+        # (79.086957 * 1.15 = 90.95 exacto), y redondear el neto aquí correría
+        # ese número un centavo.
+        price = round(price, 6)
+        price_2 = _parse_level_price(row.p_venta_2)
+        price_3 = _parse_level_price(row.p_venta_3)
+        if price_2 is _MALFORMED or price_3 is _MALFORMED:
+            problem(
+                f"precio de nivel 2/3 ('{row.p_venta_2}'/'{row.p_venta_3}') "
+                "no es un número válido",
+                external_code,
+            )
+            continue
 
         if product_type is ProductType.BOARD:
             match = _BOARD_DIMS_RE.search(row.articulo)
@@ -518,11 +628,14 @@ def _validate(
                 name=row.articulo,
                 description=row.marca or None,
                 price=price,
+                price_2=price_2,
+                price_3=price_3,
+                iva_rate=iva_rate,
                 attributes=validated.model_dump(by_alias=True, mode="json"),
             )
         )
 
-    return valid, skipped_medio, issues, _collect_warnings(valid)
+    return valid, skipped_medio, issues, _collect_warnings(valid, tax_rate)
 
 
 def _is_product_in_use(db: Session, product_id: int) -> bool:
@@ -643,6 +756,8 @@ def _apply(
                     name=row.name,
                     description=row.description,
                     price=row.price,
+                    price_2=row.price_2,
+                    price_3=row.price_3,
                     is_active=True,
                     attributes=row.attributes,
                 )
@@ -652,6 +767,8 @@ def _apply(
             product.name = row.name
             product.description = row.description
             product.price = row.price
+            product.price_2 = row.price_2
+            product.price_3 = row.price_3
             product.attributes = row.attributes
             product.is_active = True
             updated += 1
@@ -738,7 +855,8 @@ def sync_catalog_from_external(
             ],
         )
 
-    valid_rows, skipped_medio, issues, warnings = _validate(active_rows)
+    tax_rate = SettingsService(db).get_tax_rate()
+    valid_rows, skipped_medio, issues, warnings = _validate(active_rows, tax_rate)
     return _apply(
         db,
         valid_rows,

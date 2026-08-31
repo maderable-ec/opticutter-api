@@ -50,6 +50,14 @@ STRATEGY_TO_PACKING = {
 }
 
 
+# The three sale prices the catalog carries per product, by the number the API
+# takes. Fixed in code on purpose: they are not a configurable list of discounts
+# any more but three columns the vendor's inventory publishes, so adding a
+# fourth would be a schema change, not a settings edit. Level 1 is the list
+# price everything falls back to.
+PRICE_LEVEL_NAMES = {1: "Precio 1", 2: "Precio 2", 3: "Precio 3"}
+
+
 class PoolFillOrder(str, Enum):
     """Fill order for a material pool (a catalog board + its attached offcuts).
 
@@ -159,40 +167,42 @@ class EdgeBandingSummary(CamelModel):
 
 
 class PricingSummary(CamelModel):
-    """Document-level discount block (applied price tier).
+    """Money block for a quote or an order: net subtotal, tax, total.
 
-    Line items are charged at list price ("Precio Consumidor"); ``discountAmount``
-    is the single adjustment, computed only over the catalog boards (``discountBase``).
+    Every line item is already priced at the level the seller chose (the boards
+    they marked; see ``applyPriceLevel``), so there is no discount row: the
+    subtotal IS the sum of what the document prints. Catalog prices are net, and
+    additional services — which staff registers tax-included — are converted to
+    net here, so one tax line covers the whole document.
     """
 
-    price_tier_code: Optional[str] = Field(
-        default=None, description="Code of the applied price tier"
+    price_level: int = Field(
+        default=1, ge=1, le=3, description="Price level applied to the marked boards"
     )
-    price_tier_name: Optional[str] = Field(default=None)
-    discount_rate: float = Field(
-        default=0.0, description="Applied discount (0.02 = 2%)"
+    price_level_name: Optional[str] = Field(default=None)
+    subtotal: float = Field(
+        default=0.0, description="Net sum (boards + edge banding + services)"
     )
-    discount_base: float = Field(
-        default=0.0, description="Discount base: catalog boards"
-    )
-    subtotal: float = Field(default=0.0, description="Sum at list price")
-    discount_amount: float = Field(default=0.0)
     services_total: float = Field(
-        default=0.0,
-        description="Sum of additional services (added after the discount)",
+        default=0.0, description="Net sum of the additional services"
     )
-    total: float = Field(
-        default=0.0, description="Subtotal minus discount plus additional services"
-    )
+    tax_rate: float = Field(default=0.0, description="Applied tax rate (0.15 = 15%)")
+    tax_amount: float = Field(default=0.0, description="Tax over the subtotal")
+    total: float = Field(default=0.0, description="Subtotal plus tax")
 
 
 class AdditionalServiceLine(CamelModel):
     """A billed additional service on a quote/order (qty × editable unit price).
 
     Not cut geometry: it lives beside the optimizer inputs and is folded into the
-    total **after** the cache-keyed computation (like the tier discount). It never
+    total **after** the cache-keyed computation (like the price level). It never
     feeds the optimizer. ``service_id`` references the catalog (optional; the price
     is editable regardless of the catalog default).
+
+    ``unit_price`` is registered **tax-included**, unlike the catalog's net
+    prices: it is a number staff types from a price list, not one the vendor's
+    inventory publishes. ``build_pricing`` converts it to net so the document's
+    single tax line covers services too.
     """
 
     service_id: Optional[int] = Field(
@@ -227,13 +237,14 @@ class CatalogMaterialInput(CamelModel):
             "when the board has no pooled offcuts. Affects geometry and the hash."
         ),
     )
-    apply_discount: bool = Field(
+    apply_price_level: bool = Field(
         default=False,
         description=(
-            "Whether the price tier's discount applies to this board. Defaults to "
-            "false: the seller marks board by board which ones are discounted when "
-            "quoting. Does not affect optimization geometry or hash (like "
-            "clientId/priceTierCode); only the `pricing` block."
+            "Whether this board is billed at the quote's `priceLevel` instead of "
+            "the list price. Defaults to false: the seller marks board by board "
+            "which ones get the reduced price when quoting (a client negotiates "
+            "the melamina and not the MDF). Does not affect optimization geometry "
+            "or hash (like clientId/priceLevel); only what each line costs."
         ),
     )
     whole_board: bool = Field(
@@ -356,13 +367,15 @@ class OptimizeRequest(CamelModel):
             "require a client, resolved at that point."
         ),
     )
-    price_tier_code: Optional[str] = Field(
-        default="consumidor",
-        max_length=32,
+    price_level: int = Field(
+        default=1,
+        ge=1,
+        le=3,
         description=(
-            "Price tier for the proforma: consumidor (0%) | carpintero (2%) | "
-            "efectivo (5%). Does not affect optimization geometry or hash; only "
-            "the `pricing` block (discount over catalog boards)."
+            "Price level to bill the marked boards at: 1 (list) | 2 | 3. The "
+            "three prices come from the catalog per product, so this is a "
+            "different unit price rather than a percentage off. Does not affect "
+            "optimization geometry or hash; only what the marked lines cost."
         ),
     )
     strategy: OptimizationStrategy = Field(
@@ -371,7 +384,7 @@ class OptimizeRequest(CamelModel):
             "Packing heuristic. `default`: maximum efficiency (minimizes total "
             "waste). `longOffcuts`: concentrates waste into one long reusable "
             "strip by pushing pieces to one side. DOES affect optimization "
-            "geometry and hash (unlike clientId/priceTierCode)."
+            "geometry and hash (unlike clientId/priceLevel)."
         ),
     )
     variant: int = Field(
@@ -427,22 +440,22 @@ class OptimizeRequest(CamelModel):
         return self
 
     @property
-    def discounted_material_keys(self) -> set:
-        """Keys of the catalog boards the seller marked as discountable.
+    def leveled_material_keys(self) -> set:
+        """Keys of the catalog boards the seller marked for the price level.
 
-        The single place that reads ``applyDiscount``, so the three callers of
-        ``build_pricing`` (raw optimize, pre-order, order) can't drift apart.
-        Inline materials (offcut/manual) don't carry the flag: they were never
-        discountable and still aren't.
+        The single place that reads ``applyPriceLevel``, so the three callers of
+        the re-pricing pass (raw optimize, pre-order, order) can't drift apart.
+        Inline materials (offcut/manual) don't carry the flag: their cost comes
+        from the request, not from a catalog that has levels.
         """
-        return {m.key for m in self.materials if getattr(m, "apply_discount", False)}
+        return {m.key for m in self.materials if getattr(m, "apply_price_level", False)}
 
     @property
     def whole_board_material_keys(self) -> set:
         """Keys of the catalog boards the client takes whole, half or not.
 
         The single place that reads ``wholeBoard``, mirroring
-        ``discounted_material_keys``: both are commercial flags kept out of
+        ``leveled_material_keys``: both are commercial flags kept out of
         ``_compute_hash`` so a checkbox reshapes/re-prices the cached plan
         instead of re-running the search. Inline materials (offcut/manual) don't
         carry the flag — they are never halved in the first place.

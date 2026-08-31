@@ -1,9 +1,11 @@
 """Half board promoted to a whole board, on top of an already-optimized payload.
 
 Pure layer (no DB, no framework, no ``src.cutting``): the cut geometry is cached
-by hash and this flag is **not** in that hash, so — exactly like the discount in
-``pricing.py`` — the decision is applied **after** ``compute()`` as a
-deterministic transform, keeping one cache entry per cut plan.
+by hash and this flag is **not** in that hash, so — exactly like the price level
+in ``price_levels.py`` — the decision is applied **after** ``compute()`` as a
+deterministic transform, keeping one cache entry per cut plan. It runs **after**
+the level, which has already set each material's ``cost_per_unit`` to what the
+whole sheet is billed at.
 
 Business rule (decided with the user): the optimizer bills a sheet as a half
 board whenever the content re-packs into ``width/2``, but the client may want

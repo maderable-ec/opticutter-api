@@ -25,6 +25,8 @@ _COLUMNS = (
     "gru",
     "iva",
     "ven",
+    "pv2",
+    "pv3",
     "obs",
     "est",
     "FecEli",
@@ -42,6 +44,8 @@ def _record(**overrides):
         "gru": "MDP MELAMINA RH",
         "iva": Decimal("15.00"),
         "ven": Decimal("14.650000"),
+        "pv2": Decimal("13.500000"),
+        "pv3": Decimal("0.000000"),
         "obs": "Cashmere - CSH",
         "est": 1,
         "FecEli": None,
@@ -122,6 +126,10 @@ def test_numeric_columns_reach_the_validator_as_text():
     assert row.iva == "15.00"
     assert row.p_venta == "14.650000"
     assert float(row.p_venta) == pytest.approx(14.65)
+    # The reduced levels ride the same contract; "0.000000" is the vendor's
+    # own default for a level nobody loaded, and the validator reads it as such.
+    assert row.p_venta_2 == "13.500000"
+    assert row.p_venta_3 == "0.000000"
 
 
 def test_null_columns_become_blank_not_the_string_none():

@@ -37,6 +37,11 @@ class ResolvedMaterial:
     width: float
     height: float
     thickness: float
+    # Always the LIST price (level 1) for a catalog board, whatever level the
+    # seller is quoting: this is what the search optimizes against and what
+    # ``_compute_hash`` records, so one cut plan is cached per job instead of one
+    # per level. The chosen level is applied to the finished payload by
+    # ``price_levels.apply_price_level``.
     cost_per_unit: float
     source: str
     product_id: Optional[int] = None
@@ -47,6 +52,13 @@ class ResolvedMaterial:
     quantity: Optional[int] = None
     pool_key: Optional[str] = None
     fill_order: PoolFillOrder = PoolFillOrder.auto
+    # The catalog's reduced price levels, ``None`` when the vendor never loaded
+    # them. Deliberately NOT serialized by ``to_dict``: baking them into the
+    # cached payload would let a catalog price edit stay invisible for a whole
+    # OPT_RESULT_TTL_SECONDS, and they are re-read from the DB on every request
+    # anyway (the resolution runs before the cache lookup, for the hash).
+    price_2: Optional[float] = None
+    price_3: Optional[float] = None
 
     @property
     def is_catalog(self) -> bool:
@@ -99,6 +111,8 @@ class MaterialResolver:
             code=product.code,
             name=product.name,
             fill_order=material.fill_order,
+            price_2=product.price_2,
+            price_3=product.price_3,
         )
 
     def _resolve_inline(self, material: InlineMaterialInput) -> ResolvedMaterial:

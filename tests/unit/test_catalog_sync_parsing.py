@@ -159,6 +159,10 @@ def _row(
     height=None,
     width=None,
     thickness=None,
+    price=10.0,
+    price_2=9.0,
+    price_3=8.0,
+    iva_rate=0.15,
 ):
     attributes = {}
     if family is not None:
@@ -178,7 +182,10 @@ def _row(
         product_type=product_type,
         name=name or f"ARTICULO {row_no}",
         description=None,
-        price=10.0,
+        price=price,
+        price_2=price_2,
+        price_3=price_3,
+        iva_rate=iva_rate,
         attributes=attributes,
     )
 
@@ -191,8 +198,8 @@ def _banding(**kwargs):
     return _row(ProductType.EDGE_BANDING, **kwargs)
 
 
-def _messages(rows):
-    return [w.message for w in _collect_warnings(rows)]
+def _messages(rows, tax_rate=0.15):
+    return [w.message for w in _collect_warnings(rows, tax_rate)]
 
 
 def test_coordinated_pair_warns_nothing():
@@ -200,7 +207,7 @@ def test_coordinated_pair_warns_nothing():
         _board(family="Cashmere"),
         _banding(row_no=2, family="Cashmere", alias="CSH"),
     ]
-    assert _collect_warnings(rows) == []
+    assert _collect_warnings(rows, 0.15) == []
 
 
 def test_family_match_is_case_and_space_insensitive():
@@ -210,21 +217,21 @@ def test_family_match_is_case_and_space_insensitive():
         _board(family="CASHMERE"),
         _banding(row_no=2, family=" cashmere ", alias="CSH"),
     ]
-    assert _collect_warnings(rows) == []
+    assert _collect_warnings(rows, 0.15) == []
 
 
 def test_board_without_family_is_not_a_warning():
     # Plywood/OSB/MDF fondo have no coordinated banding at all; warning about
     # every one of them would bury the real problems.
-    assert _collect_warnings([_board()]) == []
+    assert _collect_warnings([_board()], 0.15) == []
 
 
 def test_board_with_longer_side_first_warns_nothing():
-    assert _collect_warnings([_board(height=2800, width=2070)]) == []
+    assert _collect_warnings([_board(height=2800, width=2070)], 0.15) == []
 
 
 def test_board_with_equal_sides_warns_nothing():
-    assert _collect_warnings([_board(height=2000, width=2000)]) == []
+    assert _collect_warnings([_board(height=2000, width=2000)], 0.15) == []
 
 
 def test_board_with_shorter_side_first_is_warned():
@@ -261,7 +268,7 @@ def test_orphan_family_is_reported_once_not_per_row():
     # Anchored to the first article that declared it: a family on 30 boards is
     # one line, not 30.
     rows = [_board(row_no=n, family="Cashmere") for n in range(1, 4)]
-    warnings = _collect_warnings(rows)
+    warnings = _collect_warnings(rows, 0.15)
     assert len(warnings) == 1
     assert warnings[0].row_no == 1
 
@@ -275,7 +282,7 @@ def _pair(board_thickness, *banding_widths, family="Cashmere"):
 
 
 def test_a_covering_width_warns_nothing():
-    assert _collect_warnings(_pair(15, 22, 40)) == []
+    assert _collect_warnings(_pair(15, 22, 40), 0.15) == []
 
 
 def test_family_with_no_width_that_covers_the_board_is_warned():
@@ -290,7 +297,7 @@ def test_family_with_no_width_that_covers_the_board_is_warned():
 def test_width_gap_is_reported_per_thickness_not_per_family():
     # A design can coordinate at 15mm and have nothing for its 36mm sibling.
     rows = _pair(15, 19) + [_board(row_no=9, family="Cashmere", thickness=36)]
-    (warning,) = _collect_warnings(rows)
+    (warning,) = _collect_warnings(rows, 0.15)
     assert warning.row_no == 9
     assert "de 36mm" in warning.message
 
@@ -299,7 +306,7 @@ def test_width_gap_is_reported_once_per_thickness():
     rows = _pair(36, 19) + [
         _board(row_no=n, family="Cashmere", thickness=36) for n in (8, 9)
     ]
-    warnings = _collect_warnings(rows)
+    warnings = _collect_warnings(rows, 0.15)
     assert len(warnings) == 1
     assert warnings[0].row_no == 1  # anchored to the first board that needs it
 
@@ -340,4 +347,4 @@ def test_warnings_are_ordered_by_row():
         _banding(row_no=1),
         _board(row_no=2, family="Cashmere"),
     ]
-    assert [w.row_no for w in _collect_warnings(rows)] == [1, 2, 3]
+    assert [w.row_no for w in _collect_warnings(rows, 0.15)] == [1, 2, 3]

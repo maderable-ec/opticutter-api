@@ -105,8 +105,14 @@ def test_create_order_freezes_snapshot_and_charges_boards(client, db_session):
     assert line["quantity"] == data["totalBoardsUsed"]
     assert line["lineTotal"] == line["quantity"] * 45.5
 
-    # Immutable totals = sum across boards.
-    assert data["total"] == data["subtotal"] == line["lineTotal"]
+    # Immutable totals: the net subtotal is the sum across boards, the total
+    # adds the tax frozen with the order.
+    assert data["subtotal"] == line["lineTotal"]
+    assert data["taxRate"] == 0.15
+    # The tax is rounded to cents and THEN added, as an invoice does — not
+    # `subtotal * 1.15` in one step, which lands a cent lower here.
+    assert data["taxAmount"] == round(data["subtotal"] * 0.15, 2)
+    assert data["total"] == round(data["subtotal"] + data["taxAmount"], 2)
 
     # The order no longer carries validity (the mutable quote lives in the pre-order).
     assert "expiresAt" not in data
@@ -564,7 +570,9 @@ def test_order_export_document(client, db_session):
     assert line["quantity"] == order["totalBoardsUsed"]
     assert line["unitPrice"] == 45.5
     assert line["lineTotal"] == line["quantity"] * 45.5
-    assert data["subtotal"] == data["total"] == line["lineTotal"]
+    assert data["subtotal"] == line["lineTotal"]
+    assert data["taxAmount"] == round(data["subtotal"] * 0.15, 2)
+    assert data["total"] == round(data["subtotal"] + data["taxAmount"], 2)
 
 
 def test_set_external_invoice_id_and_reflect_in_export(client, db_session):
@@ -658,7 +666,10 @@ def test_create_order_with_non_catalog_material(client, db_session):
     assert line["productName"] == "Sobrante taller"
     assert line["unitPriceSnapshot"] == 30.0
     assert line["lineTotal"] == 30.0 * line["quantity"]
-    assert data["total"] == data["subtotal"] == 30.0 * data["totalBoardsUsed"]
+    assert data["subtotal"] == 30.0 * data["totalBoardsUsed"]
+    assert data["total"] == round(
+        data["subtotal"] + round(data["subtotal"] * 0.15, 2), 2
+    )
 
     # The piece cut from the manual material also has no productId.
     assert len(data["pieces"]) == 1
@@ -714,7 +725,10 @@ def test_create_mixed_catalog_and_offcut_order(client, db_session):
     assert offcut_line["productCode"] == "r1"
     # The zero-cost offcut doesn't add to the total; it = only the catalog board.
     assert offcut_line["lineTotal"] == 0
-    assert data["total"] == catalog_line["lineTotal"]
+    assert data["subtotal"] == catalog_line["lineTotal"]
+    assert data["total"] == round(
+        data["subtotal"] + round(data["subtotal"] * 0.15, 2), 2
+    )
 
     # Each piece references its material: catalog → productId, offcut → None.
     piece_product_ids = {p["productId"] for p in data["pieces"]}
@@ -771,7 +785,8 @@ def test_order_freezes_whole_board_line_and_plan(client, db_session):
     assert line["unitPriceSnapshot"] == 45.5
     assert line["lineTotal"] == 45.5
     assert not line["productName"].endswith("(medio tablero)")
-    assert data["total"] == data["subtotal"] == 45.5
+    assert data["subtotal"] == 45.5
+    assert data["total"] == 52.33
 
     plan = client.get(f"/api/v1/orders/{data['id']}/cutting-plan").json()["data"]
     board = plan["boards"][0]
@@ -821,7 +836,8 @@ def test_order_freezes_half_board_line_and_plan(client, db_session):
     assert line["unitPriceSnapshot"] == 25.03  # price/2 * 1.10 (default markup)
     assert line["lineTotal"] == 25.03
     assert line["productName"].endswith("(medio tablero)")
-    assert data["total"] == data["subtotal"] == 25.03
+    assert data["subtotal"] == 25.03
+    assert data["total"] == 28.78
 
     # Cutting plan: the physical board is a half (width/2), flagged.
     plan = client.get(f"/api/v1/orders/{data['id']}/cutting-plan").json()["data"]

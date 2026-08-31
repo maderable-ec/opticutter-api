@@ -58,30 +58,8 @@ SETTINGS = {
     # Pre-orders
     "preorder_validity_days": 2,
     "max_open_preorders_per_client": 5,
-    # Price tiers
-    "price_tiers": [
-        {
-            "code": "consumidor",
-            "name": "Precio Consumidor",
-            "rate": 0.0,
-            "is_active": True,
-            "sort_order": 1,
-        },
-        {
-            "code": "carpintero",
-            "name": "Precio Carpintero",
-            "rate": 0.02,
-            "is_active": True,
-            "sort_order": 2,
-        },
-        {
-            "code": "efectivo",
-            "name": "Precio Efectivo",
-            "rate": 0.05,
-            "is_active": True,
-            "sort_order": 3,
-        },
-    ],
+    # Taxes: catalog prices are net, this is what produces every total.
+    "tax_rate": 0.15,
     # Company letterhead
     "company_name": "MADERABLE",
     "company_tagline": "tableros + accesorios",

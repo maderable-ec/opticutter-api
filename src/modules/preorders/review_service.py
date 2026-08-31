@@ -164,7 +164,7 @@ class PreOrderReviewService:
                 additional_services=preorder.additional_services,
                 client_id=preorder.client_id,
                 branch_id=preorder.branch_id,
-                price_tier_code=preorder.price_tier_code,
+                price_level=preorder.price_level,
                 strategy=preorder.strategy,
                 variant=preorder.variant or 0,
                 notes=preorder.notes,

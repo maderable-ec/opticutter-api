@@ -30,6 +30,7 @@ from src.modules.optimizations.parallel import (
     runs_in_process,
 )
 from src.modules.optimizations.patterns import group_layouts, order_sheets
+from src.modules.optimizations.price_levels import apply_price_level, price_at_level
 from src.modules.optimizations.pricing import build_pricing
 from src.modules.optimizations.schemas import (
     STRATEGY_TO_PACKING,
@@ -113,8 +114,8 @@ class OptimizationService:
         The computation is client-agnostic: the client is only resolved (and
         validated) when the request carries a ``client_id``. Without it, the
         response is anonymous. ``additional_services`` (billed services, not cut
-        geometry) are folded into the ``pricing`` block after the discount; the
-        raw ``/optimize`` endpoint passes none.
+        geometry) are folded into the ``pricing`` block; the raw ``/optimize``
+        endpoint passes none.
         """
         payload, optimization_hash = self.compute(request)
         client = None
@@ -122,12 +123,14 @@ class OptimizationService:
             client = self.db.get(ClientModel, request.client_id)
             if client is None:
                 raise EntityNotFoundError("Client", request.client_id)
-        # The discount is applied outside the geometry cache: every tier — and
-        # every board selection — reuses the same payload (cache-first) and only
-        # differs in the `pricing` block.
-        tier = self.settings_service.resolve_price_tier(request.price_tier_code)
+        # ``compute`` already re-priced the marked boards at the requested level
+        # (outside the geometry cache, so every level reuses the same cut plan),
+        # leaving only the services and the tax to add on top.
         pricing = build_pricing(
-            payload, tier, additional_services, request.discounted_material_keys
+            payload,
+            request.price_level,
+            additional_services,
+            self.settings_service.get_tax_rate(),
         )
         return OptimizeResponse(
             id=None,
@@ -216,7 +219,12 @@ class OptimizationService:
         cached = cache.get_json(optimization_hash)
         if cached is not None:
             self._log_compute(optimization_hash, started, hit=True, jobs=(), results=())
-            return self._apply_commercial_overrides(cached, request), optimization_hash
+            return (
+                self._apply_commercial_overrides(
+                    cached, request, resolved, half_board_markup_pct
+                ),
+                optimization_hash,
+            )
 
         strategy = STRATEGY_TO_PACKING[request.strategy]
         exact_config = _exact_config()
@@ -275,19 +283,46 @@ class OptimizationService:
         self._log_compute(
             optimization_hash, started, hit=False, jobs=jobs, results=pool_results
         )
-        return self._apply_commercial_overrides(payload, request), optimization_hash
+        return (
+            self._apply_commercial_overrides(
+                payload, request, resolved, half_board_markup_pct
+            ),
+            optimization_hash,
+        )
 
     @staticmethod
-    def _apply_commercial_overrides(payload: dict, request: OptimizeRequest) -> dict:
+    def _apply_commercial_overrides(
+        payload: dict,
+        request: OptimizeRequest,
+        resolved: Dict[str, ResolvedMaterial],
+        half_board_markup_pct: float,
+    ) -> dict:
         """Reshapes the cached plan for the flags that live outside the hash.
 
         Applied on BOTH paths (cache hit and cold compute) through this single
         helper so the two can't drift, and after ``_log_compute`` so a bug here
-        can never break the log's promise that it never fails a quote. Today
-        that means promoting the half boards the seller sold whole; the discount
-        is the other half of the pair and is applied later, by ``build_pricing``
-        over the summary this already rebuilt.
+        can never break the log's promise that it never fails a quote. Two
+        passes today, and the ORDER MATTERS: the price level first, because
+        ``apply_whole_boards`` reads a material's ``cost_per_unit`` as the whole
+        sheet's price when it promotes a half, and that has to already be the
+        level's price.
+
+        ``resolved`` carries the levels (never serialized into the payload, so
+        they can't go stale behind the cache); the tax is added afterwards, by
+        ``build_pricing`` over the summary these rebuilt.
         """
+        leveled = request.leveled_material_keys
+        level_prices = {
+            key: price_at_level(
+                material.cost_per_unit,
+                material.price_2,
+                material.price_3,
+                request.price_level,
+            )
+            for key, material in resolved.items()
+            if material.is_catalog and key in leveled
+        }
+        payload = apply_price_level(payload, level_prices, half_board_markup_pct)
         return apply_whole_boards(payload, request.whole_board_material_keys)
 
     def _log_compute(

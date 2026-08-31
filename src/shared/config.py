@@ -242,37 +242,15 @@ class Config:
     PREORDER_VALIDITY_DAYS = env.int("PREORDER_VALIDITY_DAYS", 15)
     MAX_OPEN_PREORDERS_PER_CLIENT = env.int("MAX_OPEN_PREORDERS_PER_CLIENT", 5)
 
-    # Price tiers (discount over the base "Precio Consumidor" price). Only seed
-    # the `price_tiers` column of the `settings` singleton row on its first read;
-    # the runtime source of truth is the `settings` table (editable via PATCH
-    # /settings/price-tiers). The discount applies only to catalog boards and is
-    # frozen into the order (historical audit even if rates change later).
-    PRICE_TIERS = env.json(
-        "PRICE_TIERS",
-        [
-            {
-                "code": "consumidor",
-                "name": "Precio Consumidor",
-                "rate": 0.0,
-                "is_active": True,
-                "sort_order": 1,
-            },
-            {
-                "code": "carpintero",
-                "name": "Precio Carpintero",
-                "rate": 0.02,
-                "is_active": True,
-                "sort_order": 2,
-            },
-            {
-                "code": "efectivo",
-                "name": "Precio Efectivo",
-                "rate": 0.05,
-                "is_active": True,
-                "sort_order": 3,
-            },
-        ],
-    )
+    # Sales tax rate (0.15 = 15%). Catalog prices are stored NET — the vendor's
+    # inventory publishes them that way and the documents show
+    # "Subtotal / IVA / Total" — so this is what turns a quote's subtotal into
+    # its total. Only seeds the `settings` singleton row on its first read; the
+    # runtime source of truth is the `settings` table (editable via PATCH
+    # /settings/taxes), because the rate changes by law (Ecuador went 12% -> 15%)
+    # and a redeploy is the wrong response to that. Every order freezes the rate
+    # it was billed at, so raising it never rewrites an existing invoice.
+    TAX_RATE = env.float("TAX_RATE", 0.15)
 
     # Maderable frontend base: composes the review link URL the client opens (the
     # origin must also be in CORS_ORIGINS). The dashboard uses HashRouter, hence

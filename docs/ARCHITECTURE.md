@@ -194,7 +194,7 @@ No cycles, enforced by convention:
   Orders render their own commercial document, production sheet and dispatch
   sheet from the frozen snapshot.
 - **`settings`** — a singleton row holding runtime-editable configuration
-  (cutting parameters, price tiers, company info, pre-order policy) that is
+  (cutting parameters, sales tax rate, company info, pre-order policy) that is
   only seeded from environment variables on first read; `PATCH` endpoints are
   the source of truth afterwards.
 - **`analytics`** — read-only reporting: revenue summaries, time series,

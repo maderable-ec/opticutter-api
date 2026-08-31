@@ -79,16 +79,17 @@ class PreOrderModel(TimestampMixin, AuditMixin, Base):
     materials: Mapped[list] = mapped_column(JSON)
     requirements: Mapped[list] = mapped_column(JSON)
 
-    # Billed additional services (not cut geometry): stored as-is and folded into
-    # the total after the discount (see build_pricing). Empty for quotes without
-    # services; server_default keeps pre-feature rows valid.
+    # Billed additional services (not cut geometry): stored as-is (tax-included,
+    # as staff registers them) and folded into the total by build_pricing. Empty
+    # for quotes without services; server_default keeps pre-feature rows valid.
     additional_services: Mapped[list] = mapped_column(
         JSON, nullable=False, default=list, server_default=text("'[]'")
     )
 
-    # Selected price tier (live discount; frozen once the order is confirmed).
-    price_tier_code: Mapped[str] = mapped_column(
-        String(32), default="consumidor", server_default="consumidor"
+    # Selected catalog price level (1 = list). Applied live on every read and
+    # frozen once the order is confirmed. See PRICE_LEVEL_NAMES.
+    price_level: Mapped[int] = mapped_column(
+        Integer, default=1, server_default="1", nullable=False
     )
 
     # Chosen packing heuristic (affects the recompute's geometry): kept so each

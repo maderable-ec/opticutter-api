@@ -229,6 +229,8 @@ def _board_record(**overrides):
         "gru": "MDP MELAMINA RH",
         "iva": Decimal("15.00"),
         "ven": Decimal("14.650000"),
+        "pv2": Decimal("13.500000"),
+        "pv3": Decimal("12.000000"),
         "obs": "Cashmere",
         "est": 1,
         "FecEli": None,
@@ -247,6 +249,8 @@ def _edge_record(**overrides):
         "gru": "CANTO MADERADO",
         "iva": Decimal("15.00"),
         "ven": Decimal("0.350000"),
+        "pv2": Decimal("0.350000"),
+        "pv3": Decimal("0.350000"),
         "obs": "Cashmere - CSH",
         "est": 1,
         "FecEli": None,
@@ -308,9 +312,10 @@ def test_sync_happy_path_creates_board_and_edge_banding(client, monkeypatch):
     assert board["type"] == "board"
     assert board["code"] == "1033"
     assert board["externalCode"] == "TABLEROS:1033"
-    # `ven` (14.65) comes without IVA; the catalog stores the price with the
-    # row's own IVA rate (15%) already included: 14.65 * 1.15 = 16.8475 -> 16.85.
-    assert board["price"] == 16.85
+    # `ven` is stored NET, exactly as the vendor publishes it: the tax is added
+    # once at the document level. No rounding to cents either — the source's 6
+    # decimals are what make the TAX-INCLUDED price come out round.
+    assert board["price"] == 14.65
     assert board["attributes"]["width"] == 2070
     assert board["attributes"]["height"] == 2800
     assert board["attributes"]["thickness"] == 15
@@ -512,7 +517,7 @@ def test_sync_reruns_update_instead_of_duplicating(client, monkeypatch):
 
     listed = client.get("/api/v1/products/?search=ROBLE BARROCO").json()["data"]
     assert len(listed) == 1
-    assert listed[0]["price"] == 23.0  # 20.00 * 1.15 IVA
+    assert listed[0]["price"] == 20.0  # net, as published
 
 
 def test_sync_deletes_unused_products_missing_from_a_later_read(client, monkeypatch):
@@ -1267,3 +1272,52 @@ def test_edge_bandings_for_non_board_returns_business_rule_error(client):
     resp = client.get(f"/api/v1/products/{edge['id']}/edge-bandings")
     assert resp.status_code == 422
     assert resp.json()["errors"][0]["code"] == "BUSINESS_RULE_ERROR"
+
+
+# --- Authorization: the seller syncs, but never edits the catalog --------------
+
+
+def test_seller_can_sync_the_catalog_but_not_edit_products(
+    client, db_session, monkeypatch
+):
+    """``products:sync`` is its own permission, not a slice of ``products:write``.
+
+    Pulling fresh prices is part of quoting (it is the pass that loads
+    price_2/price_3), so the seller must be able to run it; creating, editing or
+    deleting a product stays with the admin.
+    """
+    from src.modules.users.schemas import UserCreate
+    from src.modules.users.service import UserService
+    from src.shared.security import create_access_token
+
+    _load_inventory(monkeypatch, _board_record(), _edge_record())
+    seller = UserService(db_session).create(
+        UserCreate(
+            email="seller-sync@empresa.com",
+            password="seller-password",
+            role="vendedor",
+            full_name="Seller",
+            branch_id=1,
+        )
+    )
+    admin_auth = client.headers["Authorization"]
+    client.headers["Authorization"] = (
+        f"Bearer {create_access_token(seller.id, seller.role)}"
+    )
+    try:
+        assert _sync(client, dry_run=True).status_code == 200
+        assert _sync(client).status_code == 200
+
+        created = client.get("/api/v1/products/?search=ROBLE BARROCO").json()["data"][0]
+        assert (
+            client.post("/api/v1/products/", json=_board_payload()).status_code == 403
+        )
+        assert (
+            client.put(
+                f"/api/v1/products/{created['id']}", json={"price": 1.0}
+            ).status_code
+            == 403
+        )
+        assert client.delete(f"/api/v1/products/{created['id']}").status_code == 403
+    finally:
+        client.headers["Authorization"] = admin_auth

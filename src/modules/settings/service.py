@@ -1,5 +1,3 @@
-from typing import Optional
-
 from fastapi import Depends
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -9,12 +7,11 @@ from src.modules.settings.schemas import (
     CompanySettingsUpdate,
     CuttingSettingsUpdate,
     PreOrderSettingsUpdate,
-    PriceTiersUpdate,
+    TaxSettingsUpdate,
 )
 from src.shared.config import config
 from src.shared.context import get_current_user_id
 from src.shared.database import get_db
-from src.shared.exceptions import ValidationError
 
 # Company data is exposed in the API as ``name/tagline/...`` but stored with a
 # ``company_`` prefix on the singleton row (which also carries the cutting
@@ -62,7 +59,7 @@ class SettingsService:
             half_board_markup_pct=config.HALF_BOARD_MARKUP_PCT,
             preorder_validity_days=config.PREORDER_VALIDITY_DAYS,
             max_open_preorders_per_client=config.MAX_OPEN_PREORDERS_PER_CLIENT,
-            price_tiers=config.PRICE_TIERS,
+            tax_rate=config.TAX_RATE,
             company_name=config.COMPANY_NAME,
             company_tagline=config.COMPANY_TAGLINE,
             company_email=config.COMPANY_EMAIL,
@@ -117,29 +114,19 @@ class SettingsService:
             "max_open_preorders_per_client": settings.max_open_preorders_per_client,
         }
 
-    def get_price_tiers(self) -> list:
-        """Current price tiers (tolerates NULL/legacy by falling back to config default)."""
-        settings = self.get_or_init()
-        return settings.price_tiers or config.PRICE_TIERS
+    def get_tax_rate(self) -> float:
+        """Current sales tax rate (0.15 = 15%), the runtime source of truth.
 
-    def resolve_price_tier(self, code: Optional[str]) -> dict:
-        """Resolves an active price tier by its ``code`` (default ``consumidor``).
-
-        This is the single validation point for the ``priceTierCode`` sent by
-        the API client: an unknown or inactive code is a 422 (not a silent
-        default). Consumed by the optimizer, pre-orders, and orders to
-        apply/freeze the discount.
+        Read by ``build_pricing`` on every quote and frozen into each order, and
+        by the catalog sync to flag an article the vendor rates differently.
         """
-        code = code or "consumidor"
-        for tier in self.get_price_tiers():
-            if tier.get("code") == code and tier.get("is_active", True):
-                return tier
-        raise ValidationError(f"Nivel de precio desconocido o inactivo: {code}")
+        return self.get_or_init().tax_rate
 
-    def update_price_tiers(self, data: PriceTiersUpdate) -> SettingsModel:
-        """Replaces the entire price-tier list (admin only)."""
+    def update_taxes(self, data: TaxSettingsUpdate) -> SettingsModel:
+        """Applies a partial PATCH to the tax settings."""
         settings = self.get_or_init()
-        settings.price_tiers = [t.model_dump(mode="json") for t in data.price_tiers]
+        for field, value in data.model_dump(exclude_unset=True).items():
+            setattr(settings, field, value)
         self._stamp_updated_by(settings)
         self.db.commit()
         self.db.refresh(settings)

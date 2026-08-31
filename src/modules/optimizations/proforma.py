@@ -334,7 +334,8 @@ class ProformaService:
         )
         story.append(
             Paragraph(
-                f"{validity_note}Los precios no incluyen IVA.",
+                f"{validity_note}Valores en USD. Los precios no incluyen IVA; "
+                f"el impuesto se detalla en el total.",
                 ParagraphStyle(
                     "Note",
                     parent=styles["Normal"],
@@ -1039,17 +1040,23 @@ class ProformaService:
     def _build_services_table(carrier: ProformaCarrier, cell_style) -> Table:
         """Additional services: name, quantity, unit price and subtotal.
 
+        Printed NET, like every other line on the document, even though staff
+        registers these prices tax-included: the column has to add up to the
+        subtotal the tax line is computed over. The per-line rounding matches
+        ``build_pricing`` exactly, so the two can't disagree by a cent.
+
         Spans the full content width, mirroring the materials table."""
         data = [["Servicio", "Cantidad", "P. Unit.", "Subtotal"]]
         for entry in carrier.additional_services or []:
             qty = entry.get("quantity", 0)
-            unit = entry.get("unit_price", 0)
+            net_total = carrier.service_net(entry)
+            unit = net_total / qty if qty else 0.0
             data.append(
                 [
                     Paragraph(entry.get("name") or "N/A", cell_style),
                     f"{qty} u",
                     f"${unit:.2f}",
-                    f"${unit * qty:.2f}",
+                    f"${net_total:.2f}",
                 ]
             )
         table = Table(
@@ -1067,8 +1074,13 @@ class ProformaService:
 
     @staticmethod
     def _build_totals_table(carrier: ProformaCarrier) -> Table:
-        has_discount = bool(carrier.discount_amount and carrier.discount_amount > 0)
-        has_services = bool(carrier.additional_services)
+        """The money block: net breakdown, then one tax line, then the total.
+
+        There is no discount row any more. The price level the seller chose is a
+        different unit price per product, already printed on each line, so the
+        subtotal is simply the sum of the document — which is also what makes
+        "Subtotal + IVA = Total" verifiable on the page.
+        """
         summary_data = []
         if carrier.edge_bandings_summary:
             summary_data.append(
@@ -1081,22 +1093,14 @@ class ProformaService:
             summary_data.append(
                 ["Total de tableros utilizados:", str(carrier.total_boards_used)]
             )
-        # Subtotal is shown whenever there's an adjustment after it (discount or
-        # services), so the arithmetic to the total reads clearly.
-        if has_discount or has_services:
-            summary_data.append(["Subtotal:", f"${carrier.subtotal:.2f}"])
-        # A single discount row (price tier), only over catalog boards.
-        if has_discount:
-            pct = carrier.discount_rate * 100
-            name = carrier.price_tier_name or "descuento"
-            summary_data.append(
-                [f"Descuento {name} (-{pct:g}%):", f"-${carrier.discount_amount:.2f}"]
-            )
-        # Additional services (not discounted), added on top.
-        if has_services:
+        if carrier.additional_services:
             summary_data.append(
                 ["Servicios adicionales:", f"${carrier.services_total:.2f}"]
             )
+        summary_data.append(["Subtotal:", f"${carrier.subtotal:.2f}"])
+        summary_data.append(
+            [f"IVA ({carrier.tax_rate * 100:g}%):", f"${carrier.tax_amount:.2f}"]
+        )
         summary_data.append(["Costo total estimado:", f"${carrier.total_cost:.2f}"])
         return _totals_table(summary_data)
 

@@ -11,6 +11,7 @@ route is protected with ``require_role(*RESOURCE_ROLES[key])`` (see ``dependenci
 | branches:read                 | yes           | yes      | yes      | yes       |
 | clients:manage                | yes           | yes      | no       | no        |
 | products:write                | yes           | no       | no       | no        |
+| products:sync                 | yes           | yes      | no       | no        |
 | products:read                 | yes           | yes      | no       | no        |
 | additional_services:write     | yes           | no       | no       | no        |
 | additional_services:read      | yes           | yes      | no       | no        |
@@ -53,6 +54,13 @@ RESOURCE_ROLES: dict[str, tuple[UserRole, ...]] = {
     "branches:read": (_ADMIN, _SELLER, _OPERATOR, _BANDER),
     "clients:manage": (_ADMIN, _SELLER),
     "products:write": (_ADMIN,),
+    # Catalog sync from the vendor's inventory: deliberately NOT products:write.
+    # The seller needs to pull fresh prices before quoting (it is the step that
+    # loads price_2/price_3), but must not be able to create, edit or delete a
+    # product. The sync is idempotent and has ?dryRun=true; what it does grant is
+    # the reconciliation pass, which deactivates products the source stopped
+    # bringing.
+    "products:sync": (_ADMIN, _SELLER),
     "products:read": (_ADMIN, _SELLER),
     # Additional-services catalog: admin manages it; the seller reads it to add
     # services to a quote.

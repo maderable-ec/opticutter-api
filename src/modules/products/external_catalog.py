@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 # originals. `cin` is populated on every row this query returns.
 _QUERY = text(
     """
-    SELECT cin, nom, mar, tip, cat, gru, iva, ven, obs, est, FecEli
+    SELECT cin, nom, mar, tip, cat, gru, iva, ven, pv2, pv3, obs, est, FecEli
     FROM marticulo
     WHERE cat = 'TABLEROS'
        OR (cat = 'TAPACANTOS' AND tip = 'TAPACANTOS')
@@ -69,7 +69,13 @@ class SourceRow:
     categoria: str
     grupo: str
     iva: str
+    # The vendor publishes three sale prices per article, all net of tax:
+    # `ven` (list) plus `pv2`/`pv3`, the reduced levels a seller can quote at.
+    # `pv2`/`pv3` come through as "0.000000" when nobody ever loaded them,
+    # which the validator reads as "no reduced price", never as free.
     p_venta: str
+    p_venta_2: str
+    p_venta_3: str
     obs: str
 
 
@@ -110,6 +116,8 @@ class ExternalCatalogSource(ExternalMySQLSource):
                 grupo=text_value(record["gru"]),
                 iva=text_value(record["iva"]),
                 p_venta=text_value(record["ven"]),
+                p_venta_2=text_value(record["pv2"]),
+                p_venta_3=text_value(record["pv3"]),
                 obs=text_value(record["obs"]),
             )
             bucket = retired if is_retired(record["est"], record["FecEli"]) else active

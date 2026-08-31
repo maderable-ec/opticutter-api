@@ -22,7 +22,7 @@ def _create_client(client):
     ).json()["data"]
 
 
-def _create_board(client, code="MEL18"):
+def _create_board(client, code="MEL18", price_2=None, price_3=None):
     return client.post(
         "/api/v1/products/",
         json={
@@ -30,6 +30,8 @@ def _create_board(client, code="MEL18"):
             "code": code,
             "name": f"Melamina {code}",
             "price": 45.5,
+            "price2": price_2,
+            "price3": price_3,
             "attributes": {"height": 2440, "width": 1220, "thickness": 18},
         },
     ).json()["data"]
@@ -248,31 +250,33 @@ def test_optimize_without_client_is_anonymous(client):
     assert data["optimizationHash"] == with_client["optimizationHash"]
 
 
-def test_marking_a_board_discountable_reprices_without_touching_the_hash(client):
-    """The checkbox re-prices the SAME cut plan; it must never re-run the search.
+def test_changing_the_price_level_reprices_without_touching_the_hash(client):
+    """The level re-prices the SAME cut plan; it must never re-run the search.
 
-    The flag is deliberately absent from ``_compute_hash`` (like clientId and
-    priceTierCode), so toggling it has to hit the cache. If this ever fails, the
-    seller pays a full optimization per click.
+    Neither the level nor the per-board mark is in ``_compute_hash`` (like
+    clientId), so switching either has to hit the cache. If this ever fails, the
+    seller pays a full optimization per click — with the client at the counter.
     """
     created_client = _create_client(client)
-    created_board = _create_board(client)
+    created_board = _create_board(client, price_2=40.0)
 
     base = _optimize_payload(created_client["id"], created_board["id"])
-    base["priceTierCode"] = "carpintero"
+    base["priceLevel"] = 2
     plain = client.post("/api/v1/optimize/", json=base).json()["data"]
 
     marked = _optimize_payload(created_client["id"], created_board["id"])
-    marked["priceTierCode"] = "carpintero"
-    marked["materials"][0]["applyDiscount"] = True
-    discounted = client.post("/api/v1/optimize/", json=marked).json()["data"]
+    marked["priceLevel"] = 2
+    marked["materials"][0]["applyPriceLevel"] = True
+    leveled = client.post("/api/v1/optimize/", json=marked).json()["data"]
 
-    assert discounted["optimizationHash"] == plain["optimizationHash"]
-    assert plain["pricing"]["discountBase"] == 0.0
-    assert plain["pricing"]["discountAmount"] == 0.0
-    assert discounted["pricing"]["discountBase"] == discounted["totalBoardsCost"]
-    assert discounted["pricing"]["discountAmount"] > 0
-    assert discounted["pricing"]["total"] < plain["pricing"]["total"]
+    assert leveled["optimizationHash"] == plain["optimizationHash"]
+    # This job fits half a board, so both are billed as one: 45.5/2*1.10 = 25.03
+    # at list, 40.0/2*1.10 = 22.00 at level 2. Unmarked bills at list; marked
+    # bills at the level, and the line itself moves — there is no discount row.
+    assert plain["totalBoardsCost"] == 25.03
+    assert leveled["totalBoardsCost"] == 22.0
+    assert leveled["materialsSummary"][0]["costPerUnit"] == 22.0
+    assert leveled["pricing"]["total"] < plain["pricing"]["total"]
 
 
 def test_optimize_unknown_client_returns_404(client):
@@ -1044,7 +1048,7 @@ def test_marking_a_board_whole_reshapes_without_touching_the_hash(client):
     """The checkbox re-forms the SAME cut plan; it must never re-run the search.
 
     The flag is deliberately absent from ``_compute_hash`` (like clientId and
-    priceTierCode): re-optimizing without the half spec would let the beam
+    priceLevel): re-optimizing without the half spec would let the beam
     re-partition the pool and move pieces the client already approved.
     """
     created_client = _create_client(client)
@@ -1195,21 +1199,25 @@ def test_whole_board_is_ignored_on_inline_materials(client):
     assert a == b
 
 
-def test_whole_board_and_discount_compose(client):
-    """Promote first, discount after: the base is what is actually charged."""
+def test_whole_board_and_price_level_compose(client):
+    """Level first, promote after: the whole sheet is billed at the level's price.
+
+    The order matters — ``apply_whole_boards`` reads the material's
+    ``cost_per_unit`` as the full sheet's price, so it has to already be the
+    level's or the promotion would restore the list price.
+    """
     created_client = _create_client(client)
-    created_board = _create_board(client)
+    created_board = _create_board(client, price_2=40.0)
 
     payload = _sparse_payload(
         created_client["id"], created_board["id"], whole_board=True
     )
-    payload["priceTierCode"] = "carpintero"
-    payload["materials"][0]["applyDiscount"] = True
+    payload["priceLevel"] = 2
+    payload["materials"][0]["applyPriceLevel"] = True
     data = client.post("/api/v1/optimize/", json=payload).json()["data"]
 
-    assert data["totalBoardsCost"] == 45.5
-    assert data["pricing"]["discountBase"] == 45.5
-    assert data["pricing"]["discountAmount"] > 0
+    assert data["totalBoardsCost"] == 40.0
+    assert data["pricing"]["subtotal"] == 40.0
 
 
 # --- Sheet order: the whole boards first, the half board last ---------------

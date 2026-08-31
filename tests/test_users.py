@@ -581,6 +581,10 @@ def test_permission_matrix_reflects_roles():
     assert RESOURCE_ROLES["users:manage"] == (UserRole.ADMIN,)
     assert RESOURCE_ROLES["analytics"] == (UserRole.ADMIN,)
     assert RESOURCE_ROLES["products:read"] == (UserRole.ADMIN, UserRole.SELLER)
+    # The catalog sync is deliberately its own key: the seller pulls fresh prices
+    # (it is what loads price_2/price_3) without gaining product CRUD.
+    assert RESOURCE_ROLES["products:sync"] == (UserRole.ADMIN, UserRole.SELLER)
+    assert UserRole.SELLER not in RESOURCE_ROLES["products:write"]
     assert UserRole.OPERATOR in RESOURCE_ROLES["cutting_plan"]
     assert UserRole.OPERATOR not in RESOURCE_ROLES["orders:write"]
 

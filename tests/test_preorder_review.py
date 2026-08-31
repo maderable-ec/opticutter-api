@@ -118,7 +118,9 @@ def test_public_review_detail_is_sanitized(client):
     assert data["status"] == "sent"
     assert data["orderCode"] is None
     assert data["clientName"] == "Ada Lovelace"
-    assert data["total"] == pre["optimization"]["totalBoardsCost"]
+    assert data["subtotal"] == pre["optimization"]["totalBoardsCost"]
+    assert data["taxAmount"] == round(data["subtotal"] * 0.15, 2)
+    assert data["total"] == round(data["subtotal"] + data["taxAmount"], 2)
     assert len(data["lines"]) == 1
     assert data["lines"][0]["productCode"] == "MEL18"
     assert len(data["pieces"]) == 1

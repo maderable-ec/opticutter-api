@@ -638,9 +638,13 @@ def test_order_charges_edge_banding(client, db_session):
     assert eb_line["lineTotal"] == pytest.approx(round(billed * 2.0, 2))
     assert eb_line["linearM"] is not None
 
-    # Immutable totals = boards + edge bandings.
-    expected_total = round(sum(line["lineTotal"] for line in data["lines"]), 2)
-    assert data["subtotal"] == data["total"] == pytest.approx(expected_total)
+    # Immutable totals: the net subtotal is boards + edge bandings, the total
+    # adds the frozen tax on top.
+    expected_subtotal = round(sum(line["lineTotal"] for line in data["lines"]), 2)
+    assert data["subtotal"] == pytest.approx(expected_subtotal)
+    assert data["total"] == pytest.approx(
+        round(expected_subtotal + round(expected_subtotal * 0.15, 2), 2)
+    )
 
     # The piece freezes its edge banding (nominal sides).
     assert data["pieces"][0]["edges"]["sides"] == ["top", "bottom"]
