@@ -262,7 +262,12 @@ def strip_fill(
     max_repeat: Optional[int] = None,
     min_rect_size: float = 0.1,
 ) -> Optional[BinFill]:
-    """``constructors.strip_fill`` executed natively (used by ``complete_probe``)."""
+    """``constructors.strip_fill`` executed natively.
+
+    No production caller today: ``gen_fills`` seeds its own strip
+    variants inside the crate, so this crosses only for the differential
+    harnesses, which need to call it one variant at a time.
+    """
     raw = opticutter_core.strip_fill(
         _encode_pool(pool),
         spec.width,
@@ -289,7 +294,12 @@ def greedy_fill(
     config: GreedyConfig,
     min_rect_size: float = 0.1,
 ) -> Optional[BinFill]:
-    """``constructors.greedy_fill`` executed natively (used by ``complete_probe``)."""
+    """``constructors.greedy_fill`` executed natively.
+
+    Used by ``search._sequential_fill`` — the stage-0 baseline greedy,
+    which is outside a ``_Searcher`` and so dispatches on
+    ``available()`` itself rather than on a cached flag.
+    """
     raw = opticutter_core.greedy_fill(
         _encode_pool(pool),
         spec.width,

@@ -16,7 +16,6 @@ from src.cutting.enums import (
 )
 from src.cutting.models import (
     Cut,
-    CuttingLayout,
     Material,
     Piece,
     PlacedPiece,
@@ -155,21 +154,6 @@ class GuillotineOptimizer:
 
         return self.placed_pieces, unplaced_pieces
 
-    def _fit_score(self, rect: Rectangle, piece: Piece):
-        """Fit score of a gap for a piece (lower = better).
-
-        ``MAX_EFFICIENCY`` uses Best-Area-Fit: the leftover area after placing
-        the piece (``rect.area - piece.area``). ``LONG_OFFCUTS`` uses
-        Bottom-Left: it prioritizes the gap furthest left and down (``rect.x``,
-        ``rect.y``), breaking ties by area fit — this pushes pieces into a
-        corner and leaves the dominant leftover as a continuous strip on the
-        opposite side.
-        """
-        leftover = rect.area - piece.area
-        if self.strategy == PackingStrategy.LONG_OFFCUTS:
-            return (rect.x, rect.y, leftover)
-        return leftover
-
     def _place_piece(self, piece: Piece) -> bool:
         best_rect_index = -1
         best_rotated = False
@@ -177,8 +161,15 @@ class GuillotineOptimizer:
 
         # Hoisted out of the loop: this runs tens of millions of times per
         # request, so every attribute lookup and method call inside it is paid
-        # per (piece, gap) pair. ``contains`` and ``_fit_score`` are inlined
-        # here for the same reason; both remain as methods for other callers.
+        # per (piece, gap) pair. ``Rectangle.contains`` and the fit score are
+        # inlined here for the same reason.
+        #
+        # The fit score ranks gaps, lower first. ``MAX_EFFICIENCY`` is
+        # Best-Area-Fit: the leftover area after placing the piece.
+        # ``LONG_OFFCUTS`` is Bottom-Left — the gap furthest left and down
+        # wins, ties broken by area fit — which pushes pieces into a corner and
+        # leaves the dominant leftover as one continuous strip on the opposite
+        # side.
         piece_w = piece.width
         piece_h = piece.height
         piece_area = piece.area
@@ -493,13 +484,3 @@ class GuillotineOptimizer:
                 )
 
         return new_rects
-
-    def as_layout(self, sheet_number: int = 1) -> CuttingLayout:
-        """Snapshot of this packer's state as a ``CuttingLayout``."""
-        return CuttingLayout(
-            material=self.material,
-            placed_pieces=self.placed_pieces,
-            remainders=self.remainders,
-            sheet_number=sheet_number,
-            cuts=self.cuts,
-        )

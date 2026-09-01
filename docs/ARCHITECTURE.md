@@ -51,7 +51,9 @@ src/
 │   ├── packer.py                GuillotineOptimizer — packs ONE bin
 │   ├── constructors.py          Candidate bin fills (greedy portfolio, strip patterns)
 │   ├── exact.py                 CP-SAT endgame: exact 2-stage fill of one bin (OR-Tools)
+│   ├── rust_backend.py          Bridge to the native kernel (optional wheel)
 │   └── search.py                optimize_bins — board count as an explicit cost objective
+rust/                           opticutter_core — native port of packer + constructors
 main.py                         Creates the app, registers routers + middleware + handlers
 alembic/                        Migrations (env.py imports Base and every module's model)
 ```
@@ -250,12 +252,27 @@ what lets a half board be targeted on purpose.
 budgets, and raises `EntityNotFoundError` if a requirement references an unknown
 catalog board instead of silently dropping it.
 
-OR-Tools is the one heavyweight dependency here and it is **optional at
-runtime**: if `ortools` can't be imported, `exact.py` returns `None` everywhere
-and the engine falls back to its heuristic search. Results stay deterministic
-either way — the optimizer payload is cached by a hash of its inputs, and that
-hash includes the engine version, the search budgets and whether the solver is
-available.
+Two heavyweight dependencies live here and **both are optional at runtime**:
+
+- **OR-Tools** (`exact.py`). If `ortools` can't be imported, every entry point
+  returns `None` and the engine falls back to its heuristic search. This one
+  *does* change the answer, so it enters the cache hash: `exact_available()`
+  folds into `ExactConfig.enabled`, alongside the engine version and the search
+  budgets.
+- **`opticutter_core`** (`rust_backend.py`), the native packing kernel in
+  `rust/` — a byte-identical transliteration of `packer.py` + `constructors.py`
+  + the `gen_fills` loop. It is a pure speedup, so it is deliberately **NOT** in
+  the hash and `ENGINE_VERSION` does not move for it: a box without the wheel
+  reproduces the same layouts and can read the same Redis entries. Selection is
+  `OPT_ENGINE_BACKEND` (`auto` | `rust` | `python`), resolved once per process.
+
+Note the wheel is checked *before* the variable, so a box that asks for `rust`
+without one runs the interpreted path silently — 3x slower. That is why
+`rust_backend.status()` / `degraded()` exist and why `main.py` logs the engine
+at WARNING on startup: verify a deployment with `grep 'motor:'` on its logs.
+
+Results stay deterministic either way — the optimizer payload is cached by a
+hash of its inputs.
 
 ## API contract
 

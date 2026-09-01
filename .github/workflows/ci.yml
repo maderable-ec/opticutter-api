@@ -80,6 +80,15 @@ jobs:
 
       - run: pip install -r requirements_dev.txt
 
+      # rust/ changes almost never (one commit since the port landed) while its
+      # release profile is the slowest one possible ON PURPOSE — `lto = true`
+      # and `codegen-units = 1` in rust/Cargo.toml, so the geometry stays
+      # bit-identical to the Python oracle. Without a cache that cold build is
+      # paid on every push for a crate that did not move.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
       # The native packing kernel (rust/). It is a byte-identical port of the
       # interpreted geometry, so the suite passes with or without it — but the
       # build that ships HAS it, so CI must exercise that path. The runner
@@ -109,7 +118,17 @@ jobs:
       # The pure-Python geometry is the oracle and the fallback for any box
       # without the wheel, so it cannot be allowed to rot behind the kernel.
       # Only the cutting layer is re-run: nothing else changes with the backend.
+      #
+      # `not benchmark` mirrors the step above, and here it has a second reason:
+      # the one benchmark in these files pins CP-SAT's arbitrary pick among
+      # equally optimal packings, and CP-SAT is Python on BOTH backends — the
+      # packing kernel cannot change what that test asserts. Re-running it on
+      # this path proved nothing and cost 187s of the step's 285s (it is `slow`
+      # too, and the interpreted path is 3.5x slower). Its home is
+      # `make benchmark`, against the build that actually ships.
       - name: Re-run the cutting suite on the Python fallback
         env:
           OPT_ENGINE_BACKEND: python
-        run: pytest -q --no-cov tests/test_cutting.py tests/unit/test_cutting_search.py
+        run: >-
+          pytest -q --no-cov -m "not benchmark"
+          tests/test_cutting.py tests/unit/test_cutting_search.py
