@@ -3,9 +3,11 @@
 A *pool* lets one group of pieces be cut across a catalog board (infinite supply)
 and one or more client/company offcuts of the same material (finite supply). It
 reuses the pure cutting engine — ``GuillotineOptimizer`` for each finite offcut
-sheet and ``MultiSheetGuillotineOptimizer`` for the catalog — so every resulting
-layout stays single-material and flows unchanged through billing, persistence and
-the proforma.
+sheet and ``search.optimize_bins`` for the catalog — so every resulting layout
+stays single-material and flows unchanged through billing, persistence and the
+proforma. Note the offcut half is the one packing path that never reaches the
+Rust kernel: the crate exports fills, not a single-bin packer, and this needs
+both the ``unplaced`` list and the trims-exceed-the-sheet ``ValueError``.
 
 Three fill orders (see ``PoolFillOrder``):
 - ``offcuts_first``: fill the offcuts, then the catalog with the remainder.
