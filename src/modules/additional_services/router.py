@@ -29,7 +29,7 @@ router = APIRouter(
 )
 
 # Catalog read: admin + vendedor (the seller needs it for the quote picker).
-# Write (create/update/delete): admin only.
+# Write (create/update/delete): admin + vendedor.
 _READ = Depends(require_permission("additional_services:read"))
 _WRITE = Depends(require_permission("additional_services:write"))
 

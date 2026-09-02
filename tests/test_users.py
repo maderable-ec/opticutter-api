@@ -585,6 +585,9 @@ def test_permission_matrix_reflects_roles():
     # (it is what loads price_2/price_3) without gaining product CRUD.
     assert RESOURCE_ROLES["products:sync"] == (UserRole.ADMIN, UserRole.SELLER)
     assert UserRole.SELLER not in RESOURCE_ROLES["products:write"]
+    # The seller has full CRUD on the additional-services catalog (registers the
+    # services they quote), unlike the product catalog.
+    assert UserRole.SELLER in RESOURCE_ROLES["additional_services:write"]
     assert UserRole.OPERATOR in RESOURCE_ROLES["cutting_plan"]
     assert UserRole.OPERATOR not in RESOURCE_ROLES["orders:write"]
 

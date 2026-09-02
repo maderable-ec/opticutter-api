@@ -2,8 +2,8 @@
 
 Covers: the pure ``build_pricing`` fold (services registered tax-included and
 converted to net so one tax line covers them), the catalog CRUD + RBAC (admin
-writes, seller only reads), the pre-order (quote) selection, the freeze into the
-order, and the public review projection.
+and seller both have full CRUD), the pre-order (quote) selection, the freeze into
+the order, and the public review projection.
 """
 
 from src.modules.optimizations.pricing import build_pricing
@@ -86,8 +86,7 @@ def test_duplicate_name_conflicts(client):
     assert dup.status_code == 409
 
 
-def test_seller_reads_but_cannot_write(client, db_session):
-    _create_service(client, name="Perforación")
+def test_seller_has_full_service_crud(client, db_session):
     seller = UserService(db_session).create(
         UserCreate(
             email="seller-services@empresa.com",
@@ -103,8 +102,22 @@ def test_seller_reads_but_cannot_write(client, db_session):
     )
     try:
         assert client.get("/api/v1/additional-services/").status_code == 200
-        blocked = _create_service(client, name="Nuevo")
-        assert blocked.status_code == 403
+
+        created = _create_service(client, name="Nuevo")
+        assert created.status_code == 201
+        service_id = created.json()["data"]["id"]
+
+        edited = client.put(
+            f"/api/v1/additional-services/{service_id}",
+            json={"name": "Nuevo", "price": 9.0, "isActive": True},
+        )
+        assert edited.status_code == 200
+        assert edited.json()["data"]["price"] == 9.0
+
+        assert (
+            client.delete(f"/api/v1/additional-services/{service_id}").status_code
+            == 204
+        )
     finally:
         client.headers["Authorization"] = admin_auth
 
