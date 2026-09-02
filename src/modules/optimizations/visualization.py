@@ -24,6 +24,10 @@ COLOR_LABEL = "#212121"
 COLOR_EFFICIENCY = "#2E7D32"
 COLOR_WASTE_FILL = "#ECECEC"  # neutral grey: contrasts with the pieces' coral
 COLOR_WASTE_OUTLINE = "#9E9E9E"
+# Offcut size labels: darker than the outline so they read over the fill, lighter
+# than COLOR_DIM so a leftover never competes with a piece dimension for attention
+# (mirrors the web diagram's WASTE_LABEL).
+COLOR_WASTE_LABEL = "#6C757D"
 
 # Piece outline thickness. Banded sides are highlighted with a thicker strip
 # along the edge, inside the piece.
@@ -46,6 +50,7 @@ class _DiagramTheme:
     efficiency: str
     waste_fill: str
     waste_outline: str
+    waste_label: str  # offcut size labels
     edge: str  # edge-banding strip color
 
 
@@ -58,6 +63,7 @@ _BRAND_THEME = _DiagramTheme(
     efficiency=COLOR_EFFICIENCY,
     waste_fill=COLOR_WASTE_FILL,
     waste_outline=COLOR_WASTE_OUTLINE,
+    waste_label=COLOR_WASTE_LABEL,
     edge=COLOR_PIECE_OUTLINE,
 )
 # Monochrome: outlines/dimensions/labels in black, piece in white; the grey
@@ -72,6 +78,7 @@ _MONO_THEME = _DiagramTheme(
     efficiency="black",
     waste_fill=COLOR_WASTE_FILL,
     waste_outline=COLOR_WASTE_OUTLINE,
+    waste_label="black",
     edge="black",
 )
 
@@ -176,8 +183,10 @@ class VisualizationService:
         The canvas adopts the board's aspect ratio so that, embedded full-page,
         it fills it to the maximum. Each piece's height is dimensioned along the
         left edge (vertical text) and its width along the bottom edge; the label
-        is centered. Returns the PNG buffer and its dimensions in px so it can be
-        embedded preserving the aspect ratio.
+        is centered. Offcuts are dimensioned the same way (in the muted waste
+        color) when they are large enough to hold the text. Returns the PNG
+        buffer and its dimensions in px so it can be embedded preserving the
+        aspect ratio.
         """
         layout = group.get("layout", group)
         count = group.get("count", 1)
@@ -295,6 +304,26 @@ class VisualizationService:
                     outline=theme.waste_outline,
                     width=1,
                 )
+                # Size on the edges, like a piece: the height (horizontal extent
+                # after rotation) along the bottom, the width (vertical extent)
+                # along the left, rotated. Each is dropped if it doesn't fit.
+                pad = 4
+                r_alto = _text_image(
+                    str(int(remainder["height"])), dim_font, theme.waste_label
+                )
+                if r_alto.width <= rw - 2 * pad and r_alto.height <= rh - 2 * pad:
+                    img.paste(
+                        r_alto,
+                        (rx + (rw - r_alto.width) // 2, ry + rh - r_alto.height - pad),
+                        r_alto,
+                    )
+                r_ancho = _text_image(
+                    str(int(remainder["width"])), dim_font, theme.waste_label
+                ).rotate(90, expand=True)
+                if r_ancho.height <= rh - 2 * pad and r_ancho.width <= rw - 2 * pad:
+                    img.paste(
+                        r_ancho, (rx + pad, ry + (rh - r_ancho.height) // 2), r_ancho
+                    )
 
         buffer = io.BytesIO()
         img.save(buffer, format="PNG")

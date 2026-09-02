@@ -13,7 +13,7 @@ route is protected with ``require_role(*RESOURCE_ROLES[key])`` (see ``dependenci
 | products:write                | yes           | no       | no       | no        |
 | products:sync                 | yes           | yes      | no       | no        |
 | products:read                 | yes           | yes      | no       | no        |
-| additional_services:write     | yes           | no       | no       | no        |
+| additional_services:write     | yes           | yes      | no       | no        |
 | additional_services:read      | yes           | yes      | no       | no        |
 | optimizer (optimizations/drafts) | yes        | yes      | no       | no        |
 | preorders                     | yes           | yes      | no       | no        |
@@ -62,9 +62,9 @@ RESOURCE_ROLES: dict[str, tuple[UserRole, ...]] = {
     # bringing.
     "products:sync": (_ADMIN, _SELLER),
     "products:read": (_ADMIN, _SELLER),
-    # Additional-services catalog: admin manages it; the seller reads it to add
-    # services to a quote.
-    "additional_services:write": (_ADMIN,),
+    # Additional-services catalog: admin and seller both manage it (create,
+    # edit, delete) — the seller registers the services they quote.
+    "additional_services:write": (_ADMIN, _SELLER),
     "additional_services:read": (_ADMIN, _SELLER),
     "optimizer": (_ADMIN, _SELLER),
     "preorders": (_ADMIN, _SELLER),

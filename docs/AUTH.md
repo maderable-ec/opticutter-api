@@ -10,7 +10,7 @@ Auth contract for the Cutter API, consumed by the Maderable web dashboard
 | Role (DB value) | Description |
 |------------------|-------------|
 | `administrador`  | Full access (management, settings, analytics). |
-| `vendedor`       | Sales: catalog (read), clients, optimizer, pre-orders, orders. |
+| `vendedor`       | Sales: product catalog (read), additional-services catalog (full CRUD), clients, optimizer, pre-orders, orders. |
 | `operador`       | Workshop (cutting): reads orders, drives the cutting plan, marks pieces cut. |
 | `canteador`      | Workshop (edge banding): the shared shop-floor board, the start/finish banding actions, and completing orders; does **not** see order detail. |
 
@@ -82,6 +82,8 @@ route is protected with `Depends(require_permission("<key>"))`.
 | `analytics`          | ✅ | ❌ | ❌ | ❌ | `/analytics/*` |
 | `products:read`      | ✅ | ✅ | ❌ | ❌ | `GET /products/*` |
 | `products:write`     | ✅ | ❌ | ❌ | ❌ | `POST/PUT/DELETE /products/*` |
+| `additional_services:read`  | ✅ | ✅ | ❌ | ❌ | `GET /additional-services/*` |
+| `additional_services:write` | ✅ | ✅ | ❌ | ❌ | `POST/PUT/DELETE /additional-services/*` |
 | `clients:manage`     | ✅ | ✅ | ❌ | ❌ | `/clients/*` |
 | `optimizer`          | ✅ | ✅ | ❌ | ❌ | `/optimize/*`, `/optimization-drafts/*` |
 | `preorders`          | ✅ | ✅ | ❌ | ❌ | `/preorders/*` (internal; the client-facing flow is public, see below) |
