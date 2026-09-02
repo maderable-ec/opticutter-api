@@ -180,6 +180,16 @@ class Config:
     # rule here.
     OPT_EXACT_ROOT_PATIENCE = env.int("OPT_EXACT_ROOT_PATIENCE", 2)
 
+    # Smallest side (mm) a leftover must have on BOTH axes to count as an offcut
+    # the shop would rack, rather than scrap. Read only by
+    # ``src/cutting/consolidate.py``, which re-derives each finished board's cut
+    # tree so the same placements leave fewer, bigger offcuts; this is what stops
+    # it trading usable material for one prettier rectangle. It never filters the
+    # reported leftovers — only ranks the candidate trees. In the hash because it
+    # changes the geometry that gets reported (the cuts and the leftovers), even
+    # though it can never change a board count.
+    OPT_MIN_USABLE_OFFCUT_MM = env.float("OPT_MIN_USABLE_OFFCUT_MM", 150.0)
+
     # How many materials of ONE request may be optimized in parallel, each in its
     # own process (src/modules/optimizations/parallel.py). 1 disables it, and the
     # code then takes a path byte-identical to the old sequential loop.

@@ -80,9 +80,13 @@ from src.cutting.parameters import CuttingParameters
 # sheet; 7 = the solver's call allowance drops from
 # 40 to 20 (``ExactConfig.max_calls``), which changes the layout of any pool that
 # used to ask more than twenty times -- the bill is identical on all 584 real
-# pools, the geometry is not. Also bump this when the pinned ortools version
-# moves, since a solver upgrade can return a different solution.
-ENGINE_VERSION = 8
+# pools, the geometry is not; 9 = finished boards get their cut tree re-derived
+# for compact leftovers (``consolidate.py``). That one moves no piece and no
+# board -- only the ``cuts`` and ``remainders`` a payload reports -- but both are
+# serialized into the cached payload and the order snapshot, so a stale Redis
+# entry would keep drawing the old diagram. Also bump this when the pinned
+# ortools version moves, since a solver upgrade can return a different solution.
+ENGINE_VERSION = 9
 
 # A half bin is only worth opening near the end of a job: gate it by remaining
 # area so early states don't waste decodes on fills the cost objective would

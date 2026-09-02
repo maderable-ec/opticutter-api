@@ -3,6 +3,11 @@
 No framework dependencies: just dataclasses and optimization logic.
 """
 
+from src.cutting.consolidate import (
+    DEFAULT_MIN_USABLE_OFFCUT,
+    consolidate_layout,
+    consolidate_layouts,
+)
 from src.cutting.enums import (
     PACKING_STRATEGY_SPLIT_RULE,
     PackingStrategy,
@@ -29,6 +34,7 @@ from src.cutting.search import (
 )
 
 __all__ = [
+    "DEFAULT_MIN_USABLE_OFFCUT",
     "ENGINE_VERSION",
     "PACKING_STRATEGY_SPLIT_RULE",
     "BinSpec",
@@ -45,6 +51,8 @@ __all__ = [
     "Rectangle",
     "SearchBudget",
     "SplitRule",
+    "consolidate_layout",
+    "consolidate_layouts",
     "exact_available",
     "optimize_bins",
 ]

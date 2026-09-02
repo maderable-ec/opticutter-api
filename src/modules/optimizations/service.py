@@ -261,6 +261,7 @@ class OptimizationService:
                     ),
                     seed=request.variant,
                     exact_config=exact_config,
+                    min_usable_offcut=config.OPT_MIN_USABLE_OFFCUT_MM,
                 )
             )
             # The edge/net maps stay in the parent: cheap to build, pure, and the
@@ -461,6 +462,9 @@ class OptimizationService:
                 "search_iterations": config.OPT_SEARCH_ITERATIONS,
                 "exact": dataclasses.asdict(_exact_config()),
                 "variant": request.variant,
+                # Never moves a piece or a board, but it does decide the cut
+                # tree and therefore the leftovers this payload reports.
+                "min_usable_offcut": config.OPT_MIN_USABLE_OFFCUT_MM,
             },
             "edge_bandings": edge_bandings,
         }
