@@ -121,6 +121,60 @@ def test_optimize_reports_cut_linear_meters(client):
     assert data["totalCutLinearM"] == pytest.approx(total_sheets, abs=0.02)
 
 
+def test_optimize_consolidates_the_leftovers_it_reports(client):
+    """The cut tree is re-derived on the way out, so strips leave 2 offcuts, not 4.
+
+    Same shape as pre-order 4, on the test board: three 320x2200 strips side by
+    side. The packer rips three full-height columns and crops each to 2200,
+    leaving three identical scraps above them; the same placements admit one
+    crosscut plus three rips, which merges those into a single band as wide as
+    the three strips together. The pieces, the board count and the bill are
+    untouched — only the leftovers and the saw path.
+
+    Asserted structurally rather than in millimetres: the kerf and the trims come
+    from the ``settings`` row, so a deployment that trims 10mm off each edge (as
+    production does) yields the same two offcuts at different sizes.
+    """
+    created_client = _create_client(client)
+    created_board = _create_board(client)
+
+    resp = client.post(
+        "/api/v1/optimize/",
+        json={
+            "clientId": created_client["id"],
+            "materials": [
+                {"key": "b1", "source": "catalog", "productId": created_board["id"]}
+            ],
+            "requirements": [
+                {
+                    "priority": 0,
+                    "height": 2200,
+                    "width": 320,
+                    "quantity": 3,
+                    "materialKey": "b1",
+                    "label": "Lateral",
+                    "canRotate": False,
+                }
+            ],
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["totalBoardsUsed"] == 1
+
+    (layout,) = data["layouts"]
+    pieces = layout["placedPieces"]
+    assert len(pieces) == 3
+
+    remainders = layout["remainders"]
+    assert len(remainders) == 2, "the three scraps above the strips merge into one"
+
+    # One band spanning every strip: that is what the packer's tree never emits,
+    # since it separates each column before cropping it.
+    span = max(p["x"] + p["width"] for p in pieces) - min(p["x"] for p in pieces)
+    assert any(r["width"] == pytest.approx(span) for r in remainders)
+
+
 def test_carrier_exposes_linear_meter_totals():
     """``from_payload`` exposes the new totals; an old payload falls back to 0.0."""
     from src.modules.optimizations.carrier import ProformaCarrier

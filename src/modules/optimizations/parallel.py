@@ -35,6 +35,7 @@ from concurrent.futures import BrokenExecutor, ProcessPoolExecutor
 from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
 
+from src.cutting.consolidate import DEFAULT_MIN_USABLE_OFFCUT, consolidate_layouts
 from src.cutting.enums import PackingStrategy
 from src.cutting.models import BinSpec, CuttingLayout, Piece
 from src.cutting.parameters import CuttingParameters
@@ -118,6 +119,7 @@ class PoolJob:
     budget: SearchBudget
     seed: int
     exact_config: ExactConfig
+    min_usable_offcut: float = DEFAULT_MIN_USABLE_OFFCUT
 
 
 def run_pool_job(job: PoolJob) -> PoolResult:
@@ -136,11 +138,22 @@ def run_pool_job(job: PoolJob) -> PoolResult:
 
 
 def _optimize_job(job: PoolJob) -> List[CuttingLayout]:
-    """The optimization itself, split out so the timing wraps exactly the work."""
+    """The optimization itself, split out so the timing wraps exactly the work.
+
+    The consolidation pass is applied HERE, on the way out, and nowhere else.
+    Both branches below produce final layouts, so this is the one place that sees
+    every board exactly once — and, just as importantly, it is *outside* the
+    search: ``optimize_bins`` is re-entered by ``_catalog_first``'s probing, by
+    ``_recut`` and by the half-board downgrade, and re-deriving cut trees for
+    candidates that are about to be thrown away would be pure waste. It also
+    means ``scripts/bench_battery.py``, which calls ``optimize_bins`` directly,
+    keeps producing the same digests — which is the cheap proof that none of this
+    can cost a board.
+    """
     pieces = list(job.pieces)
     if job.offcuts:
         # Pool: pack across the catalog board + its finite offcuts.
-        return optimize_pool(
+        layouts = optimize_pool(
             pieces=pieces,
             primary=job.material,
             offcuts=list(job.offcuts),
@@ -151,27 +164,33 @@ def _optimize_job(job: PoolJob) -> List[CuttingLayout]:
             seed=job.seed,
             exact_config=job.exact_config,
         )
+    else:
+        bins = [
+            BinSpec(
+                key=job.material.key,
+                width=job.material.width,
+                height=job.material.height,
+                thickness=job.material.thickness,
+                cost_per_unit=job.material.cost_per_unit,
+            )
+        ]
+        if job.half_spec is not None:
+            bins.append(job.half_spec)
+        layouts = optimize_bins(
+            pieces,
+            bins,
+            cutting_params=job.cutting_params,
+            strategy=job.strategy,
+            budget=job.budget,
+            seed=job.seed,
+            exact_config=job.exact_config,
+        )[0]
 
-    bins = [
-        BinSpec(
-            key=job.material.key,
-            width=job.material.width,
-            height=job.material.height,
-            thickness=job.material.thickness,
-            cost_per_unit=job.material.cost_per_unit,
-        )
-    ]
-    if job.half_spec is not None:
-        bins.append(job.half_spec)
-    return optimize_bins(
-        pieces,
-        bins,
-        cutting_params=job.cutting_params,
-        strategy=job.strategy,
-        budget=job.budget,
-        seed=job.seed,
-        exact_config=job.exact_config,
-    )[0]
+    return consolidate_layouts(
+        layouts,
+        job.cutting_params,
+        min_usable_offcut=job.min_usable_offcut,
+    )
 
 
 def runs_in_process(jobs: Sequence[PoolJob]) -> bool:
