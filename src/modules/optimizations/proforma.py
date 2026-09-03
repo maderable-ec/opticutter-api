@@ -1106,21 +1106,25 @@ class ProformaService:
 
     @staticmethod
     def _payment_section(carrier: ProformaCarrier, heading_style) -> list:
-        """ "FORMA DE PAGO" block (informational): cash and/or credit + total.
+        """ "FORMA DE PAGO" block (informational): the methods used + total.
 
         Returns ``[]`` when there's no payment registered, to omit the block on
-        ephemeral quotes and on orders not yet sent to the queue.
+        ephemeral quotes and on orders not yet sent to the queue. An order
+        registered before bank transfer existed leaves that amount ``None``.
         """
         cash = carrier.payment_cash_amount or 0
+        transfer = carrier.payment_transfer_amount or 0
         credit = carrier.payment_credit_amount or 0
-        if cash <= 0 and credit <= 0:
+        if cash <= 0 and transfer <= 0 and credit <= 0:
             return []
         rows: List[List[str]] = []
         if cash > 0:
             rows.append(["Efectivo:", f"${cash:.2f}"])
+        if transfer > 0:
+            rows.append(["Transferencia:", f"${transfer:.2f}"])
         if credit > 0:
             rows.append(["A crédito:", f"${credit:.2f}"])
-        rows.append(["Total:", f"${cash + credit:.2f}"])
+        rows.append(["Total:", f"${cash + transfer + credit:.2f}"])
         return [*_section("FORMA DE PAGO", heading_style), _totals_table(rows)]
 
     @staticmethod

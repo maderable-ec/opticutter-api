@@ -217,13 +217,16 @@ def test_queued_requires_payment(client, db_session):
     # A payment present but with zero amounts isn't valid either.
     zero = client.patch(
         f"/api/v1/orders/{oid}/status",
-        json={"status": "queued", "payment": {"cashAmount": 0, "creditAmount": 0}},
+        json={
+            "status": "queued",
+            "payment": {"cashAmount": 0, "transferAmount": 0, "creditAmount": 0},
+        },
     )
     assert zero.status_code == 422
 
 
 def test_queued_records_payment(client, db_session):
-    """Registers both methods and freezes them on the order (informational)."""
+    """Registers every method and freezes them on the order (informational)."""
     c = _create_client(client)
     b = _create_board(client)
     order = _create_order(client, db_session, _order_payload(c["id"], b["id"]))
@@ -233,23 +236,29 @@ def test_queued_records_payment(client, db_session):
         f"/api/v1/orders/{oid}/status",
         json={
             "status": "queued",
-            "payment": {"cashAmount": 30.5, "creditAmount": 15.0},
+            "payment": {
+                "cashAmount": 30.5,
+                "transferAmount": 20.0,
+                "creditAmount": 15.0,
+            },
         },
     )
     assert ok.status_code == 200
     data = ok.json()["data"]
     assert data["status"] == "queued"
     assert data["paymentCashAmount"] == 30.5
+    assert data["paymentTransferAmount"] == 20.0
     assert data["paymentCreditAmount"] == 15.0
 
     # Persisted: reads back the same.
     reread = client.get(f"/api/v1/orders/{oid}").json()["data"]
     assert reread["paymentCashAmount"] == 30.5
+    assert reread["paymentTransferAmount"] == 20.0
     assert reread["paymentCreditAmount"] == 15.0
 
 
 def test_queued_payment_single_method(client, db_session):
-    """A single method (credit only) is valid; the other stays None."""
+    """A single method (credit only) is valid; the others stay None."""
     c = _create_client(client)
     b = _create_board(client)
     order = _create_order(client, db_session, _order_payload(c["id"], b["id"]))
@@ -263,6 +272,26 @@ def test_queued_payment_single_method(client, db_session):
     data = ok.json()["data"]
     assert data["paymentCreditAmount"] == 80.0
     assert data["paymentCashAmount"] is None
+    assert data["paymentTransferAmount"] is None
+
+
+def test_queued_payment_by_transfer_only(client, db_session):
+    """Bank transfer alone passes the gate, like cash or credit alone."""
+    c = _create_client(client)
+    b = _create_board(client)
+    order = _create_order(client, db_session, _order_payload(c["id"], b["id"]))
+    oid = order["id"]
+
+    ok = client.patch(
+        f"/api/v1/orders/{oid}/status",
+        json={"status": "queued", "payment": {"transferAmount": 120.0}},
+    )
+    assert ok.status_code == 200
+    data = ok.json()["data"]
+    assert data["status"] == "queued"
+    assert data["paymentTransferAmount"] == 120.0
+    assert data["paymentCashAmount"] is None
+    assert data["paymentCreditAmount"] is None
 
 
 def test_payment_reflected_in_documents(client, db_session):
@@ -274,7 +303,10 @@ def test_payment_reflected_in_documents(client, db_session):
 
     client.patch(
         f"/api/v1/orders/{oid}/status",
-        json={"status": "queued", "payment": {"cashAmount": 50.0}},
+        json={
+            "status": "queued",
+            "payment": {"cashAmount": 50.0, "transferAmount": 25.0},
+        },
     )
 
     doc = client.get(f"/api/v1/orders/{oid}/document")

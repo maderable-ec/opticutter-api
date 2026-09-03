@@ -688,12 +688,18 @@ def drive_order_to(svc, order, target, seller_actor, operator_actor, bander_acto
         return
 
     # confirmed → queued requires a payment method (at least one amount > 0).
+    # Rotated by order id so the demo shows the three methods and a split payment.
+    payments = (
+        OrderPaymentInput(cash_amount=500.00),
+        OrderPaymentInput(transfer_amount=500.00),
+        OrderPaymentInput(cash_amount=200.00, credit_amount=300.00),
+    )
     svc.transition(
         order.id,
         OrderStatus.queued,
         actor=seller_actor,
         note="Enviada a la cola de producción",
-        payment=OrderPaymentInput(cash_amount=500.00),
+        payment=payments[order.id % len(payments)],
     )
     if target == OrderStatus.queued:
         return
