@@ -11,7 +11,11 @@ from sqlalchemy.orm import Session
 from src.modules.branches.model import BranchModel
 from src.modules.orders.model import OrderModel
 from tests.test_order_banding import (
+    _BRANCH,
+    _create_board,
+    _create_client,
     _cut_all_pieces,
+    _mint_order,
     _order_with_banding,
     _order_without_banding,
     _patch_banding,
@@ -53,14 +57,24 @@ def test_workshop_queue_lists_queued_through_cut(client, db_session):
     assert item["status"] == "cut"
     assert item["bandingStatus"] == "pending"
     assert item["client"]["firstName"] == "Ada"
-    # 1 board, one piece 500×1000mm fits on a single (half) MEL0207 sheet.
+    # 1 board, one piece 500×1000mm fits on a single (half) MEL0207 sheet. The
+    # row is named after the WHOLE board -- the "(medio tablero)" suffix is a
+    # billing label, and the shop fetches the product, not the line.
     assert item["boardUsage"] == [
-        {"name": "Melamina MEL0207 (medio tablero)", "count": 1}
+        {
+            "materialKey": "b1",
+            "name": "Melamina MEL0207",
+            "count": 1,
+            "fullCount": 0,
+            "halfCount": 1,
+        }
     ]
-    # suffix "0207" → product "Tapacanto TAP0207", bandType Suave.
+    # suffix "0207" → product "Tapacanto TAP0207", bandType Suave. The type
+    # travels canonical: the board paints it as a badge.
     assert item["bandingUsage"] == [
         {
-            "name": "Tapacanto TAP0207 (Suave)",
+            "name": "Tapacanto TAP0207",
+            "bandType": "Soft",
             "linearM": _billed_linear_m(db_session, cut["id"]),
         }
     ]
@@ -70,6 +84,78 @@ def test_workshop_queue_lists_queued_through_cut(client, db_session):
 
     # A still-queued order shows zero cut progress.
     assert by_id[queued["id"]]["progress"]["cutPieces"] == 0
+
+
+def test_workshop_queue_merges_the_half_board_into_its_material(client, db_session):
+    """A material billed as a whole board PLUS a half is ONE row, not two.
+
+    ``materials_summary`` is keyed by ``(material_key, half_board)``, so it bills
+    the two separately and names the half with a " (medio tablero)" suffix. The
+    shop fetches one product from the rack, so the board merges them and reports
+    the split -- otherwise "1 tablero y medio" read as two materials.
+
+    Six 600x1200 pieces on a 1220x2440 sheet: four fit a whole board, the tail of
+    two fits a half (610 wide), and 45.50 + 25.03 beats a second whole board.
+    The cutting parameters are pinned first -- the packing is the premise of the
+    test, and the shop's real 10mm trim (which ``.env`` carries) leaves 1200mm of
+    usable width, one millimetre short of two 600s plus the kerf.
+    """
+    assert (
+        client.patch(
+            "/api/v1/settings/cutting",
+            json={
+                "kerf": 5,
+                "topTrim": 0,
+                "bottomTrim": 0,
+                "leftTrim": 0,
+                "rightTrim": 0,
+                "halfBoardMarkupPct": 0.10,
+            },
+        ).status_code
+        == 200
+    )
+    c = _create_client(client, identifier="0100000280")
+    b = _create_board(client, code="MEL0280")
+    order = _mint_order(
+        client,
+        db_session,
+        {
+            "clientId": c["id"],
+            "branchId": _BRANCH,
+            "materials": [{"key": "b1", "source": "catalog", "productId": b["id"]}],
+            "requirements": [
+                {
+                    "priority": 0,
+                    "height": 1200,
+                    "width": 600,
+                    "quantity": 6,
+                    "materialKey": "b1",
+                    "label": "Costado",
+                    "canRotate": False,
+                }
+            ],
+        },
+    )
+    # Precondition: the plan really is a whole board plus a half -- two billing
+    # lines sharing one material key. Without it the merge would prove nothing.
+    summary = db_session.get(OrderModel, order["id"]).optimization_snapshot[
+        "materials_summary"
+    ]
+    assert sorted(line["half_board"] for line in summary) == [False, True]
+
+    assert _patch_status(client, order["id"], "queued").status_code == 200
+    item = next(
+        i for i in client.get(_URL).json()["data"] if i["orderId"] == order["id"]
+    )
+    assert item["boardUsage"] == [
+        {
+            "materialKey": "b1",
+            "name": "Melamina MEL0280",
+            "count": 2,
+            "fullCount": 1,
+            "halfCount": 1,
+        }
+    ]
 
 
 def test_workshop_queue_carries_the_commercial_reference(client, db_session):
@@ -139,7 +225,8 @@ def test_workshop_queue_lists_banding_usage(client, db_session):
     # suffix "0272" → product "Tapacanto TAP0272", bandType Suave.
     assert by_id[banded["id"]]["bandingUsage"] == [
         {
-            "name": "Tapacanto TAP0272 (Suave)",
+            "name": "Tapacanto TAP0272",
+            "bandType": "Soft",
             "linearM": _billed_linear_m(db_session, banded["id"]),
         }
     ]
