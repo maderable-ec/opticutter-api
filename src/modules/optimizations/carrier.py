@@ -55,6 +55,7 @@ class ProformaCarrier:
     # Frozen payment method (informational). Only ``from_order`` sets it; ephemeral
     # quotes leave it as ``None`` and the block is omitted from the PDF.
     payment_cash_amount: Optional[float] = None
+    payment_transfer_amount: Optional[float] = None
     payment_credit_amount: Optional[float] = None
 
     def service_net(self, service: dict) -> float:
@@ -143,5 +144,6 @@ class ProformaCarrier:
         carrier.dispatched_by_label = order.dispatched_by_label
         # Frozen payment method (``None`` before moving to the queue).
         carrier.payment_cash_amount = order.payment_cash_amount
+        carrier.payment_transfer_amount = order.payment_transfer_amount
         carrier.payment_credit_amount = order.payment_credit_amount
         return carrier

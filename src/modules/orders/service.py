@@ -60,10 +60,17 @@ from src.shared.exceptions import (
 
 
 def _has_payment(payment: Optional[OrderPaymentInput]) -> bool:
-    """True if at least one amount (> 0) was registered in either payment method."""
+    """True if at least one amount (> 0) was registered in any payment method."""
     if payment is None:
         return False
-    return (payment.cash_amount or 0) > 0 or (payment.credit_amount or 0) > 0
+    return any(
+        (amount or 0) > 0
+        for amount in (
+            payment.cash_amount,
+            payment.transfer_amount,
+            payment.credit_amount,
+        )
+    )
 
 
 class OrderService(BranchScopedMixin):
@@ -373,7 +380,8 @@ class OrderService(BranchScopedMixin):
         )
         if is_payment_capture and not _has_payment(payment):
             raise ValidationError(
-                "Registra la forma de pago (efectivo y/o crédito) para enviar a cola"
+                "Registra la forma de pago (efectivo, transferencia y/o crédito) "
+                "para enviar a cola"
             )
 
         self._apply_transition(order, to_status, actor=actor, note=note)
@@ -398,6 +406,7 @@ class OrderService(BranchScopedMixin):
         # The admin cutting → queued rollback doesn't hit this (current != confirmed).
         if is_payment_capture:
             order.payment_cash_amount = payment.cash_amount
+            order.payment_transfer_amount = payment.transfer_amount
             order.payment_credit_amount = payment.credit_amount
 
         self.db.commit()

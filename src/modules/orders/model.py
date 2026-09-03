@@ -155,6 +155,9 @@ class OrderModel(TimestampMixin, AuditMixin, Base):
         CheckConstraint("price_level BETWEEN 1 AND 3", name="price_level_in_range"),
         CheckConstraint("payment_cash_amount >= 0", name="payment_cash_non_negative"),
         CheckConstraint(
+            "payment_transfer_amount >= 0", name="payment_transfer_non_negative"
+        ),
+        CheckConstraint(
             "payment_credit_amount >= 0", name="payment_credit_non_negative"
         ),
     )
@@ -221,10 +224,13 @@ class OrderModel(TimestampMixin, AuditMixin, Base):
     )
 
     # Payment method (informational only): captured when transitioning from
-    # ``confirmed`` to ``queued``. An order can be paid with both methods at
+    # ``confirmed`` to ``queued``. An order can be paid with several methods at
     # once; the method used is inferred from which amount is > 0. Doesn't affect
     # pricing or billing.
     payment_cash_amount: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    payment_transfer_amount: Mapped[Optional[float]] = mapped_column(
+        Float, nullable=True
+    )
     payment_credit_amount: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
     # EDGE BANDING track (parallel to cutting): the bander marks start/finish. Set

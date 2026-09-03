@@ -187,7 +187,8 @@ No cycles, enforced by convention:
   - **Cutting**: `confirmed → queued → cutting → cut → completed →
     dispatched` (plus a `confirmed → cancelled` escape and an admin
     `cutting → queued` rollback). The `confirmed → queued` transition
-    requires recording a payment method (cash/credit, informational only).
+    requires recording a payment method (cash / bank transfer / credit,
+    informational only).
   - **Banding** (edge banding, `banding_status`): `pending → in_progress →
     done`, advanced independently by the `canteador` role while cutting is
     still in progress. An order with edge banding can't reach `completed`

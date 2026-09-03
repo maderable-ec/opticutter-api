@@ -73,12 +73,15 @@ class OrderCreate(CamelModel):
 class OrderPaymentInput(CamelModel):
     """Payment method (informational only), registered when moving to ``queued``.
 
-    An order can be paid with both methods at once; the method used is
+    An order can be paid with several methods at once; the method used is
     inferred from which amount is > 0. Doesn't affect pricing or the order's billing.
     """
 
     cash_amount: Optional[float] = Field(
         default=None, ge=0, description="Amount paid in cash"
+    )
+    transfer_amount: Optional[float] = Field(
+        default=None, ge=0, description="Amount paid by bank transfer"
     )
     credit_amount: Optional[float] = Field(
         default=None, ge=0, description="Amount paid on credit"
@@ -93,8 +96,8 @@ class OrderStatusUpdate(CamelModel):
     payment: Optional[OrderPaymentInput] = Field(
         default=None,
         description=(
-            "Payment method, required when moving from 'confirmed' to 'queued' "
-            "(at least one amount > 0)"
+            "Payment method (cash / bank transfer / credit), required when moving "
+            "from 'confirmed' to 'queued' (at least one amount > 0)"
         ),
     )
 
@@ -252,6 +255,10 @@ class OrderResponse(CamelModel):
     )
     payment_cash_amount: Optional[float] = Field(
         default=None, description="Cash amount (registered on confirmed → queued)"
+    )
+    payment_transfer_amount: Optional[float] = Field(
+        default=None,
+        description="Bank transfer amount (registered on confirmed → queued)",
     )
     payment_credit_amount: Optional[float] = Field(
         default=None, description="Credit amount (registered on confirmed → queued)"

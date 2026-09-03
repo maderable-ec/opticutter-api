@@ -84,6 +84,23 @@ def test_queued_with_payment_freezes_amount_and_commits(mock_session):
     mock_session.commit.assert_called_once()
 
 
+def test_queued_freezes_every_method_split(mock_session):
+    """The three amounts are frozen together: one transition, one payment."""
+    order = _order(OrderStatus.confirmed)
+    svc = _service(mock_session, order)
+    svc.transition(
+        1,
+        OrderStatus.queued,
+        actor=_actor(UserRole.ADMIN),
+        payment=OrderPaymentInput(
+            cash_amount=10.0, transfer_amount=20.0, credit_amount=5.0
+        ),
+    )
+    assert order.payment_cash_amount == 10.0
+    assert order.payment_transfer_amount == 20.0
+    assert order.payment_credit_amount == 5.0
+
+
 # --- Production gate (cutting -> cut) --------------------------------------------
 def test_cut_blocked_while_pieces_pending(mock_session):
     order = _order(OrderStatus.cutting)
@@ -149,8 +166,14 @@ def test_admin_and_seller_can_dispatch(mock_session, role):
 # --- Pure helpers -----------------------------------------------------------------
 def test_has_payment_true_only_when_some_amount_positive():
     assert _has_payment(None) is False
-    assert _has_payment(OrderPaymentInput(cash_amount=0, credit_amount=0)) is False
+    assert (
+        _has_payment(
+            OrderPaymentInput(cash_amount=0, transfer_amount=0, credit_amount=0)
+        )
+        is False
+    )
     assert _has_payment(OrderPaymentInput(cash_amount=10)) is True
+    assert _has_payment(OrderPaymentInput(transfer_amount=7)) is True
     assert _has_payment(OrderPaymentInput(credit_amount=5)) is True
 
 
