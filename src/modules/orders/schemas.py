@@ -320,16 +320,35 @@ class CuttingProgress(CamelModel):
 
 
 class BoardUsage(CamelModel):
-    """Board count for one material/board type, for the workshop card."""
+    """Board usage for ONE material, for the workshop card.
 
-    name: str
-    count: int
+    One entry per ``material_key`` -- **not** per ``materials_summary`` line,
+    which is keyed by ``(material_key, half_board)``. On the shop floor a
+    material billed as full boards plus a half board is ONE product to fetch
+    from the rack, so the split belongs in ``full_count``/``half_count`` rather
+    than in two rows whose names differ by a suffix.
+    """
+
+    material_key: str
+    name: str = Field(
+        ..., description="Display name, WITHOUT the '(medio tablero)' suffix"
+    )
+    count: int = Field(
+        ..., description="Physical sheets to fetch: a half board counts as one"
+    )
+    full_count: int = Field(..., description="Sheets used whole")
+    half_count: int = Field(..., description="Sheets billed as a half board")
 
 
 class BandingUsage(CamelModel):
     """Billed linear meters for one edge-banding type, for the workshop card."""
 
-    name: str
+    name: str = Field(
+        ..., description="Product name, WITHOUT the '(Suave)' parenthetical"
+    )
+    band_type: Optional[str] = Field(
+        default=None, description="Canonical band type: 'Soft' / 'Hard'"
+    )
     linear_m: float
 
 
@@ -448,7 +467,8 @@ class WorkshopQueueItem(CamelModel):
     client: ClientResponse = Field(..., description="Client the order belongs to")
     board_usage: List[BoardUsage] = Field(
         default_factory=list,
-        description="Board count per material/board type used in the order",
+        description="Sheet count per material used in the order, one entry per "
+        "material (whole and half boards of one material share a row)",
     )
     banding_usage: List[BandingUsage] = Field(
         default_factory=list,

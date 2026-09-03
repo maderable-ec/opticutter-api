@@ -10,7 +10,6 @@ from src.modules.clients.model import ClientModel
 from src.modules.clients.schemas import ClientResponse
 from src.modules.clients.service import require_phone
 from src.modules.notifications.emitter import notify_order_transition
-from src.modules.optimizations.labels import BAND_TYPE_LABEL
 from src.modules.optimizations.patterns import base_label
 from src.modules.optimizations.pricing import build_pricing
 from src.modules.optimizations.schemas import OptimizeRequest
@@ -864,21 +863,62 @@ def _attach_cutting_plan(order: OrderModel, payload: dict) -> None:
         order.boards.append(board)
 
 
-def _board_usage(snapshot: dict) -> List[dict]:
-    """Board count per material/board type, from the already-loaded snapshot.
+def _material_name(resolved: Optional[dict], line: dict) -> str:
+    """Display name of a material, always the WHOLE board's.
 
-    Reads ``materials_summary`` (no extra query) -- the same per-material
-    ``count`` already printed on the production sheet's boards table.
+    Same rule ``build_materials_summary`` applies to its ``base_name``
+    (``product_name`` or the dimensions), but read off the resolved material
+    instead of the summary line: that one belongs to the full sheet, so it
+    never carries the ``" (medio tablero)"`` suffix, and an inline material
+    yields the whole lamina's ``2440×2070`` rather than the already-halved
+    ``1220×2070``. Falls back to the summary line for a snapshot whose
+    ``materials`` has no entry for the key.
     """
-    return [
-        {
-            "name": e.get("product_name")
-            or e.get("product_code")
-            or e.get("material_key"),
-            "count": e.get("count", 0),
-        }
-        for e in snapshot.get("materials_summary", [])
-    ]
+    if resolved:
+        name = resolved.get("product_name")
+        if name:
+            return name
+        width = resolved.get("width")
+        height = resolved.get("height")
+        if width and height:
+            return f"{width:g}×{height:g}"
+    return (
+        line.get("product_name") or line.get("product_code") or line.get("material_key")
+    )
+
+
+def _board_usage(snapshot: dict) -> List[dict]:
+    """Sheet count per MATERIAL, from the already-loaded snapshot (no extra query).
+
+    One entry per ``material_key``. ``materials_summary`` is keyed by
+    ``(material_key, half_board)``, so a material billed as full boards plus a
+    half board arrives as two lines that share every identity field and differ
+    only in the suffix baked into ``product_name`` -- which read on the board as
+    two different products, and made the dialog's footer count them as two
+    materials. They are merged here and the split is reported as
+    ``full_count``/``half_count`` instead.
+
+    First-appearance order is preserved, which is the order the shop cuts in
+    (``patterns.order_sheets`` puts a pool's whole boards first and its half
+    last), so a material is named by its whole sheet whenever it has one.
+    """
+    resolved = {m.get("material_key"): m for m in snapshot.get("materials", [])}
+    usage: dict = {}
+    for line in snapshot.get("materials_summary", []):
+        key = line.get("material_key")
+        entry = usage.get(key)
+        if entry is None:
+            entry = usage[key] = {
+                "material_key": key,
+                "name": _material_name(resolved.get(key), line),
+                "count": 0,
+                "full_count": 0,
+                "half_count": 0,
+            }
+        count = line.get("count", 0)
+        entry["count"] += count
+        entry["half_count" if line.get("half_board") else "full_count"] += count
+    return list(usage.values())
 
 
 def _banding_usage(snapshot: dict) -> List[dict]:
@@ -886,16 +926,23 @@ def _banding_usage(snapshot: dict) -> List[dict]:
 
     So the bander knows how much tapacanto to prepare. Reads the already-loaded
     ``edge_bandings_summary`` (no extra query); skips geometry-only entries with
-    no product, and omits the type suffix when the band type is unknown.
+    no product. ``band_type`` travels as the canonical ``Soft``/``Hard`` rather
+    than folded into the name as ``"(Suave)"``: the workshop board paints it as
+    a badge, and translating it here would leave the client no way to tell the
+    type apart from the product's own name.
     """
     usage: List[dict] = []
     for e in snapshot.get("edge_bandings_summary", []):
         name = e.get("product_name")
         if not name:
             continue
-        label = BAND_TYPE_LABEL.get(e.get("band_type"))
-        display = f"{name} ({label})" if label else name
-        usage.append({"name": display, "linear_m": e.get("billed_linear_m", 0)})
+        usage.append(
+            {
+                "name": name,
+                "band_type": e.get("band_type"),
+                "linear_m": e.get("billed_linear_m", 0),
+            }
+        )
     return usage
 
 
