@@ -42,7 +42,7 @@ from src.cutting.parameters import CuttingParameters
 from src.cutting.search import ExactConfig, SearchBudget, optimize_bins
 from src.modules.optimizations.engine_info import probe_worker
 from src.modules.optimizations.materials import ResolvedMaterial
-from src.modules.optimizations.pool import optimize_pool
+from src.modules.optimizations.pool import optimize_offcut_pool, optimize_pool
 from src.shared.config import config
 
 logger = logging.getLogger(__name__)
@@ -79,7 +79,7 @@ _disabled_until = 0.0
 
 @dataclass(frozen=True)
 class PoolResult:
-    """One material's layouts plus what they cost to produce.
+    """One material's layouts, what did not fit, and what it cost to produce.
 
     The timing rides back with the layouts instead of being taken around the
     call: in the parallel path the parent only sees *completion* order, so a
@@ -89,6 +89,10 @@ class PoolResult:
     """
 
     layouts: List[CuttingLayout]
+    # Pieces no sheet could hold. Always empty for a catalog-anchored pool
+    # (another board can always be opened) unless a piece is larger than the
+    # board; populated when a pool of finite offcuts runs out of material.
+    unplaced: List[Piece]
     seconds: float
 
 
@@ -133,11 +137,13 @@ def run_pool_job(job: PoolJob) -> PoolResult:
     latency per material without this function learning where the log goes.
     """
     started = time.perf_counter()
-    layouts = _optimize_job(job)
-    return PoolResult(layouts=layouts, seconds=time.perf_counter() - started)
+    layouts, unplaced = _optimize_job(job)
+    return PoolResult(
+        layouts=layouts, unplaced=unplaced, seconds=time.perf_counter() - started
+    )
 
 
-def _optimize_job(job: PoolJob) -> List[CuttingLayout]:
+def _optimize_job(job: PoolJob) -> Tuple[List[CuttingLayout], List[Piece]]:
     """The optimization itself, split out so the timing wraps exactly the work.
 
     The consolidation pass is applied HERE, on the way out, and nowhere else.
@@ -151,9 +157,22 @@ def _optimize_job(job: PoolJob) -> List[CuttingLayout]:
     can cost a board.
     """
     pieces = list(job.pieces)
-    if job.offcuts:
+    if job.material.is_finite:
+        # No catalog board anchors this pool: every sheet is a physical offcut,
+        # so the supply is finite and pieces can legitimately be left over.
+        layouts, unplaced = optimize_offcut_pool(
+            pieces=pieces,
+            anchor=job.material,
+            offcuts=list(job.offcuts),
+            cutting_params=job.cutting_params,
+            strategy=job.strategy,
+            budget=job.budget,
+            seed=job.seed,
+            exact_config=job.exact_config,
+        )
+    elif job.offcuts:
         # Pool: pack across the catalog board + its finite offcuts.
-        layouts = optimize_pool(
+        layouts, unplaced = optimize_pool(
             pieces=pieces,
             primary=job.material,
             offcuts=list(job.offcuts),
@@ -176,7 +195,7 @@ def _optimize_job(job: PoolJob) -> List[CuttingLayout]:
         ]
         if job.half_spec is not None:
             bins.append(job.half_spec)
-        layouts = optimize_bins(
+        layouts, unplaced = optimize_bins(
             pieces,
             bins,
             cutting_params=job.cutting_params,
@@ -184,12 +203,15 @@ def _optimize_job(job: PoolJob) -> List[CuttingLayout]:
             budget=job.budget,
             seed=job.seed,
             exact_config=job.exact_config,
-        )[0]
+        )
 
-    return consolidate_layouts(
-        layouts,
-        job.cutting_params,
-        min_usable_offcut=job.min_usable_offcut,
+    return (
+        consolidate_layouts(
+            layouts,
+            job.cutting_params,
+            min_usable_offcut=job.min_usable_offcut,
+        ),
+        unplaced,
     )
 
 

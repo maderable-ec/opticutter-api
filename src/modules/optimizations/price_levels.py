@@ -122,10 +122,10 @@ def apply_price_level(
     result = dict(payload)
     result["materials"] = new_materials
     result["layouts"] = layouts
-    # A delta, not a re-sum, for the same reason as ``whole_boards``:
-    # ``total_boards_cost`` excludes pooled offcuts and ``pool_key`` doesn't
-    # survive into the payload. Safe here because a pooled offcut is always an
-    # inline material, and only catalog materials are re-priced.
+    # A delta, not a re-sum, for the same reason as ``whole_boards``: it keeps
+    # this pass independent of how the base total was composed. Safe because only
+    # catalog materials are re-priced, so every sheet this touches is one the
+    # base already counted at its list price.
     result["total_boards_cost"] = round(
         payload.get("total_boards_cost", 0.0) + cost_delta, 2
     )

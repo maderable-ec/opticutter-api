@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import List, Optional
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from src.modules.branches.schemas import BranchRefResponse
 from src.modules.clients.schemas import ClientResponse
@@ -12,6 +12,7 @@ from src.modules.optimizations.schemas import (
     OptimizeResponse,
     Remainder,
     Requirement,
+    validate_material_graph,
 )
 from src.modules.preorders.model import PreOrderStatus, ReviewLinkStatus
 from src.shared.schemas import CamelModel
@@ -69,6 +70,18 @@ class PreOrderCreate(CamelModel):
             "required for a global admin."
         ),
     )
+
+    @model_validator(mode="after")
+    def _validate_material_refs(self) -> "PreOrderCreate":
+        """Same graph rules as ``OptimizeRequest``.
+
+        A pre-order re-optimizes on every read, so an inconsistent set saved here
+        is a quote that can never be opened again: ``build_request`` raises a raw
+        Pydantic error that surfaces as a 500, not a 422. The partial-update path
+        is checked in the service, after the merge.
+        """
+        validate_material_graph(self.materials, self.requirements)
+        return self
 
 
 class PreOrderUpdate(CamelModel):

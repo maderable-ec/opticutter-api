@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import List, Literal, Optional
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from src.modules.branches.schemas import BranchRefResponse
 from src.modules.clients.schemas import ClientResponse
@@ -12,6 +12,7 @@ from src.modules.optimizations.schemas import (
     OptimizationStrategy,
     Remainder,
     Requirement,
+    validate_material_graph,
 )
 from src.modules.orders.model import BandingStatus, OrderStatus
 from src.shared.schemas import CamelModel
@@ -68,6 +69,12 @@ class OrderCreate(CamelModel):
             "(formerly 'quoted') now lives in the pre-order."
         ),
     )
+
+    @model_validator(mode="after")
+    def _validate_material_refs(self) -> "OrderCreate":
+        """Same graph rules as ``OptimizeRequest``: this snapshot is recomputed."""
+        validate_material_graph(self.materials, self.requirements)
+        return self
 
 
 class OrderPaymentInput(CamelModel):

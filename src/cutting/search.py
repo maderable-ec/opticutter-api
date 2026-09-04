@@ -84,9 +84,15 @@ from src.cutting.parameters import CuttingParameters
 # for compact leftovers (``consolidate.py``). That one moves no piece and no
 # board -- only the ``cuts`` and ``remainders`` a payload reports -- but both are
 # serialized into the cached payload and the order snapshot, so a stale Redis
-# entry would keep drawing the old diagram. Also bump this when the pinned
-# ortools version moves, since a solver upgrade can return a different solution.
-ENGINE_VERSION = 9
+# entry would keep drawing the old diagram; 10 = a pool whose sheets are all free
+# (the client's retazos) now actually searches -- ``_cost_lower_bound`` collapses
+# to 0 with any zero-cost bin, so matching it "proved" optimality before the beam
+# ever opened and the plan came straight out of the greedy (see
+# ``_proven_optimal``). Catalog geometry is untouched: a bought board costs more
+# than zero, so it takes the same branch it always did. Also bump this when the
+# pinned ortools version moves, since a solver upgrade can return a different
+# solution.
+ENGINE_VERSION = 10
 
 # A half bin is only worth opening near the end of a job: gate it by remaining
 # area so early states don't waste decodes on fills the cost objective would
@@ -384,6 +390,33 @@ def _bins_lower_bound(
     if biggest <= 0:
         return 0
     return math.ceil(rem_area / biggest)
+
+
+def _proven_optimal(
+    solution: "_Solution",
+    lb: float,
+    rem_area: float,
+    specs: Sequence[BinSpec],
+    params: CuttingParameters,
+) -> bool:
+    """Whether the incumbent is provably as good as the objective can get.
+
+    The search's leading objective is cost, so matching the cost lower bound is
+    normally the proof — and it is what makes the wins the fastest cases. But
+    ``_cost_lower_bound`` collapses to 0 the moment ANY bin is free, so a pool
+    cut entirely on the client's retazos "proved" optimality against a bound of
+    zero before opening the beam: the plan came straight out of the sequential
+    greedy. That is exactly the job where the packing is the whole value.
+
+    With no cost to minimize, the leading term is the sheet count, so the proof
+    moves to ``_bins_lower_bound``. Still a bound, still counted in candidates
+    rather than wall clock, so determinism is unaffected.
+    """
+    if solution.cost() > lb + 1e-6:
+        return False
+    if solution.cost() > 1e-6:
+        return True
+    return len(solution.fills) <= _bins_lower_bound(rem_area, specs, params)
 
 
 def _pool_signature(pool: Sequence[Piece]) -> tuple:
@@ -889,7 +922,11 @@ class _Searcher:
     # ---- LNS repair ------------------------------------------------------
 
     def lns(
-        self, solution: _Solution, lb: float, root_exact: bool = False
+        self,
+        solution: _Solution,
+        lb: float,
+        total_area: float,
+        root_exact: bool = False,
     ) -> _Solution:
         """Ruin & recreate over the worst bins; accepts strict improvements.
 
@@ -904,7 +941,10 @@ class _Searcher:
         best = solution
         stale = 0
         for iteration in range(self.budget.iterations):
-            if best.cost() <= lb + 1e-6:
+            # Same proof as the caller's: with free bins a cost bound of 0 is
+            # met by anything, and this loop is where orphan absorption happens
+            # — exactly what a pool of retazos needs.
+            if _proven_optimal(best, lb, total_area, self.specs, self.params):
                 break
             n = len(best.fills)
             if n < 2:
@@ -1312,6 +1352,9 @@ def optimize_bins(
             total_area = sum(p.area for p in placeable)
             lb = _cost_lower_bound(total_area, bins, params)
 
+            def proven(candidate: _Solution) -> bool:
+                return _proven_optimal(candidate, lb, total_area, bins, params)
+
             def pipeline(baseline: _Solution, root_exact: bool) -> _Solution:
                 """One beam + repair run, guaranteed no worse than ``baseline``."""
                 out = baseline
@@ -1322,16 +1365,16 @@ def optimize_bins(
                 )
                 if improved is not None:
                     out = improved
-                if out.cost() > lb + 1e-6:
-                    out = searcher.lns(out, lb, root_exact=root_exact)
+                if not proven(out):
+                    out = searcher.lns(out, lb, total_area, root_exact=root_exact)
                 return out
 
-            if solution.cost() > lb + 1e-6:
+            if not proven(solution):
                 # The exact-seeded run goes first: when the solver's dense first
                 # board is the right opening it usually proves the lower bound
                 # outright, and the heuristic run below is skipped entirely.
                 solution = pipeline(solution, root_exact=True)
-            if solution.cost() > lb + 1e-6:
+            if not proven(solution):
                 # A denser first board is NOT always the globally cheaper
                 # opening, and the beam only keeps so many states. So unless
                 # optimality is already proven, the pure-heuristic run happens
@@ -1378,7 +1421,7 @@ def optimize_bins(
                 )
                 before = solution.objective()
                 for root_exact in _RESTART_FLAVORS:
-                    if solution.cost() <= lb + 1e-6:
+                    if proven(solution):
                         break
                     improved = alt.beam(
                         placeable,
@@ -1387,7 +1430,7 @@ def optimize_bins(
                     )
                     if improved is not None:
                         solution = improved
-                    refined = alt.lns(solution, lb, root_exact=root_exact)
+                    refined = alt.lns(solution, lb, total_area, root_exact=root_exact)
                     if refined.objective() < solution.objective():
                         solution = refined
                 # A whole restart that failed to beat the incumbent counts

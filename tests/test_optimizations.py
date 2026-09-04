@@ -931,12 +931,13 @@ def test_optimize_pool_rejects_requirement_on_pooled_offcut(client):
     assert resp.status_code == 422
 
 
-def test_optimize_pool_rejects_pool_key_to_non_catalog(client):
+def test_optimize_pool_rejects_a_pool_key_chain(client):
     created_client = _create_client(client)
     created_board = _create_board(client)
 
     payload = _pool_payload(created_client["id"], created_board["id"])
-    # poolKey must reference a catalog board, not another offcut.
+    # An anchor is the material the pieces belong to, so it cannot itself be
+    # stock of a third one: `off1` already hangs off `b1`.
     payload["materials"].append(
         {
             "key": "off2",
@@ -950,6 +951,152 @@ def test_optimize_pool_rejects_pool_key_to_non_catalog(client):
     )
     resp = client.post("/api/v1/optimize/", json=payload)
     assert resp.status_code == 422
+
+
+# --- Offcut-only pool: the client brings the material ------------------------
+
+
+def _offcut_only_payload(client_id, pieces=None):
+    """Two client retazos and one cut list spread across them. No catalog board.
+
+    `r1` is the anchor (the requirements point at it) and `r2` hangs off it, so
+    the optimizer decides which piece lands on which retazo.
+    """
+    return {
+        "clientId": client_id,
+        "materials": [
+            {
+                "key": "r1",
+                "source": "clientOffcut",
+                "height": 1000,
+                "width": 1000,
+                "thickness": 18,
+                "label": "Retazo grande",
+            },
+            {
+                "key": "r2",
+                "source": "clientOffcut",
+                "height": 1000,
+                "width": 1000,
+                "thickness": 18,
+                "poolKey": "r1",
+                "label": "Retazo chico",
+            },
+        ],
+        "requirements": pieces
+        or [
+            {
+                "priority": 0,
+                "height": 900,
+                "width": 900,
+                "quantity": 2,
+                "materialKey": "r1",
+                "label": "Puerta",
+                "canRotate": True,
+            }
+        ],
+    }
+
+
+def test_optimize_on_client_offcuts_only(client):
+    created_client = _create_client(client)
+
+    resp = client.post(
+        "/api/v1/optimize/", json=_offcut_only_payload(created_client["id"])
+    )
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+
+    # One piece per retazo: two sheets, two different materials.
+    keys = sorted(lay["material"]["materialKey"] for lay in data["layouts"])
+    assert keys == ["r1", "r2"]
+    assert data["unplaced"] == []
+    # The client bought nothing: no board counted, no material billed.
+    assert data["totalBoardsUsed"] == 0
+    assert data["totalBoardsCost"] == 0
+    assert data["pricing"]["subtotal"] == 0
+
+
+def test_optimize_offcut_only_reports_what_does_not_fit(client):
+    created_client = _create_client(client)
+
+    # Three 900x900 pieces but only two retazos that hold one each.
+    payload = _offcut_only_payload(created_client["id"])
+    payload["requirements"][0]["quantity"] = 3
+
+    data = client.post("/api/v1/optimize/", json=payload).json()["data"]
+
+    assert len(data["layouts"]) == 2
+    assert data["unplaced"] == [
+        {
+            "materialKey": "r1",
+            "label": "Puerta",
+            "height": 900,
+            "width": 900,
+            "quantity": 1,
+        }
+    ]
+
+
+def test_optimize_offcut_supply_is_finite(client):
+    """A retazo is a physical piece: the optimizer may not invent copies of it."""
+    created_client = _create_client(client)
+
+    payload = _offcut_only_payload(created_client["id"])
+    payload["materials"] = payload["materials"][:1]  # a single retazo
+    payload["requirements"][0]["quantity"] = 4
+
+    data = client.post("/api/v1/optimize/", json=payload).json()["data"]
+
+    assert len(data["layouts"]) == 1
+    assert data["unplaced"][0]["quantity"] == 3
+
+
+def test_optimize_offcut_quantity_opens_that_many_sheets(client):
+    created_client = _create_client(client)
+
+    payload = _offcut_only_payload(created_client["id"])
+    payload["materials"] = payload["materials"][:1]
+    payload["materials"][0]["quantity"] = 3
+    payload["requirements"][0]["quantity"] = 3
+
+    data = client.post("/api/v1/optimize/", json=payload).json()["data"]
+
+    assert len(data["layouts"]) == 3
+    assert data["unplaced"] == []
+    summary = {m["materialKey"]: m for m in data["materialsSummary"]}
+    assert summary["r1"]["count"] == 3
+    assert summary["r1"]["totalCost"] == 0
+
+
+def test_client_offcut_cost_is_coerced_to_zero(client):
+    """The client's own material never carries a price, whatever was sent."""
+    created_client = _create_client(client)
+
+    payload = _offcut_only_payload(created_client["id"])
+    payload["materials"][0]["costPerUnit"] = 25.0
+
+    data = client.post("/api/v1/optimize/", json=payload).json()["data"]
+
+    summary = {m["materialKey"]: m for m in data["materialsSummary"]}
+    assert summary["r1"]["costPerUnit"] == 0
+    assert data["totalBoardsCost"] == 0
+
+
+def test_company_offcut_keeps_its_price_and_is_not_a_board(client):
+    """The workshop's own retazo is billed, but it is not a board the client buys."""
+    created_client = _create_client(client)
+
+    payload = _offcut_only_payload(created_client["id"])
+    payload["materials"] = payload["materials"][:1]
+    payload["materials"][0]["source"] = "companyOffcut"
+    payload["materials"][0]["costPerUnit"] = 12.5
+    payload["requirements"][0]["quantity"] = 1
+
+    data = client.post("/api/v1/optimize/", json=payload).json()["data"]
+
+    assert data["totalBoardsUsed"] == 0
+    assert data["totalBoardsCost"] == 12.5
 
 
 # --- Per-material process parallelism -------------------------------------

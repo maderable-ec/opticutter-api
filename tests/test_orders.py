@@ -950,3 +950,72 @@ def test_create_order_with_pooled_offcut_freezes_zero_cost_line(client, db_sessi
     # Cut list keeps both pieces, mapped to the catalog product (same material).
     assert {p["label"] for p in data["pieces"]} == {"Chico", "Grande"}
     assert all(p["productId"] == b["id"] for p in data["pieces"])
+
+
+def test_create_order_on_client_offcuts_only(client, db_session):
+    """A job cut entirely on the client's material: no board bought, $0 of material.
+
+    What the shop charges lives in the additional services; the order still has to
+    carry the full cut plan so the workshop can produce it.
+    """
+    c = _create_client(client)
+
+    payload = {
+        "clientId": c["id"],
+        "branchId": _BRANCH,
+        "materials": [
+            {
+                "key": "r1",
+                "source": "clientOffcut",
+                "height": 1000,
+                "width": 1000,
+                "thickness": 18,
+                "label": "Retazo grande",
+            },
+            {
+                "key": "r2",
+                "source": "clientOffcut",
+                "height": 1000,
+                "width": 1000,
+                "thickness": 18,
+                "poolKey": "r1",
+                "label": "Retazo chico",
+            },
+        ],
+        "requirements": [
+            {
+                "priority": 0,
+                "height": 900,
+                "width": 900,
+                "quantity": 2,
+                "materialKey": "r1",
+                "label": "Puerta",
+                "canRotate": True,
+            }
+        ],
+        "additionalServices": [
+            {"name": "Servicio de corte", "unitPrice": 20.0, "quantity": 1}
+        ],
+    }
+
+    data = _create_order(client, db_session, payload)
+
+    assert data["status"] == "confirmed"
+    # The client brought the material: nothing was bought and nothing is billed for it.
+    assert data["totalBoardsUsed"] == 0
+    assert all(line["lineTotal"] == 0 for line in data["lines"])
+    assert all(line["productId"] is None for line in data["lines"])
+    # Both retazos are cut, one piece each, and the pieces carry no catalog product.
+    assert {line["productCode"] for line in data["lines"]} == {"r1", "r2"}
+    # One `order_pieces` row per requirement, so the pair rides as quantity 2.
+    assert [p["quantity"] for p in data["pieces"]] == [2]
+    assert all(p["productId"] is None for p in data["pieces"])
+    # The bill is the service alone.
+    # The service is registered tax-included and folded into the net subtotal.
+    assert data["subtotal"] == round(20.0 / (1 + data["taxRate"]), 2)
+
+    # Every document renders from this snapshot.
+    for path in ("document", "dispatch-sheet", "production-sheet"):
+        resp = client.get(f"/api/v1/orders/{data['id']}/{path}")
+        assert resp.status_code == 200, path
+        assert resp.headers["content-type"] == "application/pdf"

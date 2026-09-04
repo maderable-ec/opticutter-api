@@ -8,7 +8,11 @@ from src.modules.branches.service import resolve_branch_for_create
 from src.modules.clients.model import ClientModel
 from src.modules.optimizations.carrier import ProformaCarrier
 from src.modules.optimizations.pricing import build_pricing
-from src.modules.optimizations.schemas import OptimizeRequest, OptimizeResponse
+from src.modules.optimizations.schemas import (
+    OptimizeRequest,
+    OptimizeResponse,
+    validate_material_graph,
+)
 from src.modules.optimizations.service import OptimizationService
 from src.modules.preorders.model import (
     OPEN_STATUSES,
@@ -21,7 +25,11 @@ from src.modules.settings.service import SettingsService
 from src.shared.audit import Actor, system_actor
 from src.shared.branch_scope import BranchScopedMixin
 from src.shared.database import get_db
-from src.shared.exceptions import BusinessRuleError, EntityNotFoundError
+from src.shared.exceptions import (
+    BusinessRuleError,
+    EntityNotFoundError,
+    ValidationError,
+)
 
 _OPEN_VALUES = [s.value for s in OPEN_STATUSES]
 
@@ -191,12 +199,30 @@ class PreOrderService(BranchScopedMixin):
             if self.db.get(ClientModel, data.client_id) is None:
                 raise EntityNotFoundError("Client", data.client_id)
             preorder.client_id = data.client_id
-        if data.materials is not None:
-            preorder.materials = [m.model_dump(mode="json") for m in data.materials]
-        if data.requirements is not None:
-            preorder.requirements = [
-                r.model_dump(mode="json") for r in data.requirements
-            ]
+        if data.materials is not None or data.requirements is not None:
+            # Validated on the MERGED pair and BEFORE anything is assigned. Merged,
+            # because an update that only sends materials can still orphan a stored
+            # requirement; before, because raising afterwards would leave the
+            # rejected lists on the instance, and this session goes on to serve the
+            # rest of the request from its identity map. Without this check the
+            # pre-order was saved and only failed on the next READ, as a 500:
+            # ``build_request`` re-validates and raises a raw Pydantic error.
+            next_materials = (
+                [m.model_dump(mode="json") for m in data.materials]
+                if data.materials is not None
+                else preorder.materials
+            )
+            next_requirements = (
+                [r.model_dump(mode="json") for r in data.requirements]
+                if data.requirements is not None
+                else preorder.requirements
+            )
+            try:
+                validate_material_graph(next_materials, next_requirements)
+            except ValueError as exc:
+                raise ValidationError(str(exc))
+            preorder.materials = next_materials
+            preorder.requirements = next_requirements
         if data.additional_services is not None:
             preorder.additional_services = [
                 s.model_dump(mode="json") for s in data.additional_services

@@ -263,9 +263,16 @@ class CatalogMaterialInput(CamelModel):
 class InlineMaterialInput(CamelModel):
     """Material with inline dimensions: company/client offcut or manual measurement.
 
-    They share the same shape; only ``source`` differs. ``quantity`` is enforced
-    as finite supply **only** when the material is a pooled offcut (``pool_key``
-    set); as a standalone material referenced by requirements it stays infinite.
+    They share the same shape; only ``source`` differs — and that difference is
+    what decides supply. An offcut (``companyOffcut``/``clientOffcut``) is a
+    physical piece somebody owns, so ``quantity`` is **always** finite supply
+    (default 1), whether it hangs off another material or is referenced directly
+    by requirements. ``manual`` models a board *type* the seller measured by hand
+    rather than a unique piece, so it stays infinite.
+
+    A client offcut is the client's own material and never carries a price: the
+    cost is coerced to 0 rather than rejected, because pre-orders re-validate
+    this model on every read and a 422 there would surface as a 500.
     """
 
     key: str = Field(
@@ -291,9 +298,10 @@ class InlineMaterialInput(CamelModel):
     quantity: Optional[PositiveInt] = Field(
         default=None,
         description=(
-            "Available units (finite supply). Enforced when this is a pooled "
-            "offcut (`poolKey` set); defaults to 1 in that case. Ignored for a "
-            "standalone material referenced directly by requirements."
+            "Available units (finite supply). Enforced for `companyOffcut` and "
+            "`clientOffcut`, where it defaults to 1: the client brings two "
+            "retazos, not an unlimited supply of them. Ignored for `manual`, "
+            "which is a board type rather than a physical piece."
         ),
     )
     pool_key: Optional[str] = Field(
@@ -301,12 +309,26 @@ class InlineMaterialInput(CamelModel):
         min_length=1,
         max_length=64,
         description=(
-            "If set, this offcut is extra stock of the catalog board with this "
-            "`key`: its pieces come from that board's requirements, and the "
-            "optimizer packs them across the board + these offcuts. A pooled "
-            "offcut is NOT referenced by any requirement."
+            "If set, this offcut is extra stock of the material with this `key` "
+            "(its *anchor*): the pieces come from the anchor's requirements and "
+            "the optimizer packs them across anchor + offcuts. The anchor is "
+            "usually a catalog board, but it may be another offcut — that is how "
+            "a job cut only on the client's retazos is expressed. A pooled offcut "
+            "is NOT referenced by any requirement."
         ),
     )
+
+    @model_validator(mode="after")
+    def _client_material_is_free(self) -> "InlineMaterialInput":
+        """A client offcut is the client's own material: it never has a price.
+
+        Coerced, not rejected: pre-orders store this payload and re-validate it
+        on every read (``preorders.service.build_request``), so raising here
+        would turn an already-saved quote into a 500.
+        """
+        if self.source == MaterialSource.client_offcut:
+            self.cost_per_unit = 0.0
+        return self
 
 
 # Union discriminated by ``source`` (same pattern as ``products/schemas.py``):
@@ -316,6 +338,67 @@ MaterialInput = Annotated[
     Union[CatalogMaterialInput, InlineMaterialInput],
     Field(discriminator="source"),
 ]
+
+
+def _field(item, name: str):
+    """Reads a field off a model or off its stored ``model_dump`` dict.
+
+    Pre-orders persist these lists as JSON and edit them in place, so the same
+    rules have to run against plain dicts too — snake_case, since ``model_dump``
+    without ``by_alias`` keeps the field names.
+    """
+    if isinstance(item, dict):
+        return item.get(name)
+    return getattr(item, name, None)
+
+
+def validate_material_graph(materials: list, requirements: list) -> None:
+    """Cross-field checks over a materials+requirements pair.
+
+    At module level because pre-orders and orders persist the same two lists:
+    keeping the rules on ``OptimizeRequest`` alone let an inconsistent set be
+    *saved* and blow up only later, inside ``build_request``, as a 500 — a
+    pre-order that could no longer be opened, quoted or confirmed.
+    """
+    keys = [_field(m, "key") for m in materials]
+    if len(set(keys)) != len(keys):
+        raise ValueError("material keys must be unique")
+    by_key = {_field(m, "key"): m for m in materials}
+
+    # Pooled materials (``pool_key`` set) are extra stock of their anchor, not a
+    # direct cut target: their pieces come from the anchor's requirements.
+    pooled_keys = {_field(m, "key") for m in materials if _field(m, "pool_key")}
+
+    for m in materials:
+        pool_key = _field(m, "pool_key")
+        if pool_key is None:
+            continue
+        if pool_key not in by_key:
+            raise ValueError(
+                f"material '{_field(m, 'key')}' poolKey references unknown "
+                f"material '{pool_key}'"
+            )
+        # No chains: the anchor is the material the requirements point at, so it
+        # cannot itself be stock of a third one. It may be a catalog board (board
+        # + retazos) or an offcut (retazos only) — that is the whole point.
+        if pool_key in pooled_keys:
+            raise ValueError(
+                f"material '{_field(m, 'key')}' poolKey references pooled "
+                f"material '{pool_key}'; point it at the material the pieces "
+                f"belong to"
+            )
+
+    for req in requirements:
+        material_key = _field(req, "material_key")
+        if material_key not in by_key:
+            raise ValueError(
+                f"requirement references unknown materialKey '{material_key}'"
+            )
+        if material_key in pooled_keys:
+            raise ValueError(
+                f"requirement cannot reference pooled material "
+                f"'{material_key}'; reference its anchor material instead"
+            )
 
 
 class Requirement(CamelModel):
@@ -402,41 +485,7 @@ class OptimizeRequest(CamelModel):
     @model_validator(mode="after")
     def _validate_material_refs(self) -> "OptimizeRequest":
         """Keys are unique; requirements and pool links resolve consistently."""
-        keys = [m.key for m in self.materials]
-        if len(set(keys)) != len(keys):
-            raise ValueError("material keys must be unique")
-        by_key = {m.key: m for m in self.materials}
-
-        # Pooled offcuts (``pool_key`` set) are extra stock of a catalog board,
-        # not a direct cut target: their pieces come from that board's pool.
-        pooled_keys = set()
-        for m in self.materials:
-            pool_key = getattr(m, "pool_key", None)
-            if pool_key is None:
-                continue
-            pooled_keys.add(m.key)
-            target = by_key.get(pool_key)
-            if target is None:
-                raise ValueError(
-                    f"material '{m.key}' poolKey references unknown material "
-                    f"'{pool_key}'"
-                )
-            if target.source != MaterialSource.catalog:
-                raise ValueError(
-                    f"material '{m.key}' poolKey must reference a catalog board, "
-                    f"not '{pool_key}'"
-                )
-
-        for req in self.requirements:
-            if req.material_key not in by_key:
-                raise ValueError(
-                    f"requirement references unknown materialKey '{req.material_key}'"
-                )
-            if req.material_key in pooled_keys:
-                raise ValueError(
-                    f"requirement cannot reference pooled offcut "
-                    f"'{req.material_key}'; reference its catalog board instead"
-                )
+        validate_material_graph(self.materials, self.requirements)
         return self
 
     @property
@@ -565,6 +614,23 @@ class LayoutGroup(CamelModel):
     layout: Layout = Field(..., description="Representative layout for this pattern")
 
 
+class UnplacedPiece(CamelModel):
+    """A piece the available stock could not hold.
+
+    Only reachable when supply is finite — a catalog board is unlimited, so a
+    quote anchored on one only lists a piece here when it is larger than the
+    board itself. A job cut on the client's retazos, on the other hand, can run
+    out of material, and saying so is the whole point: the seller then raises the
+    retazo count, attaches a board, or drops the piece.
+    """
+
+    material_key: str
+    label: Optional[str] = None
+    height: float
+    width: float
+    quantity: int = Field(..., description="How many instances did not fit")
+
+
 class OptimizeResponse(CamelModel):
     id: Optional[int] = Field(
         default=None,
@@ -611,4 +677,13 @@ class OptimizeResponse(CamelModel):
     pricing: Optional[PricingSummary] = Field(
         default=None,
         description="Discount block for the selected price tier (document-level)",
+    )
+    unplaced: List[UnplacedPiece] = Field(
+        default_factory=list,
+        description=(
+            "Pieces that did not fit the available stock, grouped by size. Empty "
+            "on every catalog-anchored quote; populated when a pool of finite "
+            "offcuts runs out. The plan returned is still valid for everything "
+            "else — these are the pieces it does NOT cut."
+        ),
     )

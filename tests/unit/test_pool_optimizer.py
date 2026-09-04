@@ -7,7 +7,7 @@ finite offcut supply, the catalog fallback and the determinism of ``auto``.
 from src.cutting import CuttingParameters, PackingStrategy
 from src.cutting.models import Piece
 from src.modules.optimizations.materials import ResolvedMaterial
-from src.modules.optimizations.pool import optimize_pool
+from src.modules.optimizations.pool import optimize_offcut_pool, optimize_pool
 from src.modules.optimizations.schemas import PoolFillOrder
 
 PARAMS = CuttingParameters(kerf=3, top_trim=0, bottom_trim=0, left_trim=0, right_trim=0)
@@ -59,6 +59,18 @@ def _placed_ids(layouts, material_key):
     )
 
 
+def _pool(*args, **kwargs):
+    """``optimize_pool`` for the catalog-anchored cases: nothing may be left over.
+
+    A catalog board is unlimited, so an unplaced piece here means one bigger than
+    the board — never the point of these tests. Asserting it on every call keeps
+    the residual from being silently ignored the way it used to be.
+    """
+    layouts, unplaced = optimize_pool(*args, **kwargs)
+    assert unplaced == []
+    return layouts
+
+
 def _count(layouts, material_key):
     return sum(1 for layout in layouts if layout.material.id == material_key)
 
@@ -89,7 +101,7 @@ def test_offcuts_first_fills_offcut_then_catalog():
         Piece(id="small", width=500, height=400),
     ]
 
-    layouts = optimize_pool(pieces, primary, offcuts, PARAMS)
+    layouts = _pool(pieces, primary, offcuts, PARAMS)
 
     # Small piece lands on the client's offcut; the big one on a catalog board.
     assert _placed_ids(layouts, "off1") == ["small"]
@@ -104,7 +116,7 @@ def test_no_offcuts_falls_back_to_catalog_only():
         Piece(id="b", width=700, height=500),
     ]
 
-    layouts = optimize_pool(pieces, primary, [], PARAMS)
+    layouts = _pool(pieces, primary, [], PARAMS)
 
     assert layouts, "expected at least one catalog sheet"
     assert all(layout.material.id == "board" for layout in layouts)
@@ -118,7 +130,7 @@ def test_offcut_finite_quantity_is_respected():
     offcuts = [_offcut("off1", 800, 600, quantity=2)]
     pieces = [Piece(id=f"p{i}", width=700, height=500) for i in range(3)]
 
-    layouts = optimize_pool(pieces, primary, offcuts, PARAMS)
+    layouts = _pool(pieces, primary, offcuts, PARAMS)
 
     assert _count(layouts, "off1") == 2
     assert _count(layouts, "board") == 1
@@ -132,7 +144,7 @@ def test_catalog_first_pushes_residual_onto_offcut():
     offcuts = [_offcut("off1", 950, 950, quantity=1)]
     pieces = [Piece(id=f"q{i}", width=900, height=900) for i in range(3)]
 
-    layouts = optimize_pool(pieces, primary, offcuts, PARAMS)
+    layouts = _pool(pieces, primary, offcuts, PARAMS)
 
     assert _count(layouts, "board") == 2
     assert _count(layouts, "off1") == 1
@@ -147,13 +159,13 @@ def test_auto_minimizes_catalog_waste_and_is_deterministic():
     ]
     offcuts = [_offcut("off1", 1000, 1000, quantity=1)]
 
-    auto = optimize_pool(
+    auto = _pool(
         pieces,
         _mat("board", 2000, 1000, fill_order=PoolFillOrder.auto),
         offcuts,
         PARAMS,
     )
-    off_first = optimize_pool(
+    off_first = _pool(
         pieces,
         _mat("board", 2000, 1000, fill_order=PoolFillOrder.offcuts_first),
         offcuts,
@@ -165,7 +177,7 @@ def test_auto_minimizes_catalog_waste_and_is_deterministic():
     assert _all_placed_ids(auto) == ["big", "mid", "tiny"]
 
     # Deterministic: same inputs → identical layout signature (cache-safe hash).
-    again = optimize_pool(
+    again = _pool(
         pieces,
         _mat("board", 2000, 1000, fill_order=PoolFillOrder.auto),
         offcuts,
@@ -183,8 +195,94 @@ def test_long_offcuts_strategy_threads_through():
         Piece(id="b", width=2000, height=1000),
     ]
 
-    layouts = optimize_pool(
+    layouts = _pool(
         pieces, primary, offcuts, PARAMS, strategy=PackingStrategy.LONG_OFFCUTS
     )
 
     assert _all_placed_ids(layouts) == ["a", "b"]
+
+
+# --- Offcut-only pool: no catalog board, finite supply -----------------------
+
+
+def test_offcut_only_pool_spreads_pieces_across_both_retazos():
+    # The seller's case: a cut list and two of the client's retazos, no board.
+    anchor = _mat("r1", 1000, 1000, source="clientOffcut", quantity=1)
+    offcuts = [_mat("r2", 1000, 1000, source="clientOffcut", quantity=1, pool_key="r1")]
+    pieces = [Piece(id=f"p{i}", width=900, height=900) for i in range(2)]
+
+    layouts, unplaced = optimize_offcut_pool(pieces, anchor, offcuts, PARAMS)
+
+    assert unplaced == []
+    assert _count(layouts, "r1") == 1
+    assert _count(layouts, "r2") == 1
+    assert _all_placed_ids(layouts) == ["p0", "p1"]
+
+
+def test_offcut_only_pool_never_invents_a_sheet():
+    # One retazo, three pieces that each need their own: two cannot be cut, and
+    # saying so is the answer. Before finite supply reached the search, the
+    # engine happily emitted three copies of a retazo the client owns once.
+    anchor = _mat("r1", 1000, 1000, source="clientOffcut", quantity=1)
+    pieces = [Piece(id=f"p{i}", width=900, height=900) for i in range(3)]
+
+    layouts, unplaced = optimize_offcut_pool(pieces, anchor, [], PARAMS)
+
+    assert _count(layouts, "r1") == 1
+    assert len(unplaced) == 2
+    assert len(_all_placed_ids(layouts)) == 1
+    # Conservation: every piece is either cut or reported, never dropped.
+    assert sorted(_all_placed_ids(layouts) + [p.id for p in unplaced]) == [
+        "p0",
+        "p1",
+        "p2",
+    ]
+
+
+def test_offcut_only_pool_honours_each_quantity():
+    anchor = _mat("r1", 1000, 1000, source="clientOffcut", quantity=2)
+    offcuts = [_mat("r2", 1000, 1000, source="clientOffcut", quantity=1, pool_key="r1")]
+    pieces = [Piece(id=f"p{i}", width=900, height=900) for i in range(5)]
+
+    layouts, unplaced = optimize_offcut_pool(pieces, anchor, offcuts, PARAMS)
+
+    assert _count(layouts, "r1") == 2
+    assert _count(layouts, "r2") == 1
+    assert len(unplaced) == 2
+
+
+def test_offcut_only_pool_is_deterministic():
+    # The payload is cached by input hash, so two runs must be byte-identical.
+    anchor = _mat("r1", 1200, 800, source="clientOffcut", quantity=1)
+    offcuts = [_mat("r2", 900, 700, source="clientOffcut", quantity=2, pool_key="r1")]
+    pieces = [
+        Piece(id=f"p{i}", width=300 + 40 * i, height=250 + 30 * i) for i in range(9)
+    ]
+
+    first, first_rest = optimize_offcut_pool(pieces, anchor, offcuts, PARAMS)
+    again, again_rest = optimize_offcut_pool(pieces, anchor, offcuts, PARAMS)
+
+    assert _signature(first) == _signature(again)
+    assert [p.id for p in first_rest] == [p.id for p in again_rest]
+
+
+def test_offcut_only_pool_searches_even_though_the_material_is_free():
+    """A free pool must still be packed, not just filled.
+
+    ``_cost_lower_bound`` collapses to 0 as soon as a bin costs nothing, so
+    matching it used to "prove" optimality before the beam ever opened and the
+    plan came straight out of the sequential greedy. These six pieces are the
+    minimal case that exposes it: the greedy spills onto the second retazo, the
+    search fits all six on the first and leaves the client's other retazo whole.
+    """
+    anchor = _mat("r1", 1220, 1000, source="clientOffcut", quantity=1)
+    offcuts = [_mat("r2", 900, 800, source="clientOffcut", quantity=1, pool_key="r1")]
+    dims = [(240, 330), (590, 440), (290, 600), (360, 420), (580, 430), (500, 270)]
+    pieces = [Piece(id=f"p{i}", width=w, height=h) for i, (w, h) in enumerate(dims)]
+
+    layouts, unplaced = optimize_offcut_pool(pieces, anchor, offcuts, PARAMS)
+
+    assert unplaced == []
+    assert _count(layouts, "r2") == 0, "the second retazo should stay untouched"
+    assert _count(layouts, "r1") == 1
+    assert len(_all_placed_ids(layouts)) == 6

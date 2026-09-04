@@ -33,6 +33,7 @@ from reportlab.platypus import (
 from src.modules.optimizations.carrier import ProformaCarrier
 from src.modules.optimizations.labels import BAND_TYPE_LABEL, edge_banding_notation
 from src.modules.optimizations.patterns import group_layouts
+from src.modules.optimizations.schemas import MaterialSource
 from src.modules.optimizations.visualization import VisualizationService
 
 # MADERABLE brand palette (sampled from the official letterhead).
@@ -308,9 +309,28 @@ class ProformaService:
         story.append(ProformaService._build_requirements_table(carrier, cell_style))
         story.append(Spacer(1, 0.15 * inch))
 
-        story.extend(_section("RESUMEN DE MATERIALES", heading_style))
-        story.append(ProformaService._build_materials_table(carrier, cell_style))
-        story.append(Spacer(1, 0.15 * inch))
+        # Omitted outright when nothing is billed — a job cut entirely on the
+        # client's material would otherwise print a "RESUMEN DE MATERIALES"
+        # heading over a single "Sin datos de materiales" row, immediately above
+        # the block that does list what was cut.
+        if _billable_material_rows(carrier) or carrier.edge_bandings_summary:
+            story.extend(_section("RESUMEN DE MATERIALES", heading_style))
+            story.append(ProformaService._build_materials_table(carrier, cell_style))
+            story.append(Spacer(1, 0.15 * inch))
+
+        # The client's own retazos: listed so the document says what was cut, but
+        # never priced. Putting them in the table above would fill a Subtotal
+        # column with $0.00 rows that read as an error — what the shop actually
+        # charges for this job is the cutting and the banding, further down.
+        client_material = _client_material_rows(carrier)
+        if client_material:
+            story.extend(_section("MATERIAL DEL CLIENTE", heading_style))
+            story.append(
+                ProformaService._build_client_material_table(
+                    client_material, cell_style
+                )
+            )
+            story.append(Spacer(1, 0.15 * inch))
 
         if carrier.additional_services:
             story.extend(_section("SERVICIOS ADICIONALES", heading_style))
@@ -828,7 +848,9 @@ class ProformaService:
         pad: int = 5,
     ) -> Table:
         requirements = carrier.requirements
-        req_data = [["#", "Alto", "Ancho", "Cant.", "Tablero", "Cantos", "Etiqueta"]]
+        # "Material", not "Tablero": the row can name a retazo, and a quote can be
+        # made of nothing else.
+        req_data = [["#", "Alto", "Ancho", "Cant.", "Material", "Cantos", "Etiqueta"]]
         if isinstance(requirements, list):
             for idx, req in enumerate(requirements, 1):
                 req_data.append(
@@ -937,11 +959,16 @@ class ProformaService:
     def _build_materials_table(carrier: ProformaCarrier, cell_style) -> Table:
         """Single materials summary: boards (quantity in units) and edge banding
         (quantity in meters) in one table with code, description, quantity, unit
-        price and subtotal. Spans the full content width."""
+        price and subtotal. Spans the full content width.
+
+        Everything here is billed. The client's own retazos are rendered apart by
+        ``_build_client_material_table``; they have no price by definition, and a
+        priced table whose column adds up to zero invites exactly the question
+        the seller does not want to answer."""
         mat_data = [["Código", "Descripción", "Cantidad", "P. Unit.", "Subtotal"]]
 
         has_rows = False
-        for entry in carrier.materials_summary or []:
+        for entry in _billable_material_rows(carrier):
             has_rows = True
             mat_data.append(
                 [
@@ -1073,6 +1100,45 @@ class ProformaService:
         return table
 
     @staticmethod
+    def _build_client_material_table(entries: List[dict], cell_style) -> Table:
+        """The client's own material: what was cut on, without a price.
+
+        Same shape as the production sheet's board table (``Descripción``,
+        dimensions, thickness, sheets) because it answers the same question —
+        which material this work ran on — and deliberately no money column.
+        """
+        data = [["Descripción", "Dimensiones", "Espesor", "Hojas"]]
+        for entry in entries:
+            data.append(
+                [
+                    # No ``product_code`` fallback, unlike the priced table: for an
+                    # inline material that field holds the optimization's internal
+                    # material key, and this document goes to the client. The
+                    # summary already falls back to the dimensions when the seller
+                    # typed no label, and the next column repeats them anyway.
+                    Paragraph(
+                        entry.get("product_name") or "Material del cliente",
+                        cell_style,
+                    ),
+                    f"{entry.get('height', 0):.0f}×{entry.get('width', 0):.0f} mm",
+                    f"{entry.get('thickness', 0):g} mm",
+                    str(entry.get("count", 0)),
+                ]
+            )
+        table = Table(
+            data,
+            colWidths=[
+                CONTENT_WIDTH - 2.9 * inch,
+                1.1 * inch,
+                0.7 * inch,
+                1.1 * inch,
+            ],
+            repeatRows=1,
+        )
+        table.setStyle(_data_table_style(header_size=10, body_size=9))
+        return table
+
+    @staticmethod
     def _build_totals_table(carrier: ProformaCarrier) -> Table:
         """The money block: net breakdown, then one tax line, then the total.
 
@@ -1082,14 +1148,25 @@ class ProformaService:
         "Subtotal + IVA = Total" verifiable on the page.
         """
         summary_data = []
+        # With edge banding there are two cost components, and printing both is
+        # what makes the subtotal verifiable on the page. Without it the boards
+        # ARE the subtotal, so repeating the number a line above it says nothing
+        # and the informative line is how many boards it took.
+        #
+        # Both rows are then guarded on carrying an actual number, which is what
+        # a job cut on the client's own material needs: it buys no board, so
+        # "Costo de tableros: $0.00" and "tableros utilizados: 0" would each
+        # state something false about a document whose content is the cutting
+        # service below.
         if carrier.edge_bandings_summary:
-            summary_data.append(
-                ["Costo de tableros:", f"${carrier.total_boards_cost:.2f}"]
-            )
+            if carrier.total_boards_cost:
+                summary_data.append(
+                    ["Costo de tableros:", f"${carrier.total_boards_cost:.2f}"]
+                )
             summary_data.append(
                 ["Costo de tapacantos:", f"${carrier.total_edge_banding_cost:.2f}"]
             )
-        else:
+        elif carrier.total_boards_used:
             summary_data.append(
                 ["Total de tableros utilizados:", str(carrier.total_boards_used)]
             )
@@ -1131,9 +1208,17 @@ class ProformaService:
     def _build_boards_total_table(
         carrier: ProformaCarrier, palette: Palette = BRAND_PALETTE
     ) -> Table:
-        """Total boards to cut, no costs (production sheet)."""
+        """Total SHEETS to cut, no costs (production sheet and dispatch sheet).
+
+        Counted off the materials summary rather than from ``total_boards_used``,
+        which answers a commercial question — how many boards the client buys —
+        and therefore excludes every retazo. The shop cuts the retazos too, and on
+        a job made only of the client's material that number was 0 next to a table
+        listing two sheets.
+        """
+        sheets = sum(entry.get("count", 0) for entry in carrier.materials_summary or [])
         return _totals_table(
-            [["Total de tableros a cortar:", str(carrier.total_boards_used)]],
+            [["Total de hojas a cortar:", str(sheets)]],
             palette=palette,
         )
 
@@ -1376,6 +1461,24 @@ def _cell_style(styles) -> ParagraphStyle:
         textColor=TEXT_GREY,
         alignment=TA_LEFT,
     )
+
+
+def _client_material_rows(carrier: ProformaCarrier) -> List[dict]:
+    """Summary lines for material the client brought in (never billed)."""
+    return [
+        entry
+        for entry in carrier.materials_summary or []
+        if entry.get("source") == MaterialSource.client_offcut.value
+    ]
+
+
+def _billable_material_rows(carrier: ProformaCarrier) -> List[dict]:
+    """Summary lines that belong in the priced table."""
+    return [
+        entry
+        for entry in carrier.materials_summary or []
+        if entry.get("source") != MaterialSource.client_offcut.value
+    ]
 
 
 def _section(
