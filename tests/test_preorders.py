@@ -374,3 +374,96 @@ def test_preorder_carries_whole_board_through_the_recompute(client):
     assert sheet["halfBoard"] is False
     assert sheet["width"] == 1220
     assert fetched["optimization"]["totalBoardsCost"] == 45.5
+
+
+# --- Material graph: rejected at write time, not on the next read -------------
+
+
+def test_create_preorder_rejects_an_orphan_requirement(client):
+    """An inconsistent set used to be SAVED and only blow up when read.
+
+    ``build_request`` re-validates on every read, and a raw Pydantic error there
+    is not a ``RequestValidationError`` — it surfaced as a 500 on the detail, the
+    PDF and the confirm, i.e. a quote that could no longer be opened at all.
+    """
+    c, b = _setup(client)
+    payload = _order_payload(c["id"], b["id"])
+    payload["requirements"][0]["materialKey"] = "does-not-exist"
+
+    resp = client.post("/api/v1/preorders/", json=payload)
+    assert resp.status_code == 422
+
+
+def test_update_preorder_rejects_orphaning_a_stored_requirement(client):
+    """Checked on the MERGED pair: this update only sends materials."""
+    c, b = _setup(client)
+    pre = _create_preorder(client, c, b).json()["data"]
+
+    resp = client.put(
+        f"/api/v1/preorders/{pre['id']}",
+        json={
+            "materials": [
+                {"key": "otro", "source": "catalog", "productId": b["id"]},
+            ]
+        },
+    )
+    assert resp.status_code == 422
+
+    # The stored pre-order is untouched and still readable.
+    assert client.get(f"/api/v1/preorders/{pre['id']}").status_code == 200
+
+
+def test_preorder_on_client_offcuts_only_round_trips(client):
+    """The retazo-anchored shape survives store → re-optimize → read."""
+    c = _create_client(client)
+    payload = {
+        "clientId": c["id"],
+        "branchId": _BRANCH,
+        "materials": [
+            {
+                "key": "r1",
+                "source": "clientOffcut",
+                "height": 1000,
+                "width": 1000,
+                "thickness": 18,
+                "label": "Retazo grande",
+            },
+            {
+                "key": "r2",
+                "source": "clientOffcut",
+                "height": 1000,
+                "width": 1000,
+                "thickness": 18,
+                "poolKey": "r1",
+                "label": "Retazo chico",
+            },
+        ],
+        "requirements": [
+            {
+                "priority": 0,
+                "height": 900,
+                "width": 900,
+                "quantity": 3,
+                "materialKey": "r1",
+                "label": "Puerta",
+                "canRotate": True,
+            }
+        ],
+    }
+
+    created = client.post("/api/v1/preorders/", json=payload)
+    assert created.status_code == 201
+    data = created.json()["data"]
+
+    # Both retazos are stored, the pooled one keeping its link.
+    assert [m["key"] for m in data["materials"]] == ["r1", "r2"]
+    assert data["materials"][1]["poolKey"] == "r1"
+
+    opt = data["optimization"]
+    assert opt["totalBoardsUsed"] == 0
+    # Two retazos hold one 900×900 each; the third piece is reported, not dropped.
+    assert len(opt["layouts"]) == 2
+    assert opt["unplaced"][0]["quantity"] == 1
+
+    # The proforma renders over the same snapshot.
+    assert client.get(f"/api/v1/preorders/{data['id']}/proforma").status_code == 200

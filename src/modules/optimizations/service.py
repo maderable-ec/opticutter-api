@@ -29,7 +29,11 @@ from src.modules.optimizations.parallel import (
     run_pool_jobs,
     runs_in_process,
 )
-from src.modules.optimizations.patterns import group_layouts, order_sheets
+from src.modules.optimizations.patterns import (
+    base_label,
+    group_layouts,
+    order_sheets,
+)
 from src.modules.optimizations.price_levels import apply_price_level, price_at_level
 from src.modules.optimizations.pricing import build_pricing
 from src.modules.optimizations.schemas import (
@@ -148,6 +152,9 @@ class OptimizationService:
             edge_bandings_summary=payload.get("edge_bandings_summary"),
             layout_groups=payload["layout_groups"],
             pricing=PricingSummary(**pricing),
+            # ``get``, not ``[]``: a payload cached before this field existed is
+            # still served for a whole OPT_RESULT_TTL_SECONDS after the deploy.
+            unplaced=payload.get("unplaced") or [],
         )
 
     def compute(self, request: OptimizeRequest) -> Tuple[dict, str]:
@@ -275,7 +282,12 @@ class OptimizationService:
         ]
 
         payload = self._build_result_payload(
-            request, results, resolved, eb_products, waste_factor
+            request,
+            results,
+            resolved,
+            eb_products,
+            waste_factor,
+            self._build_unplaced(jobs, pool_results),
         )
         # Cached BEFORE the overrides: Redis has to hold the canonical payload
         # for this hash, or the next request with the flag off would be served a
@@ -703,6 +715,38 @@ class OptimizationService:
             data["edge_banding"]["alias"] = attrs.get("alias")
         return data
 
+    @staticmethod
+    def _build_unplaced(
+        jobs: Sequence[PoolJob], results: Sequence[PoolResult]
+    ) -> List[dict]:
+        """Pieces no sheet could hold, grouped by size.
+
+        Grouped because the seller reads "3 puertas de 600×400 no entran", not
+        three identical lines. Keyed on the base label so the ``#N`` instance
+        suffix ``_build_pieces`` adds doesn't split one group into singletons.
+
+        Almost always empty: only a pool of finite offcuts can actually run out
+        of material. A catalog-anchored quote lands here only for a piece larger
+        than the board itself — which used to vanish from the plan in silence.
+        """
+        grouped: Dict[tuple, dict] = {}
+        for job, result in zip(jobs, results):
+            for piece in result.unplaced:
+                label = base_label(piece.id)
+                key = (job.material_key, label, piece.width, piece.height)
+                entry = grouped.get(key)
+                if entry is None:
+                    grouped[key] = {
+                        "material_key": job.material_key,
+                        "label": label,
+                        "width": piece.width,
+                        "height": piece.height,
+                        "quantity": 1,
+                    }
+                else:
+                    entry["quantity"] += 1
+        return list(grouped.values())
+
     def _build_result_payload(
         self,
         request: OptimizeRequest,
@@ -712,6 +756,7 @@ class OptimizationService:
         resolved: Dict[str, ResolvedMaterial],
         eb_products: Dict[int, ProductModel],
         waste_factor: float,
+        unplaced: Optional[List[dict]] = None,
     ) -> dict:
         """Builds the cacheable/serializable payload for the optimization result.
 
@@ -722,22 +767,22 @@ class OptimizationService:
         """
         all_layouts = [layout for _, _, layouts in results for layout in layouts]
 
-        # "Boards used"/cost is what the client buys. A pooled offcut is the
-        # client's own material attached to a catalog board, so it's excluded from
-        # the headline count/cost (it still shows per sheet in ``layouts``, as its
-        # own ``materials_summary`` line and in the diagram). Standalone materials
-        # (catalog/manual/non-pooled offcut) keep counting as before.
-        def _is_pooled_offcut(layout: CuttingLayout) -> bool:
+        # "Boards used" is what the client BUYS, so it counts catalog boards and
+        # manual measurements. An offcut is material somebody already owns —
+        # whether it hangs off a board or anchors its own pool — and telling a
+        # client he used four tableros when he walked in with his own retazos is
+        # wrong on the document. The cost is a separate question and is summed
+        # over EVERY sheet: a client's retazo is free by definition (the schema
+        # coerces its cost to 0) and a workshop retazo with a price is billed the
+        # same wherever it sits. The previous rule keyed on ``pool_key``, which
+        # counted a standalone retazo as a board AND let a priced pooled one
+        # through for free.
+        def _is_purchased_board(layout: CuttingLayout) -> bool:
             rm = resolved.get(layout.material.id)
-            return rm is not None and rm.pool_key is not None
+            return rm is None or not rm.is_finite
 
-        billed_layouts = [
-            layout for layout in all_layouts if not _is_pooled_offcut(layout)
-        ]
-        total_boards_used = len(billed_layouts)
-        total_boards_cost = sum(
-            layout.material.cost_per_unit for layout in billed_layouts
-        )
+        total_boards_used = sum(1 for lay in all_layouts if _is_purchased_board(lay))
+        total_boards_cost = sum(layout.material.cost_per_unit for layout in all_layouts)
 
         # Per-sheet metrics (cut = saw travel; edge banding = net length of the
         # placed pieces) accumulated into overall totals. Injected into the layout
@@ -792,6 +837,7 @@ class OptimizationService:
             "materials_summary": build_materials_summary(layout_dicts, material_dicts),
             "edge_bandings_summary": edge_bandings_summary,
             "layout_groups": group_layouts(layout_dicts),
+            "unplaced": unplaced or [],
         }
 
 

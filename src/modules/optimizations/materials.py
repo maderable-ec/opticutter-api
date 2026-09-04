@@ -47,8 +47,10 @@ class ResolvedMaterial:
     product_id: Optional[int] = None
     code: Optional[str] = None
     name: Optional[str] = None
-    # Pool metadata: ``quantity``/``pool_key`` for a finite pooled offcut,
-    # ``fill_order`` for a catalog board that anchors a pool.
+    # Pool metadata: ``quantity`` is the finite supply of an offcut (``None``
+    # for the unlimited sources), ``pool_key`` names the anchor this material is
+    # extra stock of, and ``fill_order`` applies to a catalog board anchoring a
+    # pool.
     quantity: Optional[int] = None
     pool_key: Optional[str] = None
     fill_order: PoolFillOrder = PoolFillOrder.auto
@@ -63,6 +65,21 @@ class ResolvedMaterial:
     @property
     def is_catalog(self) -> bool:
         return self.source == MaterialSource.catalog.value
+
+    @property
+    def is_finite(self) -> bool:
+        """Whether this material is a countable physical sheet.
+
+        The single definition of "there are only so many of these": an offcut is
+        a piece somebody already owns, while a catalog board is bought on demand
+        and a ``manual`` measurement is a board *type*, not a unique piece. It
+        decides both the supply handed to the search and whether a sheet counts
+        as a board on the document.
+        """
+        return self.source in (
+            MaterialSource.company_offcut.value,
+            MaterialSource.client_offcut.value,
+        )
 
     def to_dict(self) -> dict:
         """Serializable form for the optimization snapshot/payload."""
@@ -116,7 +133,15 @@ class MaterialResolver:
         )
 
     def _resolve_inline(self, material: InlineMaterialInput) -> ResolvedMaterial:
-        """Company/client offcut or manual measurement: dimensions and cost from the input."""
+        """Company/client offcut or manual measurement: dimensions and cost from the input.
+
+        ``quantity`` becomes real supply for the offcut sources (defaulting to
+        one physical sheet) and stays ``None`` — unlimited — for ``manual``.
+        """
+        is_offcut = material.source in (
+            MaterialSource.company_offcut,
+            MaterialSource.client_offcut,
+        )
         return ResolvedMaterial(
             key=material.key,
             width=material.width,
@@ -127,6 +152,6 @@ class MaterialResolver:
             product_id=None,
             code=None,
             name=material.label,
-            quantity=material.quantity,
+            quantity=(material.quantity or 1) if is_offcut else None,
             pool_key=material.pool_key,
         )

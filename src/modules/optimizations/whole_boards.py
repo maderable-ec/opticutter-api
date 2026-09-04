@@ -67,11 +67,9 @@ def apply_whole_boards(payload: dict, whole_board_keys: Iterable[str]) -> dict:
 
     result = dict(payload)
     result["layouts"] = layouts
-    # A delta, not a re-sum: ``total_boards_cost`` excludes pooled offcuts and
-    # that flag (``pool_key``) doesn't survive into the payload, so re-adding
-    # every layout here would bill the client's own material. Safe as a delta
-    # because a half board is always the catalog anchor sheet, never a pooled
-    # offcut (``_half_spec`` returns None for non-catalog materials).
+    # A delta, not a re-sum: it keeps this pass independent of how the base
+    # total was composed. Safe because a half board is always a catalog sheet,
+    # never an offcut (``_half_spec`` returns None for non-catalog materials).
     result["total_boards_cost"] = round(
         payload.get("total_boards_cost", 0.0) + cost_delta, 2
     )

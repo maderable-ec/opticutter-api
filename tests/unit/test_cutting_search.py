@@ -444,6 +444,50 @@ def test_finite_bin_count_is_respected():
     assert sum(len(la.placed_pieces) for la in layouts) == 3
 
 
+def test_finite_supply_that_runs_out_reports_the_remainder():
+    """With no infinite bin the search can legitimately run out of material.
+
+    ``test_finite_bin_count_is_respected`` always has a catalog board next to the
+    offcut, so it never exercises exhaustion. Here every bin is finite and the
+    honest answer is a valid plan plus the pieces it does not cut — the shape a
+    quote cut only on the client's retazos takes.
+    """
+    offcut = BinSpec(
+        key="offcut", width=600, height=600, thickness=15, cost_per_unit=0.0, count=2
+    )
+    pieces = [Piece(id="p", width=500, height=500, quantity=5)]
+    layouts, unplaced = optimize_bins(
+        pieces, [offcut], cutting_params=CuttingParameters(kerf=5)
+    )
+    assert len(layouts) == 2, "never more sheets than the declared supply"
+    assert sum(len(la.placed_pieces) for la in layouts) == 2
+    assert len(unplaced) == 3
+    # Conservation: cut or reported, never dropped.
+    assert sum(len(la.placed_pieces) for la in layouts) + len(unplaced) == 5
+
+
+def test_free_bins_do_not_short_circuit_the_search():
+    """A cost bound of 0 is not a proof of optimality.
+
+    ``_cost_lower_bound`` returns 0 as soon as any bin is free, so the "cost ==
+    lower bound" exit fired immediately on a pool of the client's retazos and the
+    beam never opened. The proof now falls back to the sheet-count bound, which
+    is what the objective actually minimizes once cost is constant.
+    """
+    free = BinSpec(key="free", width=1220, height=1000, thickness=18, cost_per_unit=0.0)
+    dims = [(240, 330), (590, 440), (290, 600), (360, 420), (580, 430), (500, 270)]
+    pieces = [
+        Piece(id=f"p{i}", width=w, height=h, quantity=1)
+        for i, (w, h) in enumerate(dims)
+    ]
+    layouts, unplaced = optimize_bins(
+        pieces, [free], cutting_params=CuttingParameters(kerf=4)
+    )
+    assert unplaced == []
+    # The sequential greedy needs two sheets for these six pieces.
+    assert len(layouts) == 1
+
+
 def test_scaled_budget_shrinks_with_job_size():
     small = SearchBudget.scaled(40)
     big = SearchBudget.scaled(600)

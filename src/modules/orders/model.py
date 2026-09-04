@@ -319,7 +319,9 @@ class OrderLineModel(TimestampMixin, AuditMixin, Base):
     product_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("products.id"), nullable=True
     )
-    product_code: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    # 64, like ``order_boards.product_code``: a non-catalog line is identified by
+    # the optimization's material ``key``, which the contract allows up to 64.
+    product_code: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     product_name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     # Boards: whole units. Edge banding: net linear meters + waste factor, billed
     # exactly (no rounding up to a whole meter) — same value as ``linear_m``.
