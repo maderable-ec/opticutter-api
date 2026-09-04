@@ -5,10 +5,11 @@ finite offcut supply, the catalog fallback and the determinism of ``auto``.
 """
 
 from src.cutting import CuttingParameters, PackingStrategy
-from src.cutting.models import Piece
+from src.cutting.models import BinSpec, Piece
 from src.modules.optimizations.materials import ResolvedMaterial
 from src.modules.optimizations.pool import optimize_offcut_pool, optimize_pool
 from src.modules.optimizations.schemas import PoolFillOrder
+from tests.unit.cutting_invariants import assert_valid_layouts
 
 PARAMS = CuttingParameters(kerf=3, top_trim=0, bottom_trim=0, left_trim=0, right_trim=0)
 
@@ -286,3 +287,161 @@ def test_offcut_only_pool_searches_even_though_the_material_is_free():
     assert _count(layouts, "r2") == 0, "the second retazo should stay untouched"
     assert _count(layouts, "r1") == 1
     assert len(_all_placed_ids(layouts)) == 6
+
+
+# --- Offcut-only pool: rotation must never cost placed pieces ----------------
+#
+# The shop's report on pre-order 7: five pieces did not fit, the seller ticked
+# "Rotar" hoping a couple more would land in the leftover, and the engine turned
+# every piece sideways and fit *fewer*. Three things caused it and all three are
+# exercised here: the search is skipped whenever the sequential greedy strands a
+# piece (``search.optimize_bins``), which pieces get stranded was therefore a
+# greedy accident, and ``packer._place_piece`` decides orientation by a fixed
+# tie-break that always prefers the wider one — never by search.
+
+P7_PARAMS = CuttingParameters(
+    kerf=4, top_trim=10, bottom_trim=10, left_trim=10, right_trim=10
+)
+
+
+def _preorder_7(can_rotate):
+    """Pre-order 7 verbatim: two client retazos, 20 pieces of 200x700."""
+    anchor = _mat("A", 1200, 1500, source="clientOffcut", quantity=1)
+    offcuts = [_mat("B", 1100, 1300, source="clientOffcut", quantity=1, pool_key="A")]
+    pieces = [
+        Piece(id=f"p{i}", width=200, height=700, can_rotate=can_rotate)
+        for i in range(20)
+    ]
+    return pieces, anchor, offcuts
+
+
+def _run_pool(pieces, anchor, offcuts, params):
+    """Runs the pool and asserts the invariants every plan owes, then reports."""
+    layouts, unplaced = optimize_offcut_pool(pieces, anchor, offcuts, params)
+    assert_valid_layouts(layouts, unplaced, params, len(pieces))
+    assert sorted(_all_placed_ids(layouts) + [p.id for p in unplaced]) == sorted(
+        p.id for p in pieces
+    )
+    return layouts, unplaced
+
+
+def _placed_count(layouts):
+    return len(_all_placed_ids(layouts))
+
+
+def test_allowing_rotation_never_places_fewer_pieces_preorder_7():
+    """Permission may not cost yield: ``can_rotate`` is a *may*, not a *must*.
+
+    Forbidding rotation is a strict restriction of allowing it, so any plan the
+    forbidden pool admits is also legal for the permitted one. The engine used
+    to answer 13 with rotation against 15 without it.
+    """
+    locked, unplaced_locked = _run_pool(*_preorder_7(False), P7_PARAMS)
+    free, unplaced_free = _run_pool(*_preorder_7(True), P7_PARAMS)
+
+    assert _placed_count(locked) == 15, "grain-locked baseline moved; re-read the case"
+    assert _placed_count(free) >= _placed_count(locked)
+    assert len(unplaced_free) <= len(unplaced_locked)
+
+
+def test_preorder_7_cuts_eighteen_pieces_on_two_client_offcuts():
+    """The yield the existing portfolio already reaches, once it is consulted.
+
+    ``GreedyConfig(sort="area", split=LONGER_AXIS)`` packs 11 on the 1200x1500
+    and 7 on the 1100x1300. A floor, not an equality: a future improvement must
+    not turn this red.
+    """
+    layouts, unplaced = _run_pool(*_preorder_7(True), P7_PARAMS)
+
+    assert _placed_count(layouts) >= 18
+    assert len(unplaced) <= 2
+
+
+def test_rotation_monotonicity_over_a_seeded_population():
+    """The same "permission never costs yield" property, over small seeded pools."""
+    import random
+
+    rng = random.Random(20260904)
+    for _ in range(30):
+        anchor = _mat(
+            "A",
+            rng.choice([900, 1100, 1200]),
+            rng.choice([700, 800, 1000]),
+            source="clientOffcut",
+            quantity=1,
+        )
+        offcuts = [
+            _mat(
+                "B",
+                rng.choice([600, 900]),
+                rng.choice([500, 700]),
+                source="clientOffcut",
+                quantity=1,
+                pool_key="A",
+            )
+        ]
+        dims = [
+            (rng.randrange(150, 500, 10), rng.randrange(150, 600, 10))
+            for _ in range(rng.randint(5, 10))
+        ]
+        locked = [
+            Piece(id=f"p{i}", width=w, height=h, can_rotate=False)
+            for i, (w, h) in enumerate(dims)
+        ]
+        free = [
+            Piece(id=f"p{i}", width=w, height=h, can_rotate=True)
+            for i, (w, h) in enumerate(dims)
+        ]
+
+        locked_layouts, _ = _run_pool(locked, anchor, offcuts, P7_PARAMS)
+        free_layouts, _ = _run_pool(free, anchor, offcuts, P7_PARAMS)
+
+        assert _placed_count(free_layouts) >= _placed_count(locked_layouts), dims
+
+
+def test_rotation_is_not_gratuitous():
+    """Where turning pieces buys nothing, the plan leaves them as drawn.
+
+    Four 300x400 on an 830x830 retazo fit two-by-two in either orientation, yet
+    the packer's tie-break (``rect_w - placed_width``, minimized) turned all
+    four sideways. Nothing is gained and the operator reads a diagram that no
+    longer matches the cut list he typed.
+    """
+    anchor = _mat("A", 830, 830, source="clientOffcut", quantity=1)
+    pieces = [Piece(id=f"p{i}", width=300, height=400) for i in range(4)]
+
+    layouts, unplaced = _run_pool(pieces, anchor, [], P7_PARAMS)
+
+    assert unplaced == []
+    assert _placed_count(layouts) == 4
+    assert not any(pp.rotated for layout in layouts for pp in layout.placed_pieces)
+
+
+def test_finite_pool_plan_is_deterministic_with_rotation():
+    """The payload is cached by input hash: two runs must be byte-identical."""
+    first, first_rest = _run_pool(*_preorder_7(True), P7_PARAMS)
+    again, again_rest = _run_pool(*_preorder_7(True), P7_PARAMS)
+
+    assert _signature(first) == _signature(again)
+    assert [p.id for p in first_rest] == [p.id for p in again_rest]
+
+
+def test_finite_pool_is_never_worse_than_the_sequential_fill():
+    """Strictly additive: the extra candidates can only be adopted when better.
+
+    Scored with the same objective the pool uses to choose, against the plan the
+    legacy sequential fill alone produces.
+    """
+    from src.cutting.search import finite_plan_objective, optimize_bins
+
+    pieces, anchor, offcuts = _preorder_7(True)
+    specs = [
+        BinSpec(key="A", width=1200, height=1500, thickness=18, count=1),
+        BinSpec(key="B", width=1100, height=1300, thickness=18, count=1),
+    ]
+    baseline_layouts, baseline_rest = optimize_bins(pieces, specs, P7_PARAMS)
+    layouts, unplaced = _run_pool(pieces, anchor, offcuts, P7_PARAMS)
+
+    assert finite_plan_objective(layouts, unplaced) <= finite_plan_objective(
+        baseline_layouts, baseline_rest
+    )

@@ -28,7 +28,7 @@ Three fill orders (see ``PoolFillOrder``), all specific to a catalog anchor:
   (purchased) sheets. Deterministic, so the optimization hash stays stable.
 """
 
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from src.cutting.enums import PackingStrategy
 from src.cutting.models import BinSpec, CuttingLayout, Material, Piece
@@ -38,6 +38,8 @@ from src.cutting.search import (
     ExactConfig,
     SearchBudget,
     downgrade_layout_to_half,
+    fill_finite_bins_max_yield,
+    finite_plan_objective,
     optimize_bins,
 )
 from src.modules.optimizations.materials import ResolvedMaterial
@@ -357,6 +359,52 @@ def optimize_pool(
     )
 
 
+def _without_rotation(pieces: Sequence[Piece]) -> List[Piece]:
+    """The same pool with the permission to rotate revoked.
+
+    ``can_rotate`` is a permission, not an obligation, so this pool is a strict
+    restriction of the original: every plan it admits is also legal for the
+    original, and every placement it emits is physically cuttable as drawn. That
+    is what makes it a free extra candidate rather than a different question.
+    """
+    return [
+        Piece(
+            id=piece.id,
+            width=piece.width,
+            height=piece.height,
+            quantity=piece.quantity,
+            can_rotate=False,
+            priority=piece.priority,
+        )
+        for piece in pieces
+    ]
+
+
+def _plan_has_rotation(layouts: Sequence[CuttingLayout]) -> bool:
+    return any(pp.rotated for layout in layouts for pp in layout.placed_pieces)
+
+
+def _rebind_to_original(
+    layouts: List[CuttingLayout],
+    unplaced: List[Piece],
+    by_id: Dict[str, Piece],
+) -> Tuple[List[CuttingLayout], List[Piece]]:
+    """Puts the caller's own ``Piece`` objects back into a clone-built plan.
+
+    Only the ``piece`` reference changes -- geometry, position and ``rotated``
+    are the clone's answer and stay verbatim. It matters because ``rotated`` is
+    read against ``piece.can_rotate`` downstream (the shared validity check, and
+    ``service._geometric_edges`` when remapping edge banding), and because the
+    caller identifies pieces by object as well as by id.
+    """
+    for layout in layouts:
+        for pp in layout.placed_pieces:
+            original = by_id.get(pp.piece.id)
+            if original is not None:
+                pp.piece = original
+    return layouts, [by_id.get(p.id, p) for p in unplaced]
+
+
 def _finite_spec(material: ResolvedMaterial) -> BinSpec:
     """Bin for one offcut: its geometry, its cost and how many of it exist."""
     return BinSpec(
@@ -392,6 +440,16 @@ def optimize_offcut_pool(
 
     Bin order is anchor-then-attached, i.e. the order the request listed them, so
     the answer stays deterministic and cacheable.
+
+    The plan is chosen from a small portfolio of candidates rather than taken from
+    a single pipeline, and ``finite_plan_objective`` decides — a tie always keeps
+    the incumbent, so every candidate is strictly additive. Two earn their place:
+    the pool with rotation revoked (``_without_rotation``), because allowing a
+    piece to turn must never place fewer than forbidding it and it used to; and
+    ``fill_finite_bins_max_yield``, because once the stock runs out the cost
+    search cannot rank the answer at all — it only compares plans that place
+    everything, and it skips its own search the moment the baseline strands a
+    piece.
     """
     if not pieces:
         return [], []
@@ -410,28 +468,92 @@ def optimize_offcut_pool(
             exact_config=exact_config,
         )
 
-    layouts, unplaced = run(pieces)
-    if not unplaced:
+    def plan(pool: List[Piece]) -> Tuple[List[CuttingLayout], List[Piece]]:
+        """Fill, then re-search on whatever actually fit."""
+        layouts, unplaced = run(pool)
+        if not unplaced:
+            return layouts, unplaced
+
+        # ``optimize_bins`` skips beam, LNS and restarts entirely when its greedy
+        # baseline strands a piece, so what came back above is the plain
+        # sequential fill. Re-running on the pieces that DID fit hands the search
+        # a feasible instance and buys the packing quality back on the job that
+        # needs it most. The placed set cannot shrink or grow: we remove exactly
+        # what the first pass could not hold, and the ids are unique per instance
+        # (``_build_pieces``).
+        #
+        # WHICH pieces are stranded is still this pass's greedy decision; what
+        # corrects it is the candidate portfolio below.
+        stranded = {piece.id for piece in unplaced}
+        kept = [piece for piece in pool if piece.id not in stranded]
+        if not kept:
+            return layouts, unplaced
+        repacked, spilled = run(kept)
+        # A second pass that strands something the first one placed would report
+        # fewer pieces than we can actually cut; keep the first plan in that case.
+        return (layouts, unplaced) if spilled else (repacked, unplaced)
+
+    def max_yield(pool: List[Piece]) -> Tuple[List[CuttingLayout], List[Piece]]:
+        """Cut as much as the retazos hold, then re-search over what was cut.
+
+        The yield pass answers "how much fits"; the refinement asks the cost
+        objective to lay those same pieces out on as few sheets as it can. A
+        refinement that strands something is discarded outright -- reporting
+        fewer pieces than we just proved cuttable is the one outcome worse than
+        not refining.
+        """
+        layouts, unplaced = fill_finite_bins_max_yield(
+            pool,
+            specs,
+            cutting_params=cutting_params,
+            budget=budget,
+            seed=seed,
+            min_rect_size=min_rect_size,
+            max_sheets=max_sheets,
+            exact_config=exact_config,
+        )
+        cut_ids = {pp.piece.id for layout in layouts for pp in layout.placed_pieces}
+        kept = [piece for piece in pool if piece.id in cut_ids]
+        if not kept:
+            return layouts, unplaced
+        repacked, spilled = run(kept)
+        if spilled:
+            return layouts, unplaced
+        if finite_plan_objective(repacked, unplaced) < finite_plan_objective(
+            layouts, unplaced
+        ):
+            return repacked, unplaced
         return layouts, unplaced
 
-    # ``optimize_bins`` skips beam, LNS and restarts entirely when its greedy
-    # baseline strands a piece, so what came back above is the plain sequential
-    # fill. Re-running on the pieces that DID fit hands the search a feasible
-    # instance and buys the packing quality back on the job that needs it most.
-    # The placed set cannot shrink or grow: we remove exactly what the first pass
-    # could not hold, and the ids are unique per instance (``_build_pieces``).
-    #
-    # Known limitation, deliberate: WHICH pieces are stranded therefore stays a
-    # greedy decision. Answering "fit as many as possible" properly is a
-    # different objective from the cost one the beam maximizes (it only ever
-    # registers complete solutions), and the natural tool for it already exists
-    # — ``exact.solve_bin(require_all=False)`` maximizes placed area. Left for
-    # when the shop says the reported remainder is wrong, not before.
-    stranded = {piece.id for piece in unplaced}
-    kept = [piece for piece in pieces if piece.id not in stranded]
-    if not kept:
-        return layouts, unplaced
-    repacked, spilled = run(kept)
-    # A second pass that strands something the first one placed would report
-    # fewer pieces than we can actually cut; keep the first plan in that case.
-    return (layouts, unplaced) if spilled else (repacked, unplaced)
+    layouts, unplaced = plan(pieces)
+    by_id = {piece.id: piece for piece in pieces}
+    rotatable = any(piece.can_rotate for piece in pieces)
+
+    def consider(candidate: Tuple[List[CuttingLayout], List[Piece]]) -> None:
+        """Adopts ``candidate`` only if it scores strictly better."""
+        nonlocal layouts, unplaced
+        alt_layouts, alt_unplaced = candidate
+        if finite_plan_objective(alt_layouts, alt_unplaced) < finite_plan_objective(
+            layouts, unplaced
+        ):
+            layouts, unplaced = alt_layouts, alt_unplaced
+
+    # The unrotated candidate. Gated on the symptom rather than computed always:
+    # a plan that turned nothing has no complaint to answer, and a pool with no
+    # rotatable piece is its own clone. Cheap where it matters -- a finite pool is
+    # "the client walked in with two retazos", the smallest job the shop runs.
+    if rotatable and (unplaced or _plan_has_rotation(layouts)):
+        consider(_rebind_to_original(*plan(_without_rotation(pieces)), by_id))
+
+    # Still short of material: ask the yield question outright, in both
+    # orientations. ``optimize_bins`` cannot answer it -- it only ranks plans
+    # that place everything, and it skips its own search the moment the greedy
+    # baseline strands a piece, so the plan above came out of a single greedy
+    # pass. This is what the note that used to sit here deferred: which pieces
+    # are left over stops being a greedy accident.
+    if unplaced:
+        consider(max_yield(pieces))
+        if rotatable:
+            consider(_rebind_to_original(*max_yield(_without_rotation(pieces)), by_id))
+
+    return layouts, unplaced

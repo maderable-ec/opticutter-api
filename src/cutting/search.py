@@ -89,10 +89,18 @@ from src.cutting.parameters import CuttingParameters
 # to 0 with any zero-cost bin, so matching it "proved" optimality before the beam
 # ever opened and the plan came straight out of the greedy (see
 # ``_proven_optimal``). Catalog geometry is untouched: a bought board costs more
-# than zero, so it takes the same branch it always did. Also bump this when the
-# pinned ortools version moves, since a solver upgrade can return a different
-# solution.
-ENGINE_VERSION = 10
+# than zero, so it takes the same branch it always did; 11 = a pool of finite
+# retazos stops letting the greedy decide what gets left over. Granting rotation
+# could place FEWER pieces than forbidding it, because orientation is a fixed
+# tie-break in ``packer._place_piece`` rather than a searched decision, and
+# ``optimize_bins`` skips its whole search once the baseline strands a piece --
+# so the unrotated pool and a yield-maximizing pass now enter as candidates and
+# ``finite_plan_objective`` picks (see ``fill_finite_bins_max_yield``). Catalog
+# geometry is untouched again, this time by construction: the new code is only
+# reachable through ``optimize_offcut_pool``, and an infinite bin set strands
+# nothing to begin with. Also bump this when the pinned ortools version moves,
+# since a solver upgrade can return a different solution.
+ENGINE_VERSION = 11
 
 # A half bin is only worth opening near the end of a job: gate it by remaining
 # area so early states don't waste decodes on fills the cost objective would
@@ -479,6 +487,12 @@ class _Solution:
         return sum(c.length for f in self.fills for c in f.cuts)
 
     def objective(self) -> tuple:
+        # ``len(self.unplaced)`` is inert here, and deliberately kept for shape:
+        # ``register`` only ever builds complete solutions (``unplaced=[]``), an
+        # LNS candidate inherits ``best.unplaced``, and the search only runs when
+        # the baseline stranded nothing -- so this term is identically 0 in every
+        # comparison the engine makes. Ranking incomplete plans is a different
+        # question with a different answer: ``finite_plan_objective``.
         return (
             round(self.cost(), 6),
             len(self.fills),
@@ -486,6 +500,42 @@ class _Solution:
             round(self.waste(), 3),
             round(self.cut_length(), 3),
         )
+
+
+def finite_plan_objective(
+    layouts: Sequence[CuttingLayout], unplaced: Sequence[Piece]
+) -> tuple:
+    """Quality of a plan over a FINITE bin set (lower is better).
+
+    ``_Solution.objective`` ranks plans that place everything and asks what they
+    cost. On a pool of the client's retazos the supply can genuinely run out, so
+    the first question is how much of the cut list got cut -- and the cost term
+    collapses to zero anyway, which is what let a plan using fewer sheets beat
+    one that stranded fewer pieces.
+
+    The terms, in order:
+
+    - ``len(unplaced)`` -- the seller's actual complaint.
+    - ``cost`` -- a company offcut may carry a price; a client's never does.
+    - sheet count, then **consumed sheet area**: two plans that open one sheet
+      each are not equal when one of them burned the big retazo.
+    - ``rotated`` before ``waste``: between plans that cut the same pieces from
+      the same sheets, the one that turns fewer pieces wins. Rotation is a
+      permission the seller grants, not an outcome he asked for, and on plain
+      melamine turning a piece buys nothing physical -- so it is only worth
+      spending when it places pieces or saves a sheet, both of which outrank it
+      here.
+    """
+    placed = [pp for layout in layouts for pp in layout.placed_pieces]
+    return (
+        len(unplaced),
+        round(sum(layout.material.cost_per_unit for layout in layouts), 6),
+        len(layouts),
+        round(sum(layout.material.area for layout in layouts), 3),
+        sum(1 for pp in placed if pp.rotated),
+        round(sum(layout.waste_area for layout in layouts), 3),
+        round(sum(c.length for layout in layouts for c in layout.cuts), 3),
+    )
 
 
 class _Searcher:
@@ -1461,6 +1511,207 @@ def optimize_bins(
             layouts = repaired
 
     return layouts, unplaced + solution.unplaced
+
+
+# Bin orders the max-yield pass tries. Four cheap passes over the same
+# candidate generator: which retazo gets filled first is a real decision when
+# the stock is finite, and no single rule wins everywhere -- ``request`` is the
+# order the seller listed them, ``smallest`` saves the big sheet for last,
+# ``largest`` gets the awkward pieces placed while there is room, and
+# ``best_next`` re-decides at every sheet.
+_MAX_YIELD_BIN_ORDERS: Tuple[str, ...] = ("request", "smallest", "largest", "best_next")
+
+
+def _yield_key(fill: BinFill) -> tuple:
+    """Ranks candidate fills of ONE bin when the stock has run out (lower first).
+
+    Area before piece count, deliberately: whatever does not fit the client's
+    retazo gets cut from a board he buys, and a board is priced by area. Chasing
+    the count instead fills the sheet with the small pieces and strands the big
+    ones -- more rows cut, more material to purchase.
+
+    ``priority`` is not a term here: it already leads every comparator in
+    ``SORT_KEYS``, so a high-priority piece is offered to each constructor
+    first, and turning it into a hard constraint at this level would waste
+    retazo whenever the priority pieces happen to pack badly.
+    """
+    return (
+        -round(fill.used_area, 3),
+        -len(fill.placed),
+        sum(1 for pp in fill.placed if pp.rotated),
+    )
+
+
+def _best_yield_fill(
+    searcher: "_Searcher", pool: List[Piece], spec: BinSpec, tries: int
+) -> Optional[BinFill]:
+    """Densest fill of one bin, over the whole candidate portfolio.
+
+    No new constructor: ``gen_fills`` is the same portfolio x strip generator the
+    beam uses, native kernel included, and the choice between its candidates is
+    ``_yield_key``.
+
+    **CP-SAT is deliberately not consulted here**, and the number is the reason.
+    ``exact_best_fill`` maximizes placed area, so it looks like the obvious
+    candidate to add; measured over twelve finite pools it places 2.7% more
+    pieces (382 vs 372) for **82x the time** -- 133s against 1.6s, worst pool
+    24.4s against 0.8s -- on a path that answers in milliseconds today and that a
+    seller hits with the client at the counter. Metering it the way the beam does
+    (opening sheet only, so the four bin orders share one memoized answer) does
+    not rescue the trade: it lands back on 372 pieces, exactly the no-solver
+    yield, while still costing 43s. The 10 pieces come precisely from the
+    mid-pass calls, i.e. from the shape that cannot be afforded. Same conclusion
+    ``ExactConfig`` reached for the beam, reached again here with its own numbers.
+    """
+    best: Optional[Tuple[tuple, BinFill]] = None
+    candidates = searcher.gen_fills(pool, spec, tries)
+    for index, fill in enumerate(candidates):
+        key = (_yield_key(fill), index)
+        if best is None or key < best[0]:
+            best = (key, fill)
+    return best[1] if best is not None else None
+
+
+def _bin_order(
+    specs: Sequence[BinSpec], params: CuttingParameters, order: str
+) -> List[int]:
+    """Spec indices in the visiting order named by ``order`` (stable)."""
+    indices = list(range(len(specs)))
+    if order == "smallest":
+        return sorted(indices, key=lambda i: (_usable_area(specs[i], params), i))
+    if order == "largest":
+        return sorted(indices, key=lambda i: (-_usable_area(specs[i], params), i))
+    return indices
+
+
+def _max_yield_pass(
+    searcher: "_Searcher",
+    pieces: List[Piece],
+    specs: Sequence[BinSpec],
+    params: CuttingParameters,
+    order: str,
+    tries: int,
+) -> Tuple[List[BinFill], List[Piece]]:
+    """One sequential pass: open sheets until nothing more can be cut."""
+    remaining = list(pieces)
+    used: Dict[int, int] = {}
+    fills: List[BinFill] = []
+    has_full = any(not spec.half_board for spec in specs)
+    visiting = _bin_order(specs, params, order)
+
+    def available(i: int) -> bool:
+        spec = specs[i]
+        if has_full and spec.half_board:
+            return False
+        return spec.count is None or used.get(i, 0) < spec.count
+
+    for _ in range(searcher.max_sheets):
+        if not remaining:
+            break
+        chosen: Optional[Tuple[tuple, int, BinFill]] = None
+        if order == "best_next":
+            # Re-decide every sheet: take the bin that cuts the most, breaking
+            # ties towards the SMALLER one so the big retazo survives for the
+            # pieces that will need it.
+            for i in visiting:
+                if not available(i):
+                    continue
+                fill = _best_yield_fill(searcher, remaining, specs[i], tries)
+                if fill is None:
+                    continue
+                key = (_yield_key(fill), _usable_area(specs[i], params), i)
+                if chosen is None or key < chosen[0]:
+                    chosen = (key, i, fill)
+        else:
+            # The fixed orders commit to the first bin that cuts anything; the
+            # order itself is the decision, so there is nothing left to rank.
+            for i in visiting:
+                if not available(i):
+                    continue
+                fill = _best_yield_fill(searcher, remaining, specs[i], tries)
+                if fill is not None:
+                    chosen = ((), i, fill)
+                    break
+        if chosen is None:
+            break
+        _, index, fill = chosen
+        used[index] = used.get(index, 0) + 1
+        placed_ids = set(fill.placed_ids())
+        remaining = [piece for piece in remaining if piece.id not in placed_ids]
+        fills.append(fill)
+    return fills, remaining
+
+
+def fill_finite_bins_max_yield(
+    pieces: List[Piece],
+    bins: List[BinSpec],
+    cutting_params: CuttingParameters = None,
+    *,
+    budget: SearchBudget = None,
+    seed: int = 0,
+    min_rect_size: float = 0.1,
+    max_sheets: int = 100,
+    exact_config: ExactConfig = None,
+) -> Tuple[List[CuttingLayout], List[Piece]]:
+    """Cuts as much of ``pieces`` as a FINITE bin set can hold.
+
+    A different question from ``optimize_bins``, which asks what the cheapest
+    complete plan costs. It cannot answer this one: ``register`` only ever builds
+    complete solutions, so the beam is structurally unable to rank a plan that
+    strands a piece, and the whole search is skipped the moment the sequential
+    baseline strands one -- which is exactly the job where the packing IS the
+    product, because the client is paying for the decision of what comes out of
+    his own retazos.
+
+    No new heuristic. Pre-order 7 (two client retazos, 20 pieces of 200x700) is
+    cut 15 -> 18 by ``GreedyConfig(sort="area", split=LONGER_AXIS)``, a point of
+    the portfolio the engine has generated all along and never consulted here.
+
+    Determinism: the bin orders are a constant tuple, ``gen_fills`` is already
+    ordered, and the effort is counted in orders x sheets x ``tries`` plus the
+    shared ``ExactBudget`` -- never in wall clock.
+    """
+    if not pieces or not bins:
+        return [], []
+    params = cutting_params or CuttingParameters()
+    expanded = expand_pieces(pieces)
+    budget = budget or SearchBudget.scaled(len(expanded))
+    # Carried only because ``_Searcher`` is constructed with one: this pass never
+    # asks the solver anything (see ``_best_yield_fill``).
+    exact_config = exact_config or ExactConfig()
+
+    placeable: List[Piece] = []
+    unplaced: List[Piece] = []
+    for piece in expanded:
+        if any(_piece_fits_spec(piece, spec, params) for spec in bins):
+            placeable.append(piece)
+        else:
+            unplaced.append(piece)
+    if not placeable:
+        return [], unplaced
+
+    searcher = _Searcher(
+        specs=list(bins),
+        params=params,
+        budget=budget,
+        seed=seed,
+        min_rect_size=min_rect_size,
+        max_sheets=max_sheets,
+        exact_config=exact_config,
+    )
+
+    best: Optional[Tuple[tuple, List[CuttingLayout], List[Piece]]] = None
+    for order in _MAX_YIELD_BIN_ORDERS:
+        fills, rest = _max_yield_pass(
+            searcher, placeable, bins, params, order, budget.tries_per_board
+        )
+        layouts = _to_layouts(fills)
+        score = finite_plan_objective(layouts, rest)
+        if best is None or score < best[0]:
+            best = (score, layouts, rest)
+
+    _, layouts, rest = best
+    return layouts, unplaced + rest
 
 
 class MultiSheetGuillotineOptimizer:
