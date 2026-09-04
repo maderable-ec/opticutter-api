@@ -66,7 +66,11 @@ from src.cutting import (
     exact,
     optimize_bins,
 )
-from src.cutting.search import ExactBudget, _Searcher
+from src.cutting.search import (
+    ExactBudget,
+    _Searcher,
+    fill_finite_bins_max_yield,
+)
 from tests.unit.cutting_invariants import assert_valid_layouts
 
 PARAMS_KERF4 = CuttingParameters(
@@ -797,3 +801,85 @@ def test_relaxed_kerf_repair_only_returns_plans_valid_at_the_real_kerf():
         if layout.material.area
     )
     assert emptiest > 0.30
+
+
+# --- Max-yield pass over a finite bin set ------------------------------------
+
+
+def _finite_retazos():
+    """Pre-order 7: two of the client's retazos and 20 pieces of 200x700."""
+    bins = [
+        BinSpec(
+            key="A", width=1200, height=1500, thickness=15, cost_per_unit=0.0, count=1
+        ),
+        BinSpec(
+            key="B", width=1100, height=1300, thickness=15, cost_per_unit=0.0, count=1
+        ),
+    ]
+    pieces = [Piece(id=f"p{i}", width=200, height=700) for i in range(20)]
+    return pieces, bins
+
+
+def test_max_yield_pass_emits_valid_fills():
+    """Physically cuttable, and it never invents a sheet the client does not own."""
+    pieces, bins = _finite_retazos()
+
+    layouts, unplaced = fill_finite_bins_max_yield(pieces, bins, PARAMS_KERF4)
+
+    assert_valid_layouts(layouts, unplaced, PARAMS_KERF4, len(pieces))
+    assert len(layouts) <= len(bins)
+    used = Counter(layout.material.id for layout in layouts)
+    for spec in bins:
+        assert used[spec.key] <= spec.count
+
+
+def test_max_yield_pass_beats_the_cost_search_when_the_stock_runs_out():
+    """The point of the pass: ``optimize_bins`` cannot rank an incomplete plan.
+
+    It skips beam, LNS and restarts the moment its sequential baseline strands a
+    piece, so on this pool it returns that single greedy pass verbatim.
+    """
+    pieces, bins = _finite_retazos()
+
+    baseline, baseline_rest = optimize_bins(pieces, bins, cutting_params=PARAMS_KERF4)
+    layouts, unplaced = fill_finite_bins_max_yield(pieces, bins, PARAMS_KERF4)
+
+    placed = sum(len(layout.placed_pieces) for layout in layouts)
+    assert placed > sum(len(layout.placed_pieces) for layout in baseline)
+    assert len(unplaced) < len(baseline_rest)
+
+
+def test_max_yield_pass_is_deterministic():
+    """The payload is cached by input hash, so two runs must agree exactly."""
+    pieces, bins = _finite_retazos()
+
+    def signature():
+        layouts, unplaced = fill_finite_bins_max_yield(pieces, bins, PARAMS_KERF4)
+        return (
+            [
+                (
+                    layout.material.id,
+                    tuple(
+                        (pp.piece.id, pp.x, pp.y, pp.width, pp.height, pp.rotated)
+                        for pp in layout.placed_pieces
+                    ),
+                )
+                for layout in layouts
+            ],
+            [p.id for p in unplaced],
+        )
+
+    assert signature() == signature()
+
+
+def test_max_yield_pass_reports_pieces_that_fit_no_bin():
+    """A piece bigger than every retazo is reported, never silently dropped."""
+    pieces, bins = _finite_retazos()
+    oversized = Piece(id="huge", width=3000, height=3000, can_rotate=False)
+
+    layouts, unplaced = fill_finite_bins_max_yield(
+        pieces + [oversized], bins, PARAMS_KERF4
+    )
+
+    assert_valid_layouts(layouts, unplaced, PARAMS_KERF4, len(pieces) + 1)
+    assert "huge" in {p.id for p in unplaced}
