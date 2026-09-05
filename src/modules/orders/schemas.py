@@ -127,6 +127,19 @@ class OrderBranchUpdate(CamelModel):
     note: Optional[str] = Field(default=None, max_length=512)
 
 
+class OrderPriorityUpdate(CamelModel):
+    """Marks (or unmarks) the order for priority attention on the workshop board."""
+
+    is_priority: bool = Field(
+        ..., description="True puts the order at the head of the shop-floor board"
+    )
+    note: Optional[str] = Field(
+        default=None,
+        max_length=512,
+        description="Why it was prioritized; lands in the order's history",
+    )
+
+
 class OrderExportLine(CamelModel):
     """Invoice line for the external provider (billed by product)."""
 
@@ -239,8 +252,17 @@ class OrderResponse(CamelModel):
     external_invoice_id: Optional[str] = None
     source: Optional[str] = None
     notes: Optional[str] = None
+    is_priority: bool = Field(
+        default=False,
+        description="Priority attention: the workshop board lists it first",
+    )
     created_at: datetime
     confirmed_at: Optional[datetime] = None
+    queued_at: Optional[datetime] = Field(
+        default=None,
+        description="When the order entered the production queue (payment "
+        "registered). NULL while still 'confirmed'",
+    )
     assigned_to_id: Optional[int] = Field(
         default=None,
         description="Operator who self-assigned the order (set on cutting)",
@@ -470,7 +492,17 @@ class WorkshopQueueItem(CamelModel):
         description="Commercial reference (project/site): tells apart several "
         "orders of the same client on the board",
     )
+    is_priority: bool = Field(
+        default=False,
+        description="Priority attention: listed first and highlighted on the board",
+    )
     created_at: datetime
+    queued_at: Optional[datetime] = Field(
+        default=None,
+        description="When the order entered the queue (payment registered) -- the "
+        "shop's real arrival time, and what the board's FIFO orders by. The card "
+        "measures the wait from here, NOT from createdAt",
+    )
     client: ClientResponse = Field(..., description="Client the order belongs to")
     board_usage: List[BoardUsage] = Field(
         default_factory=list,
