@@ -204,7 +204,25 @@ class OrderModel(TimestampMixin, AuditMixin, Base):
     source: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     notes: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
 
+    # Priority attention: breaks the workshop board's FIFO on business request (an
+    # urgent client). Purely a queue-ordering concern -- it touches neither the
+    # status machine nor a single price. Named ``is_priority`` and not ``priority``
+    # because ``OrderPieceModel.priority`` already means the optimizer's cutting
+    # priority, which is a different thing entirely.
+    is_priority: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false"), nullable=False
+    )
+
     confirmed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    # When the order actually entered the production queue (``confirmed -> queued``),
+    # which is gated on registering the payment. This -- not ``created_at`` -- is the
+    # workshop's arrival time: a quote raised on Monday and paid on Friday reaches the
+    # shop AFTER one raised on Wednesday and paid on Thursday, so ordering the board by
+    # creation jumps the line for whoever asked first rather than whoever paid first.
+    # Frozen once, on the FIRST entry: the admin rollback ``cutting -> queued`` undoes
+    # somebody taking the wrong order, and must not cost the client their place.
+    queued_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
     # Self-assigned operator: filled in when transitioning to ``cutting``.
     assigned_to_id: Mapped[Optional[int]] = mapped_column(

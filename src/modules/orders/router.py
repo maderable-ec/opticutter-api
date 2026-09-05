@@ -26,6 +26,7 @@ from src.modules.orders.schemas import (
     OrderBranchUpdate,
     OrderExportResponse,
     OrderInvoiceUpdate,
+    OrderPriorityUpdate,
     OrderResponse,
     OrderStatusUpdate,
     PieceCutResponse,
@@ -100,6 +101,13 @@ def list_orders(
         description="Listing order: 'oldest' first (FIFO, the workshop's view) "
         "or 'recent' first (the back office's)",
     ),
+    is_priority: Optional[bool] = Query(
+        default=None,
+        alias="isPriority",
+        description="Only prioritized orders (true) or only regular ones (false); "
+        "omit for both. Filters, never reorders: floating them to the top is the "
+        "shop-floor board's rule",
+    ),
     paging: PageParams = Depends(),
     svc: OrderService = Depends(order_service),
     branch_scope: Optional[int] = Depends(get_branch_scope),
@@ -120,6 +128,7 @@ def list_orders(
         created_from=created_from,
         created_to=created_to,
         sort=sort,
+        is_priority=is_priority,
     )
     return page(items, total, paging.limit, paging.offset)
 
@@ -283,6 +292,34 @@ def change_order_branch(
         svc.change_branch(
             order_id,
             data.branch_id,
+            actor=staff_actor(current_user),
+            note=data.note,
+            branch_scope=branch_scope,
+        )
+    )
+
+
+@router.patch(
+    "/{order_id}/priority",
+    response_model=DataResponse[OrderResponse],
+)
+def set_order_priority(
+    order_id: int,
+    data: OrderPriorityUpdate,
+    svc: OrderService = Depends(order_service),
+    current_user: UserModel = Depends(require_permission("orders:write")),
+    branch_scope: Optional[int] = Depends(get_branch_scope),
+):
+    """Marks (or unmarks) the order for priority attention on the workshop board.
+
+    Admin/seller only: the shop floor sees the highlight and gets the order
+    first, but must not be able to jump its own queue. Allowed while the order
+    is open; idempotent.
+    """
+    return ok(
+        svc.set_priority(
+            order_id,
+            data.is_priority,
             actor=staff_actor(current_user),
             note=data.note,
             branch_scope=branch_scope,

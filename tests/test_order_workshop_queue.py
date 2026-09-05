@@ -234,6 +234,7 @@ def test_workshop_queue_lists_banding_usage(client, db_session):
 
 
 def test_workshop_queue_is_fifo_oldest_first(client, db_session):
+    """FIFO is still the contract between orders of equal priority."""
     o1 = _order_with_banding(client, db_session, identifier="0100000231")
     o2 = _order_with_banding(client, db_session, identifier="0100000249")
     _to_cutting(client, o1["id"])
@@ -241,6 +242,8 @@ def test_workshop_queue_is_fifo_oldest_first(client, db_session):
     board = client.get(_URL).json()["data"]
     seen = [i["orderId"] for i in board if i["orderId"] in {o1["id"], o2["id"]}]
     assert seen == [o1["id"], o2["id"]]
+    # Nothing is prioritized by default -- that is what makes this plain FIFO.
+    assert all(i["isPriority"] is False for i in board)
 
 
 def test_workshop_queue_is_branch_scoped(client, db_session: Session):

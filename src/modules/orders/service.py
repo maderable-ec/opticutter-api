@@ -104,6 +104,7 @@ class OrderService(BranchScopedMixin):
         created_from: Optional[date] = None,
         created_to: Optional[date] = None,
         sort: str = "oldest",
+        is_priority: Optional[bool] = None,
     ) -> Tuple[List[OrderModel], int]:
         """Lists orders with total count: ``(items, total)``.
 
@@ -116,13 +117,18 @@ class OrderService(BranchScopedMixin):
         says "order 42" as often as it reads the code off the sheet.
 
         ``sort`` defaults to ``oldest`` because the workshop reads this listing
-        FIFO; the back office asks for ``recent`` explicitly.
+        FIFO; the back office asks for ``recent`` explicitly. ``is_priority``
+        narrows to (or excludes) the prioritized orders but does NOT reorder
+        them: floating them to the top is the shop-floor board's rule, and the
+        back office's listing answers "which ones are marked", not "what next".
         """
         query = self.db.query(OrderModel)
         if status:
             query = query.filter(OrderModel.status.in_([s.value for s in status]))
         if client_filter is not None:
             query = query.filter(OrderModel.client_id == client_filter)
+        if is_priority is not None:
+            query = query.filter(OrderModel.is_priority.is_(is_priority))
         if search:
             pattern = f"%{search}%"
             # Outer join: an order always has a client, but the join must not
@@ -403,10 +409,15 @@ class OrderService(BranchScopedMixin):
 
         # Payment method: freezes the amounts on entering the queue (informational).
         # The admin cutting → queued rollback doesn't hit this (current != confirmed).
+        # ``queued_at`` rides the same guard on purpose: it is the workshop's arrival
+        # time (the board's FIFO reads it), and the rollback undoes somebody taking the
+        # wrong order -- re-dating it there would send the client to the back of the
+        # line for a mistake that was not theirs.
         if is_payment_capture:
             order.payment_cash_amount = payment.cash_amount
             order.payment_transfer_amount = payment.transfer_amount
             order.payment_credit_amount = payment.credit_amount
+            order.queued_at = datetime.utcnow()
 
         self.db.commit()
         self.db.refresh(order)
@@ -501,7 +512,20 @@ class OrderService(BranchScopedMixin):
         Self-sufficient card list for the operator and the bander (the latter has
         no ``orders:read``): embeds the client, board/banding usage per material
         type and cutting progress so both can drive their actions -- take/cut,
-        band, complete -- from one place. Branch-isolated, oldest first (FIFO).
+        band, complete -- from one place. Branch-isolated.
+
+        Prioritized orders come first, then FIFO. The shop works in arrival order
+        and that stays the rule -- ``is_priority`` is the deliberate exception
+        sales marks for an urgent client, and FIFO is what breaks the tie within
+        each group. The sort spans the three board statuses rather than only
+        ``queued``: an urgent order already being cut is still the one to watch.
+
+        **Arrival is ``queued_at``, not ``created_at``.** An order reaches the shop
+        when it is PAID (``confirmed -> queued`` is gated on the payment), so a quote
+        raised first can easily be paid last; ordering by creation handed the first
+        slot to whoever asked first rather than whoever paid first. ``COALESCE`` keeps
+        the old behavior for any row the backfill could not date, and ``id`` is the
+        final tiebreak so two orders queued in the same instant stay deterministic.
         """
         query = self.db.query(OrderModel).filter(
             OrderModel.status.in_([s.value for s in WORKSHOP_QUEUE_STATUSES]),
@@ -510,7 +534,11 @@ class OrderService(BranchScopedMixin):
         # admin's board (which spans every branch) doesn't fire one query per row.
         query = query.options(joinedload(OrderModel.branch))
         query = self._apply_branch_scope(query, branch_scope, None)
-        orders = query.order_by(OrderModel.id.asc()).all()
+        orders = query.order_by(
+            OrderModel.is_priority.desc(),
+            func.coalesce(OrderModel.queued_at, OrderModel.created_at).asc(),
+            OrderModel.id.asc(),
+        ).all()
         progress_by_order = self._cutting_progress_by_order([o.id for o in orders])
         items = []
         for o in orders:
@@ -522,7 +550,9 @@ class OrderService(BranchScopedMixin):
                     status=OrderStatus(o.status),
                     banding_status=BandingStatus(o.banding_status),
                     notes=o.notes,
+                    is_priority=o.is_priority,
                     created_at=o.created_at,
+                    queued_at=o.queued_at,
                     client=ClientResponse.model_validate(o.client),
                     board_usage=_board_usage(snapshot),
                     banding_usage=_banding_usage(snapshot),
@@ -748,6 +778,56 @@ class OrderService(BranchScopedMixin):
             notify_order_transition(
                 self.db, order, OrderStatus.confirmed, OrderStatus.queued, actor
             )
+        return order
+
+    def set_priority(
+        self,
+        order_id: int,
+        is_priority: bool,
+        actor: Optional[Actor] = None,
+        note: Optional[str] = None,
+        branch_scope: Optional[int] = None,
+    ) -> OrderModel:
+        """Marks (or unmarks) the order for priority attention on the board.
+
+        Sales' escape hatch from FIFO: an urgent client gets attended first
+        without touching the status machine, the snapshot or a single price --
+        the flag only moves the order to the head of ``list_workshop_queue`` and
+        lights the card up. Reversible, so a wrongly marked order is one call
+        away from its place in the queue.
+
+        Refused once the order is closed (``TERMINAL_STATUSES``): prioritizing a
+        dispatched order means nothing, and the board doesn't list it anyway.
+        Idempotent -- re-marking writes no history row, so a double click doesn't
+        fill the timeline with noise.
+        """
+        actor = actor or system_actor()
+        order = self.get_scoped_or_404(order_id, branch_scope)
+        current = OrderStatus(order.status)
+        if current in TERMINAL_STATUSES:
+            raise BusinessRuleError(
+                "No se puede cambiar la prioridad de una orden cerrada"
+            )
+        if order.is_priority == is_priority:
+            return order  # idempotent: same value, no-op (and no history row)
+        order.is_priority = is_priority
+        # Audit: a history row with from == to (not a state transition) + note,
+        # the same shape ``change_branch`` uses to record a non-transition.
+        order.history.append(
+            OrderStatusHistoryModel(
+                from_status=current.value,
+                to_status=current.value,
+                actor=actor.type,
+                actor_user_id=actor.user_id,
+                actor_label=actor.label,
+                note=note
+                or (
+                    "Marcada como prioritaria" if is_priority else "Prioridad retirada"
+                ),
+            )
+        )
+        self.db.commit()
+        self.db.refresh(order)
         return order
 
     def build_export(
