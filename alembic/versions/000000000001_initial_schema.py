@@ -2,19 +2,25 @@
 
 Revision ID: 000000000001
 Revises:
-Create Date: 2026-08-21 14:37:44.028597
+Create Date: 2026-09-06
 
 Single consolidated schema (the project keeps one squashed initial migration).
-Re-squashed from the previous chain (000000000001..dab99b6a8b21) by regenerating
-from the models via ``alembic revision --autogenerate``, so it carries the
-metadata naming convention, composite/hot-path indexes, CHECK constraints,
-explicit ON DELETE rules (SET NULL for audit/actor FKs, CASCADE for
-order/preorder children), DB-level server defaults, and every column added
-since the previous squash (branch printing switches, preorder ``variant``,
-product ``external_code``). ``users`` and ``branches`` form a mutual FK cycle,
-broken here by creating ``users`` without the ``branch_id`` FK and adding it
-back afterwards. A database on an older revision is recreated (this project
-drops and rebuilds prod rather than chaining onto the old history).
+Re-squashed from the previous chain (000000000001..000000000006) by regenerating
+from the models via ``alembic revision --autogenerate`` against an empty
+database, so it carries the metadata naming convention, composite/hot-path
+indexes, CHECK constraints, explicit ON DELETE rules (SET NULL for audit/actor
+FKs, CASCADE for order/preorder children), DB-level server defaults, and every
+column the six chained migrations added: the catalog price levels and the
+explicit tax rate (``products.price_2``/``price_3``, ``settings.tax_rate``,
+``preorders.price_level``, ``orders.price_level``/``tax_rate``/``tax_amount``,
+with the price-tier discount gone), ``orders.payment_transfer_amount``,
+``order_lines.product_code`` already 64 chars, ``orders.is_priority`` and
+``orders.queued_at``. The backfill of ``queued_at`` from the status history has
+no equivalent here on purpose: a fresh database has no history to read.
+``users`` and ``branches`` form a mutual FK cycle, broken here by creating
+``users`` without the ``branch_id`` FK and adding it back afterwards. A database
+on an older revision is recreated (this project drops and rebuilds prod rather
+than chaining onto the old history).
 """
 from typing import Sequence, Union
 
@@ -130,6 +136,8 @@ def upgrade() -> None:
     sa.Column('name', sa.String(length=128), nullable=False),
     sa.Column('description', sa.String(length=256), nullable=True),
     sa.Column('price', sa.Float(), nullable=False),
+    sa.Column('price_2', sa.Float(), nullable=True),
+    sa.Column('price_3', sa.Float(), nullable=True),
     sa.Column('is_active', sa.Boolean(), nullable=False),
     sa.Column('attributes', sa.JSON(), nullable=False),
     sa.Column('created_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
@@ -137,6 +145,8 @@ def upgrade() -> None:
     sa.Column('created_by', sa.Integer(), nullable=True),
     sa.Column('updated_by', sa.Integer(), nullable=True),
     sa.CheckConstraint('price >= 0', name=op.f('ck_products_price_non_negative')),
+    sa.CheckConstraint('price_2 IS NULL OR price_2 >= 0', name=op.f('ck_products_price_2_non_negative')),
+    sa.CheckConstraint('price_3 IS NULL OR price_3 >= 0', name=op.f('ck_products_price_3_non_negative')),
     sa.ForeignKeyConstraint(['created_by'], ['users.id'], name=op.f('fk_products_created_by_users'), ondelete='SET NULL'),
     sa.ForeignKeyConstraint(['updated_by'], ['users.id'], name=op.f('fk_products_updated_by_users'), ondelete='SET NULL'),
     sa.PrimaryKeyConstraint('id', name=op.f('pk_products')),
@@ -173,7 +183,7 @@ def upgrade() -> None:
     sa.Column('half_board_markup_pct', sa.Float(), nullable=False),
     sa.Column('preorder_validity_days', sa.Integer(), nullable=False),
     sa.Column('max_open_preorders_per_client', sa.Integer(), nullable=False),
-    sa.Column('price_tiers', sa.JSON(), nullable=False),
+    sa.Column('tax_rate', sa.Float(), nullable=False),
     sa.Column('company_name', sa.String(length=128), nullable=False),
     sa.Column('company_tagline', sa.String(length=256), nullable=False),
     sa.Column('company_email', sa.String(length=128), nullable=False),
@@ -227,15 +237,17 @@ def upgrade() -> None:
     sa.Column('currency', sa.String(length=8), nullable=False),
     sa.Column('subtotal', sa.Float(), nullable=False),
     sa.Column('total', sa.Float(), nullable=False),
-    sa.Column('price_tier_code', sa.String(length=32), server_default='consumidor', nullable=False),
-    sa.Column('discount_rate', sa.Float(), server_default='0', nullable=False),
-    sa.Column('discount_amount', sa.Float(), server_default='0', nullable=False),
+    sa.Column('price_level', sa.Integer(), server_default='1', nullable=False),
+    sa.Column('tax_rate', sa.Float(), server_default='0', nullable=False),
+    sa.Column('tax_amount', sa.Float(), server_default='0', nullable=False),
     sa.Column('additional_services_total', sa.Float(), server_default='0', nullable=False),
     sa.Column('total_boards_used', sa.Integer(), nullable=False),
     sa.Column('external_invoice_id', sa.String(length=64), nullable=True),
     sa.Column('source', sa.String(length=32), nullable=True),
     sa.Column('notes', sa.String(length=512), nullable=True),
+    sa.Column('is_priority', sa.Boolean(), server_default=sa.text('false'), nullable=False),
     sa.Column('confirmed_at', sa.DateTime(), nullable=True),
+    sa.Column('queued_at', sa.DateTime(), nullable=True),
     sa.Column('assigned_to_id', sa.Integer(), nullable=True),
     sa.Column('assigned_at', sa.DateTime(), nullable=True),
     sa.Column('assigned_to_label', sa.String(length=128), nullable=True),
@@ -243,6 +255,7 @@ def upgrade() -> None:
     sa.Column('dispatched_by', sa.Integer(), nullable=True),
     sa.Column('dispatched_by_label', sa.String(length=128), nullable=True),
     sa.Column('payment_cash_amount', sa.Float(), nullable=True),
+    sa.Column('payment_transfer_amount', sa.Float(), nullable=True),
     sa.Column('payment_credit_amount', sa.Float(), nullable=True),
     sa.Column('banding_status', sa.String(length=16), server_default='not_applicable', nullable=False),
     sa.Column('banding_started_at', sa.DateTime(), nullable=True),
@@ -256,11 +269,13 @@ def upgrade() -> None:
     sa.Column('created_by', sa.Integer(), nullable=True),
     sa.Column('updated_by', sa.Integer(), nullable=True),
     sa.CheckConstraint('additional_services_total >= 0', name=op.f('ck_orders_additional_services_total_non_negative')),
-    sa.CheckConstraint('discount_amount >= 0', name=op.f('ck_orders_discount_amount_non_negative')),
-    sa.CheckConstraint('discount_rate >= 0 AND discount_rate <= 1', name=op.f('ck_orders_discount_rate_ratio')),
     sa.CheckConstraint('payment_cash_amount >= 0', name=op.f('ck_orders_payment_cash_non_negative')),
     sa.CheckConstraint('payment_credit_amount >= 0', name=op.f('ck_orders_payment_credit_non_negative')),
+    sa.CheckConstraint('payment_transfer_amount >= 0', name=op.f('ck_orders_payment_transfer_non_negative')),
+    sa.CheckConstraint('price_level BETWEEN 1 AND 3', name=op.f('ck_orders_price_level_in_range')),
     sa.CheckConstraint('subtotal >= 0', name=op.f('ck_orders_subtotal_non_negative')),
+    sa.CheckConstraint('tax_amount >= 0', name=op.f('ck_orders_tax_amount_non_negative')),
+    sa.CheckConstraint('tax_rate >= 0 AND tax_rate <= 1', name=op.f('ck_orders_tax_rate_ratio')),
     sa.CheckConstraint('total >= 0', name=op.f('ck_orders_total_non_negative')),
     sa.ForeignKeyConstraint(['assigned_to_id'], ['users.id'], name=op.f('fk_orders_assigned_to_id_users'), ondelete='SET NULL'),
     sa.ForeignKeyConstraint(['banding_finished_by'], ['users.id'], name=op.f('fk_orders_banding_finished_by_users'), ondelete='SET NULL'),
@@ -339,7 +354,7 @@ def upgrade() -> None:
     sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
     sa.Column('order_id', sa.Integer(), nullable=False),
     sa.Column('product_id', sa.Integer(), nullable=True),
-    sa.Column('product_code', sa.String(length=32), nullable=True),
+    sa.Column('product_code', sa.String(length=64), nullable=True),
     sa.Column('product_name', sa.String(length=128), nullable=True),
     sa.Column('quantity', sa.Float(), nullable=False),
     sa.Column('unit_price_snapshot', sa.Float(), nullable=False),
@@ -414,7 +429,7 @@ def upgrade() -> None:
     sa.Column('materials', sa.JSON(), nullable=False),
     sa.Column('requirements', sa.JSON(), nullable=False),
     sa.Column('additional_services', sa.JSON(), server_default=sa.text("'[]'"), nullable=False),
-    sa.Column('price_tier_code', sa.String(length=32), server_default='consumidor', nullable=False),
+    sa.Column('price_level', sa.Integer(), server_default='1', nullable=False),
     sa.Column('strategy', sa.String(length=32), server_default='default', nullable=False),
     sa.Column('variant', sa.Integer(), server_default='0', nullable=False),
     sa.Column('source', sa.String(length=32), nullable=True),
