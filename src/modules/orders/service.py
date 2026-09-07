@@ -514,6 +514,12 @@ class OrderService(BranchScopedMixin):
         type and cutting progress so both can drive their actions -- take/cut,
         band, complete -- from one place. Branch-isolated.
 
+        ``banding_progress`` counts only the BANDED pieces, and it is what tells
+        the card whether the bander may start or finish (and, when not, how many
+        pieces are still missing). The per-piece data lives in the cutting plan,
+        an endpoint the bander cannot even reach -- and one request per card
+        every 15s -- so the aggregate rides here.
+
         Prioritized orders come first, then FIFO. The shop works in arrival order
         and that stays the rule -- ``is_priority`` is the deliberate exception
         sales marks for an urgent client, and FIFO is what breaks the tie within
@@ -539,7 +545,9 @@ class OrderService(BranchScopedMixin):
             func.coalesce(OrderModel.queued_at, OrderModel.created_at).asc(),
             OrderModel.id.asc(),
         ).all()
-        progress_by_order = self._cutting_progress_by_order([o.id for o in orders])
+        order_ids = [o.id for o in orders]
+        progress_by_order = self._cutting_progress_by_order(order_ids)
+        banded_by_order = self._banded_progress_by_order(order_ids)
         items = []
         for o in orders:
             snapshot = o.optimization_snapshot or {}
@@ -557,6 +565,9 @@ class OrderService(BranchScopedMixin):
                     board_usage=_board_usage(snapshot),
                     banding_usage=_banding_usage(snapshot),
                     progress=progress_by_order.get(
+                        o.id, CuttingProgress(cut_pieces=0, total_pieces=0)
+                    ),
+                    banding_progress=banded_by_order.get(
                         o.id, CuttingProgress(cut_pieces=0, total_pieces=0)
                     ),
                     print_consolidated_enabled=o.branch.print_consolidated_enabled,
@@ -589,6 +600,50 @@ class OrderService(BranchScopedMixin):
             for row in rows
         }
 
+    def _banded_progress(self, order_id: int) -> CuttingProgress:
+        """Cut/total counts over the pieces that carry edge banding.
+
+        The bander's floor: ``edges`` is copied verbatim from the snapshot at
+        materialization, so the column itself says which pieces are banded (see
+        ``_is_banded`` for why that is not a plain NULL check) -- no extra column
+        and no migration. Cut is derived from ``cut_at`` as usual.
+        """
+        row = (
+            self.db.query(
+                func.count(OrderPlacedPieceModel.id).label("total"),
+                func.count(OrderPlacedPieceModel.cut_at).label("cut"),
+            )
+            .filter(OrderPlacedPieceModel.order_id == order_id, _is_banded())
+            .one()
+        )
+        return CuttingProgress(cut_pieces=row.cut, total_pieces=row.total)
+
+    def _banded_progress_by_order(
+        self, order_ids: List[int]
+    ) -> dict[int, CuttingProgress]:
+        """``_banded_progress`` for many orders in a single grouped query.
+
+        Feeds the shop-floor card: the board has to say WHY the banding button
+        is greyed out, and the plain ``progress`` can't -- it counts every piece,
+        banded or not. Orders with no banded pieces are absent (caller -> 0/0).
+        """
+        if not order_ids:
+            return {}
+        rows = (
+            self.db.query(
+                OrderPlacedPieceModel.order_id,
+                func.count(OrderPlacedPieceModel.id).label("total"),
+                func.count(OrderPlacedPieceModel.cut_at).label("cut"),
+            )
+            .filter(OrderPlacedPieceModel.order_id.in_(order_ids), _is_banded())
+            .group_by(OrderPlacedPieceModel.order_id)
+            .all()
+        )
+        return {
+            row.order_id: CuttingProgress(cut_pieces=row.cut, total_pieces=row.total)
+            for row in rows
+        }
+
     def transition_banding(
         self,
         order_id: int,
@@ -598,8 +653,15 @@ class OrderService(BranchScopedMixin):
     ) -> BandingStatusResponse:
         """Advances the banding track (``in_progress``/``done``), idempotently.
 
-        Track parallel to and independent of cutting: only requires the order
-        to already be in ``cutting``/``cut`` (pieces are released to band).
+        Track parallel to cutting -- the bander works on the pieces the operator
+        releases, without waiting for the whole board to be cut -- but not
+        independent of it: banding starts once the FIRST banded piece is cut and
+        finishes once the LAST one is. Plain pieces never hold it back, which is
+        what keeps the two tracks running side by side. Without that floor the
+        bander could open the order the instant the operator took it and declare
+        the work done with nothing cut, and ``done`` is terminal: it satisfies
+        the completion gate for good.
+
         Forward-only; re-applying the current status is a no-op. Seals
         start/finish with a timestamp + actor.
         """
@@ -626,6 +688,18 @@ class OrderService(BranchScopedMixin):
                     f"Transición de canteado inválida de '{current.value}' a "
                     f"'{to_status.value}'"
                 )
+            # Cutting gates: there has to be something to band. Checked after the
+            # transition table so an invalid jump still reports itself as invalid.
+            self._ensure_cutting_plan(order)
+            banded = self._banded_progress(order.id)
+            if to_status == BandingStatus.in_progress and banded.cut_pieces == 0:
+                raise BusinessRuleError("Aún no se ha cortado ninguna pieza con canto")
+            if to_status == BandingStatus.done:
+                pending = banded.total_pieces - banded.cut_pieces
+                if pending:
+                    raise BusinessRuleError(
+                        f"Faltan {pending} pieza(s) con canto por cortar"
+                    )
             now = datetime.utcnow()
             if to_status == BandingStatus.in_progress:
                 order.banding_started_at = now
@@ -1024,6 +1098,21 @@ def _banding_usage(snapshot: dict) -> List[dict]:
             }
         )
     return usage
+
+
+def _is_banded():
+    """SQL predicate for "this placed piece carries edge banding".
+
+    ``edges`` is a plain ``JSON`` column and SQLAlchemy persists Python ``None``
+    into it as the JSON value ``null``, not as SQL NULL -- so ``IS NOT NULL`` is
+    true for EVERY row and would count plain pieces as banded (measured: the gate
+    opened on a piece with no banding at all). ``json_typeof`` tells the two
+    apart, and folds in the SQL-NULL case for free: it yields NULL there, which
+    no comparison passes. Rows that do carry banding are objects, and
+    ``EdgeBandingSpec.sides`` requires at least one side, so the type alone is
+    the whole test.
+    """
+    return func.json_typeof(OrderPlacedPieceModel.edges) != "null"
 
 
 def _progress(pieces: List[OrderPlacedPieceModel]) -> CuttingProgress:

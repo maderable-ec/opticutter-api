@@ -190,9 +190,12 @@ No cycles, enforced by convention:
     requires recording a payment method (cash / bank transfer / credit,
     informational only).
   - **Banding** (edge banding, `banding_status`): `pending → in_progress →
-    done`, advanced independently by the `canteador` role while cutting is
-    still in progress. An order with edge banding can't reach `completed`
-    until banding is `done`.
+    done`, advanced by the `canteador` role while cutting is still in
+    progress — on the pieces the operator releases, not on the whole order:
+    starting requires the FIRST banded piece to be cut and finishing the
+    LAST one. Pieces without banding never hold the track back, which is what
+    keeps the two running in parallel. An order with edge banding can't reach
+    `completed` until banding is `done`.
 
   Orders render their own commercial document, production sheet and dispatch
   sheet from the frozen snapshot.

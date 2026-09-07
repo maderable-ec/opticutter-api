@@ -93,6 +93,48 @@ def _order_with_banding(client, db_session, branch_id=_BRANCH, identifier="01000
     )
 
 
+def _order_mixed_pieces(client, db_session, identifier="0100000397"):
+    """Order with TWO banded pieces and TWO plain ones, on a single board.
+
+    The shape the banding gates are actually about: the plain pieces must never
+    hold the bander back, and the banded ones must all be cut before finishing.
+    """
+    c = _create_client(client, identifier=identifier)
+    suffix = identifier[-4:]
+    b = _create_board(client, code=f"MEL{suffix}")
+    eb = _create_edge_banding(client, code=f"TAP{suffix}")
+    return _mint_order(
+        client,
+        db_session,
+        {
+            "clientId": c["id"],
+            "branchId": _BRANCH,
+            "materials": [{"key": "b1", "source": "catalog", "productId": b["id"]}],
+            "requirements": [
+                {
+                    "priority": 0,
+                    "height": 500,
+                    "width": 1000,
+                    "quantity": 2,
+                    "materialKey": "b1",
+                    "label": "Costado",
+                    "canRotate": True,
+                    "edgeBanding": {"productId": eb["id"], "sides": ["top", "bottom"]},
+                },
+                {
+                    "priority": 0,
+                    "height": 400,
+                    "width": 600,
+                    "quantity": 2,
+                    "materialKey": "b1",
+                    "label": "Fondo",
+                    "canRotate": True,
+                },
+            ],
+        },
+    )
+
+
 def _order_without_banding(client, db_session):
     c = _create_client(client)
     b = _create_board(client)
@@ -145,6 +187,32 @@ def _cut_all_pieces(client, oid):
             )
 
 
+def _banded_pieces(client, oid):
+    """Placed pieces carrying edge banding, in cutting-plan order."""
+    plan = client.get(f"/api/v1/orders/{oid}/cutting-plan").json()["data"]
+    return [p for board in plan["boards"] for p in board["pieces"] if p["edges"]]
+
+
+def _cut_piece(client, oid, piece, cut=True):
+    return client.patch(
+        f"/api/v1/orders/{oid}/cutting-plan/pieces/{piece['id']}",
+        json={"cut": cut},
+    )
+
+
+def _cut_banded_pieces(client, oid):
+    """Cuts every banded piece: what unlocks FINISHING the banding."""
+    pieces = _banded_pieces(client, oid)
+    for piece in pieces:
+        assert _cut_piece(client, oid, piece).status_code == 200
+    return len(pieces)
+
+
+def _cut_first_banded_piece(client, oid):
+    """Cuts a single banded piece: what unlocks STARTING the banding."""
+    assert _cut_piece(client, oid, _banded_pieces(client, oid)[0]).status_code == 200
+
+
 def _token_for(client, db_session, role, branch_id=_BRANCH, email=None):
     """Seeds a user with the given role and returns a Bearer header (real login)."""
     email = email or f"{role}@empresa.com"
@@ -185,8 +253,9 @@ def test_order_without_edge_banding_is_not_applicable(client, db_session):
 # --------------------------------------------------------------------------- #
 def test_banding_runs_in_parallel_with_cutting(client, db_session):
     """Banding starts while the order is still 'cutting' (without closing the cut)."""
-    order = _order_with_banding(client, db_session)
+    order = _order_mixed_pieces(client, db_session)
     _to_cutting(client, order["id"])
+    _cut_first_banded_piece(client, order["id"])
 
     started = _patch_banding(client, order["id"], "in_progress")
     assert started.status_code == 200
@@ -203,6 +272,7 @@ def test_banding_runs_in_parallel_with_cutting(client, db_session):
 def test_banding_finish_then_order_completes(client, db_session):
     order = _order_with_banding(client, db_session)
     _to_cutting(client, order["id"])
+    _cut_banded_pieces(client, order["id"])
     assert _patch_banding(client, order["id"], "in_progress").status_code == 200
     finished = _patch_banding(client, order["id"], "done")
     assert finished.status_code == 200
@@ -275,6 +345,7 @@ def test_banding_invalid_transition_skipping_in_progress(client, db_session):
 def test_banding_in_progress_is_idempotent(client, db_session):
     order = _order_with_banding(client, db_session)
     _to_cutting(client, order["id"])
+    _cut_first_banded_piece(client, order["id"])
     first = _patch_banding(client, order["id"], "in_progress").json()["data"]
     again = _patch_banding(client, order["id"], "in_progress").json()["data"]
     # Re-applying doesn't re-stamp the start time.
@@ -283,11 +354,82 @@ def test_banding_in_progress_is_idempotent(client, db_session):
 
 
 # --------------------------------------------------------------------------- #
+# Cutting gates: the bander works on pieces the operator already released
+# --------------------------------------------------------------------------- #
+def test_banding_start_blocked_before_any_banded_piece_is_cut(client, db_session):
+    """Taking the order is not the same as having something to band."""
+    order = _order_mixed_pieces(client, db_session)
+    _to_cutting(client, order["id"])
+
+    blocked = _patch_banding(client, order["id"], "in_progress")
+    assert blocked.status_code == 422
+    assert "canto" in blocked.json()["errors"][0]["message"].lower()
+
+    # A PLAIN piece releases nothing to band: the gate stays shut.
+    plain = [
+        p
+        for board in client.get(f"/api/v1/orders/{order['id']}/cutting-plan").json()[
+            "data"
+        ]["boards"]
+        for p in board["pieces"]
+        if not p["edges"]
+    ]
+    assert _cut_piece(client, order["id"], plain[0]).status_code == 200
+    assert _patch_banding(client, order["id"], "in_progress").status_code == 422
+
+
+def test_banding_start_allowed_after_the_first_banded_piece_is_cut(client, db_session):
+    order = _order_mixed_pieces(client, db_session)
+    _to_cutting(client, order["id"])
+    _cut_first_banded_piece(client, order["id"])
+
+    started = _patch_banding(client, order["id"], "in_progress")
+    assert started.status_code == 200
+    assert started.json()["data"]["bandingStatus"] == "in_progress"
+
+
+def test_banding_finish_blocked_while_banded_pieces_remain(client, db_session):
+    """Finishing needs the LAST banded piece cut, and says how many are missing."""
+    order = _order_mixed_pieces(client, db_session)
+    _to_cutting(client, order["id"])
+    _cut_first_banded_piece(client, order["id"])
+    assert _patch_banding(client, order["id"], "in_progress").status_code == 200
+
+    blocked = _patch_banding(client, order["id"], "done")
+    assert blocked.status_code == 422
+    assert blocked.json()["errors"][0]["message"] == (
+        "Faltan 1 pieza(s) con canto por cortar"
+    )
+
+
+def test_banding_finish_allowed_with_plain_pieces_still_uncut(client, db_session):
+    """The parallel track survives: only BANDED pieces gate the banding.
+
+    Every banded piece is cut but both plain ones are still pending -- the bander
+    finishes anyway, which is the whole point of running the two tracks at once.
+    """
+    order = _order_mixed_pieces(client, db_session)
+    _to_cutting(client, order["id"])
+    assert _cut_banded_pieces(client, order["id"]) == 2
+    assert _patch_banding(client, order["id"], "in_progress").status_code == 200
+
+    finished = _patch_banding(client, order["id"], "done")
+    assert finished.status_code == 200
+    assert finished.json()["data"]["bandingFinishedAt"] is not None
+
+    # The cut itself is genuinely unfinished: the plain pieces still block ``cut``.
+    still_cutting = _patch_status(client, order["id"], "cut")
+    assert still_cutting.status_code == 422
+    assert "2 pieza(s) por cortar" in still_cutting.json()["errors"][0]["message"]
+
+
+# --------------------------------------------------------------------------- #
 # canteador role RBAC
 # --------------------------------------------------------------------------- #
 def test_canteador_can_band_but_not_read_order_detail(client, db_session):
     order = _order_with_banding(client, db_session)
     _to_cutting(client, order["id"])
+    _cut_first_banded_piece(client, order["id"])
     headers = _token_for(client, db_session, "canteador")
 
     # Can register banding and see their workshop board...

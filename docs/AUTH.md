@@ -92,7 +92,7 @@ route is protected with `Depends(require_permission("<key>"))`.
 | `orders:transition`  | ✅ | ✅ | ✅* | ✅* | `PATCH /orders/{id}/status` (narrowed per-transition by `TRANSITION_ROLES`) |
 | `cutting_plan`       | ✅ | ✅ | ✅ | ❌ | `GET /orders/{id}/cutting-plan`, `GET /orders/{id}/production-sheet` |
 | `orders:cut`         | ✅ | ❌ | ✅ | ❌ | `PATCH /orders/{id}/cutting-plan/pieces/{id}` |
-| `orders:band`        | ✅ | ❌ | ❌ | ✅ | `PATCH /orders/{id}/banding` |
+| `orders:band`        | ✅ | ❌ | ❌ | ✅ | `PATCH /orders/{id}/banding` (start needs the first banded piece cut; finish needs them all) |
 | `orders:workshop`    | ✅ | ❌ | ✅ | ✅ | `GET /orders/workshop-queue` (shared shop-floor board) |
 
 \* `orders:transition` is the coarse gate; which role can perform each
