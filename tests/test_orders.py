@@ -1019,3 +1019,104 @@ def test_create_order_on_client_offcuts_only(client, db_session):
         resp = client.get(f"/api/v1/orders/{data['id']}/{path}")
         assert resp.status_code == 200, path
         assert resp.headers["content-type"] == "application/pdf"
+
+
+# --- The status clock in the listing -------------------------------------------
+def _pay():
+    return {"payment": {"cashAmount": 100.0}}
+
+
+def test_listing_exposes_the_status_clock(client, db_session):
+    c = _create_client(client)
+    b = _create_board(client)
+    order = _create_order(client, db_session, _order_payload(c["id"], b["id"]))
+
+    row = client.get("/api/v1/orders/").json()["data"][0]
+    born = row["statusChangedAt"]
+    assert born is not None
+    # No banding on this order, so the parallel track's clock never starts.
+    assert row["bandingReadyAt"] is None
+
+    client.patch(
+        f"/api/v1/orders/{order['id']}/status", json={"status": "queued", **_pay()}
+    )
+    moved = client.get("/api/v1/orders/").json()["data"][0]["statusChangedAt"]
+    assert moved > born
+
+
+def test_status_clock_is_not_restarted_by_prioritizing(client, db_session):
+    """Flagging an order urgent must not make it look freshly moved.
+
+    ``set_priority`` writes a history row with ``from == to``; if the clock keyed
+    on history rather than on real transitions, marking the stuck order would be
+    what hides it.
+    """
+    c = _create_client(client)
+    b = _create_board(client)
+    order = _create_order(client, db_session, _order_payload(c["id"], b["id"]))
+    before = client.get(f"/api/v1/orders/{order['id']}").json()["data"][
+        "statusChangedAt"
+    ]
+
+    resp = client.patch(
+        f"/api/v1/orders/{order['id']}/priority", json={"isPriority": True}
+    )
+    assert resp.status_code == 200
+    assert resp.json()["data"]["statusChangedAt"] == before
+
+
+def test_list_orders_sort_stalest_puts_closed_orders_last(client, db_session):
+    """The control view: longest sitting first, and the closed ones out of the way.
+
+    ``o1`` is moved last, so by creation order it is the FIRST but by clock it is
+    the FRESHEST — which is exactly what separates this sort from ``oldest``.
+    """
+    c = _create_client(client)
+    b = _create_board(client)
+    o1 = _create_order(client, db_session, _order_payload(c["id"], b["id"], width=600))
+    o2 = _create_order(client, db_session, _order_payload(c["id"], b["id"], width=500))
+    o3 = _create_order(client, db_session, _order_payload(c["id"], b["id"], width=400))
+
+    # o3 is cancelled (closed → last), then o1 moves (→ freshest of the live ones).
+    client.patch(f"/api/v1/orders/{o3['id']}/status", json={"status": "cancelled"})
+    client.patch(
+        f"/api/v1/orders/{o1['id']}/status", json={"status": "queued", **_pay()}
+    )
+
+    resp = client.get("/api/v1/orders/", params={"sort": "stalest"}).json()
+    assert [o["id"] for o in resp["data"]] == [o2["id"], o1["id"], o3["id"]]
+
+
+def test_list_orders_filter_by_banding_status(client, db_session):
+    """An order with no canto is `not_applicable`, never `pending`."""
+    c = _create_client(client)
+    b = _create_board(client)
+    order = _create_order(client, db_session, _order_payload(c["id"], b["id"]))
+
+    na = client.get(
+        "/api/v1/orders/", params={"bandingStatus": "not_applicable"}
+    ).json()
+    assert [o["id"] for o in na["data"]] == [order["id"]]
+
+    pending = client.get("/api/v1/orders/", params={"bandingStatus": "pending"}).json()
+    assert pending["data"] == []
+    assert pending["meta"]["pagination"]["total"] == 0
+
+
+def test_timestamps_are_serialized_as_utc(client, db_session):
+    """Every datetime on the wire carries its zone, or the browser guesses wrong.
+
+    The columns are naive ``datetime.utcnow()``; a naive ISO string is read by
+    ``new Date(...)`` as LOCAL time, which in Ecuador (UTC-5) silently shifts
+    every elapsed-time reading by five hours. Pinning it here because the fix is
+    one serializer on ``CamelModel`` and nothing else would notice its removal.
+    """
+    c = _create_client(client)
+    b = _create_board(client)
+    _create_order(client, db_session, _order_payload(c["id"], b["id"]))
+
+    row = client.get("/api/v1/orders/").json()["data"][0]
+    for field in ("createdAt", "confirmedAt", "statusChangedAt"):
+        assert row[field].endswith("Z"), f"{field} = {row[field]!r}"
+    # Nested models inherit it, and keep their camelCase aliases.
+    assert row["history"][0]["createdAt"].endswith("Z")

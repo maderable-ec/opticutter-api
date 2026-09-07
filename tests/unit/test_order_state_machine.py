@@ -186,3 +186,33 @@ def test_progress_counts_cut_pieces():
     progress = _progress(pieces)
     assert progress.cut_pieces == 1
     assert progress.total_pieces == 3
+
+
+# --- The status clock ----------------------------------------------------------
+def test_transition_seals_the_status_clock(mock_session):
+    order = _order(OrderStatus.confirmed)
+    order.status_changed_at = datetime(2026, 1, 1)
+    svc = _service(mock_session, order)
+    svc.transition(
+        1,
+        OrderStatus.queued,
+        actor=_actor(UserRole.ADMIN),
+        payment=OrderPaymentInput(cash_amount=10.0),
+    )
+    assert order.status_changed_at > datetime(2026, 1, 1)
+
+
+def test_priority_does_not_restart_the_status_clock(mock_session):
+    """Marking an order urgent is not a status change, and must not look like one.
+
+    ``set_priority`` records itself as a history row with ``from == to``; if that
+    also moved the clock, flagging an order would reset it to "just moved" and
+    hide the very order somebody flagged because it was stuck.
+    """
+    order = _order(OrderStatus.queued)
+    stamped = datetime(2026, 1, 1)
+    order.status_changed_at = stamped
+    svc = _service(mock_session, order)
+    svc.set_priority(1, True, actor=_actor(UserRole.ADMIN))
+    assert order.is_priority is True
+    assert order.status_changed_at == stamped

@@ -258,6 +258,12 @@ class OrderResponse(CamelModel):
     )
     created_at: datetime
     confirmed_at: Optional[datetime] = None
+    status_changed_at: Optional[datetime] = Field(
+        default=None,
+        description="When the order entered its CURRENT status -- the clock the "
+        "listing shows under the badge. Not moved by marking the order as "
+        "priority or reassigning its branch (neither is a status change)",
+    )
     queued_at: Optional[datetime] = Field(
         default=None,
         description="When the order entered the production queue (payment "
@@ -295,6 +301,13 @@ class OrderResponse(CamelModel):
     banding_status: BandingStatus = Field(
         default=BandingStatus.not_applicable,
         description="Parallel edge-banding track (not_applicable if no edge banding)",
+    )
+    banding_ready_at: Optional[datetime] = Field(
+        default=None,
+        description="When the banding stopped being blocked: the first banded "
+        "piece was cut, which is the gate to start banding. NULL while the bander "
+        "still cannot work -- so a 'pending' clock only runs once somebody is "
+        "actually late",
     )
     banding_started_at: Optional[datetime] = None
     banding_started_by: Optional[int] = Field(
@@ -502,6 +515,21 @@ class WorkshopQueueItem(CamelModel):
         description="When the order entered the queue (payment registered) -- the "
         "shop's real arrival time, and what the board's FIFO orders by. The card "
         "measures the wait from here, NOT from createdAt",
+    )
+    status_changed_at: Optional[datetime] = Field(
+        default=None,
+        description="When the order entered its current status: what the card's "
+        "'en corte hace 3 h' counts from. For a QUEUED order the card must keep "
+        "using queuedAt instead -- the admin rollback cutting -> queued moves this "
+        "one and would hide an order that has been waiting all day",
+    )
+    banding_ready_at: Optional[datetime] = Field(
+        default=None,
+        description="When the banding stopped being blocked (first banded piece "
+        "cut). NULL while the bander cannot work yet",
+    )
+    banding_started_at: Optional[datetime] = Field(
+        default=None, description="When the bander started (null while pending)"
     )
     client: ClientResponse = Field(..., description="Client the order belongs to")
     board_usage: List[BoardUsage] = Field(

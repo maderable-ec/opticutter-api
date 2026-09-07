@@ -499,3 +499,80 @@ def test_canteador_completes_after_finishing_banding(client, db_session):
         _patch_status(client, order["id"], "completed", headers=canteador).status_code
         == 200
     )
+
+
+# --- The banding clock (``banding_ready_at``) -----------------------------------
+def _plain_pieces(client, oid):
+    """Placed pieces with NO edge banding — the ones that must not start the clock."""
+    plan = client.get(f"/api/v1/orders/{oid}/cutting-plan").json()["data"]
+    return [p for board in plan["boards"] for p in board["pieces"] if not p["edges"]]
+
+
+def _order_row(client, oid):
+    return client.get(f"/api/v1/orders/{oid}").json()["data"]
+
+
+def test_banding_clock_stays_null_while_the_bander_is_blocked(client, db_session):
+    """A `pending` order nobody could have banded yet must show no clock.
+
+    The whole point of dating this from the gate rather than from the order's
+    creation: while no banded piece is cut the bander cannot start, so counting
+    would put somebody in red for work they were not allowed to do.
+    """
+    order = _order_mixed_pieces(client, db_session)
+    assert _order_row(client, order["id"])["bandingReadyAt"] is None
+    _to_cutting(client, order["id"])
+    assert _order_row(client, order["id"])["bandingReadyAt"] is None
+
+
+def test_plain_piece_does_not_start_the_banding_clock(client, db_session):
+    """Cutting a piece with no canto is not the gate opening.
+
+    Guards the JSON-null trap from the other side: `edges` reads back as the JSON
+    value ``null``, so a check written as "is not null" would count this piece.
+    """
+    order = _order_mixed_pieces(client, db_session)
+    _to_cutting(client, order["id"])
+    assert (
+        _cut_piece(
+            client, order["id"], _plain_pieces(client, order["id"])[0]
+        ).status_code
+        == 200
+    )
+    assert _order_row(client, order["id"])["bandingReadyAt"] is None
+
+
+def test_first_banded_piece_starts_the_banding_clock(client, db_session):
+    order = _order_mixed_pieces(client, db_session)
+    _to_cutting(client, order["id"])
+    _cut_first_banded_piece(client, order["id"])
+    assert _order_row(client, order["id"])["bandingReadyAt"] is not None
+
+
+def test_banding_clock_is_sealed_once_and_survives_unmarking(client, db_session):
+    """Frozen on the first banded piece, like ``queued_at`` on the first enqueue.
+
+    Cutting a second piece must not re-date it, and unmarking the first must not
+    erase it: the gate did open, and somebody else's misclick should not give the
+    bander's waiting time back.
+    """
+    order = _order_mixed_pieces(client, db_session)
+    oid = order["id"]
+    _to_cutting(client, oid)
+    banded = _banded_pieces(client, oid)
+    assert _cut_piece(client, oid, banded[0]).status_code == 200
+    sealed = _order_row(client, oid)["bandingReadyAt"]
+    assert sealed is not None
+
+    assert _cut_piece(client, oid, banded[1]).status_code == 200
+    assert _order_row(client, oid)["bandingReadyAt"] == sealed
+
+    assert _cut_piece(client, oid, banded[0], cut=False).status_code == 200
+    assert _order_row(client, oid)["bandingReadyAt"] == sealed
+
+
+def test_order_without_banding_never_gets_a_banding_clock(client, db_session):
+    order = _order_without_banding(client, db_session)
+    _to_cutting(client, order["id"])
+    _cut_all_pieces(client, order["id"])
+    assert _order_row(client, order["id"])["bandingReadyAt"] is None

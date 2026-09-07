@@ -2,8 +2,8 @@ from datetime import date, datetime, time, timedelta
 from typing import List, Optional, Tuple
 
 from fastapi import Depends
-from sqlalchemy import func
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy import case, func
+from sqlalchemy.orm import Session, joinedload, selectinload
 
 from src.modules.branches.service import resolve_branch_for_create
 from src.modules.clients.model import ClientModel
@@ -105,6 +105,7 @@ class OrderService(BranchScopedMixin):
         created_to: Optional[date] = None,
         sort: str = "oldest",
         is_priority: Optional[bool] = None,
+        banding_status: Optional[BandingStatus] = None,
     ) -> Tuple[List[OrderModel], int]:
         """Lists orders with total count: ``(items, total)``.
 
@@ -121,14 +122,33 @@ class OrderService(BranchScopedMixin):
         narrows to (or excludes) the prioritized orders but does NOT reorder
         them: floating them to the top is the shop-floor board's rule, and the
         back office's listing answers "which ones are marked", not "what next".
+
+        ``sort="stalest"`` puts whatever stopped moving first: closed orders last,
+        then oldest ``status_changed_at`` first. It is the office's control view --
+        unlike ``is_priority``, this one DOES reorder, because "what has been
+        sitting longest" is a question only an ordering can answer.
+
+        ``banding_status`` narrows to one stage of the parallel banding track
+        ("show me everything still to band").
         """
-        query = self.db.query(OrderModel)
+        # ``OrderResponse`` embeds client, branch, lines, pieces and history, so
+        # without this every row of the page fires five lazy loads -- and the page
+        # now refreshes itself to keep its clocks live.
+        query = self.db.query(OrderModel).options(
+            joinedload(OrderModel.client),
+            joinedload(OrderModel.branch),
+            selectinload(OrderModel.lines),
+            selectinload(OrderModel.pieces),
+            selectinload(OrderModel.history),
+        )
         if status:
             query = query.filter(OrderModel.status.in_([s.value for s in status]))
         if client_filter is not None:
             query = query.filter(OrderModel.client_id == client_filter)
         if is_priority is not None:
             query = query.filter(OrderModel.is_priority.is_(is_priority))
+        if banding_status is not None:
+            query = query.filter(OrderModel.banding_status == banding_status.value)
         if search:
             pattern = f"%{search}%"
             # Outer join: an order always has a client, but the join must not
@@ -156,8 +176,26 @@ class OrderService(BranchScopedMixin):
             )
         query = self._apply_branch_scope(query, branch_scope, branch_filter)
         total = query.count()
-        order_by = OrderModel.id.desc() if sort == "recent" else OrderModel.id.asc()
-        orders = query.order_by(order_by).offset(offset).limit(limit).all()
+        if sort == "stalest":
+            # Closed orders last: their clock is deliberately mute (nothing is
+            # going to move them), so floating them would bury the live ones.
+            # ``TERMINAL_STATUSES`` is the same set the UI silences.
+            closed = case(
+                (OrderModel.status.in_([s.value for s in TERMINAL_STATUSES]), 1),
+                else_=0,
+            )
+            query = query.order_by(
+                closed.asc(),
+                func.coalesce(
+                    OrderModel.status_changed_at, OrderModel.created_at
+                ).asc(),
+                OrderModel.id.asc(),
+            )
+        else:
+            query = query.order_by(
+                OrderModel.id.desc() if sort == "recent" else OrderModel.id.asc()
+            )
+        orders = query.offset(offset).limit(limit).all()
         return orders, total
 
     def create(self, data: OrderCreate, actor: Optional[Actor] = None) -> OrderModel:
@@ -261,6 +299,7 @@ class OrderService(BranchScopedMixin):
             notes=data.notes,
             created_at=now,
             confirmed_at=now,
+            status_changed_at=now,
             created_by=actor.user_id,
         )
         # Billing lines = boards used + edge banding (consumed products).
@@ -318,6 +357,10 @@ class OrderService(BranchScopedMixin):
                 actor_user_id=actor.user_id,
                 actor_label=actor.label,
                 note="Orden creada",
+                # Same instant as ``status_changed_at`` above, for the same reason
+                # it is shared in ``_apply_transition``: the migration's backfill
+                # reads this row for an order that never left ``confirmed``.
+                created_at=now,
             )
         ]
 
@@ -491,6 +534,11 @@ class OrderService(BranchScopedMixin):
             piece.cut_at = datetime.utcnow()
             piece.cut_by = actor.user_id
             piece.cut_by_label = actor.label
+            # First banded piece cut = the banding track just became workable (the
+            # very gate ``transition_banding`` checks). Sealed once: unmarking the
+            # piece does not give the bander their waiting time back.
+            if order.banding_ready_at is None and _piece_is_banded(piece):
+                order.banding_ready_at = piece.cut_at
         elif not cut:
             piece.cut_at = None
             piece.cut_by = None
@@ -561,6 +609,9 @@ class OrderService(BranchScopedMixin):
                     is_priority=o.is_priority,
                     created_at=o.created_at,
                     queued_at=o.queued_at,
+                    status_changed_at=o.status_changed_at,
+                    banding_ready_at=o.banding_ready_at,
+                    banding_started_at=o.banding_started_at,
                     client=ClientResponse.model_validate(o.client),
                     board_usage=_board_usage(snapshot),
                     banding_usage=_banding_usage(snapshot),
@@ -751,6 +802,11 @@ class OrderService(BranchScopedMixin):
             raise BusinessRuleError(
                 f"Transición inválida de '{current.value}' a '{to_status.value}'"
             )
+        # One instant for both records of the same event: the history row and the
+        # clock the listing reads. Stamping them separately left them a fraction of
+        # a millisecond apart, which made the migration's backfill (which can only
+        # read the history) unable to reproduce what the service had written.
+        now = datetime.utcnow()
         order.history.append(
             OrderStatusHistoryModel(
                 from_status=current.value,
@@ -759,9 +815,15 @@ class OrderService(BranchScopedMixin):
                 actor_user_id=actor.user_id,
                 actor_label=actor.label,
                 note=note,
+                created_at=now,
             )
         )
         order.status = to_status.value
+        # The clock the listing and the board read. It lives here and not in
+        # ``transition`` on purpose: this is the single choke point of every real
+        # status change, so ``set_priority``/``change_branch`` -- which append a
+        # ``from == to`` audit row without moving the status -- cannot restart it.
+        order.status_changed_at = now
 
     def set_external_invoice_id(
         self,
@@ -1113,6 +1175,18 @@ def _is_banded():
     the whole test.
     """
     return func.json_typeof(OrderPlacedPieceModel.edges) != "null"
+
+
+def _piece_is_banded(piece: OrderPlacedPieceModel) -> bool:
+    """In-Python twin of :func:`_is_banded`, for a piece already in the session.
+
+    Same trap, other side of the wire: ``edges`` comes back as ``None`` for a
+    plain piece whether the column held SQL NULL or the JSON value ``null``, so
+    the truthiness test is the whole thing -- but it has to be written down,
+    because ``piece.edges is not None`` reads like the SQL check that does not
+    work.
+    """
+    return bool(piece.edges)
 
 
 def _progress(pieces: List[OrderPlacedPieceModel]) -> CuttingProgress:
