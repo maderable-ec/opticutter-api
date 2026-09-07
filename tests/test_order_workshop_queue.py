@@ -15,7 +15,9 @@ from tests.test_order_banding import (
     _create_board,
     _create_client,
     _cut_all_pieces,
+    _cut_first_banded_piece,
     _mint_order,
+    _order_mixed_pieces,
     _order_with_banding,
     _order_without_banding,
     _patch_banding,
@@ -200,9 +202,10 @@ def test_workshop_queue_excludes_confirmed_and_completed(client, db_session):
 
     completed = _order_with_banding(client, db_session, identifier="0100000223")
     _to_cutting(client, completed["id"])
+    # Cutting comes first: the bander can only close a track whose pieces are cut.
+    _cut_all_pieces(client, completed["id"])
     assert _patch_banding(client, completed["id"], "in_progress").status_code == 200
     assert _patch_banding(client, completed["id"], "done").status_code == 200
-    _cut_all_pieces(client, completed["id"])
     assert _patch_status(client, completed["id"], "cut").status_code == 200
     assert _patch_status(client, completed["id"], "completed").status_code == 200
 
@@ -231,6 +234,28 @@ def test_workshop_queue_lists_banding_usage(client, db_session):
         }
     ]
     assert by_id[plain["id"]]["bandingUsage"] == []
+
+
+def test_workshop_queue_reports_banded_piece_progress(client, db_session):
+    """The card carries the bander's gate: progress over the BANDED pieces only.
+
+    Without it the board cannot say why the banding button is greyed out --
+    the plain ``progress`` counts every piece, and the per-piece data lives in
+    the cutting plan, an endpoint the canteador cannot even reach.
+    """
+    mixed = _order_mixed_pieces(client, db_session, identifier="0100000280")
+    _to_cutting(client, mixed["id"])
+    _cut_first_banded_piece(client, mixed["id"])
+
+    plain = _order_without_banding(client, db_session)
+    assert _patch_status(client, plain["id"], "queued").status_code == 200
+
+    by_id = {i["orderId"]: i for i in client.get(_URL).json()["data"]}
+    # 2 banded + 2 plain pieces, one banded piece cut: the two counters differ.
+    assert by_id[mixed["id"]]["progress"] == {"cutPieces": 1, "totalPieces": 4}
+    assert by_id[mixed["id"]]["bandingProgress"] == {"cutPieces": 1, "totalPieces": 2}
+    # No edge banding at all → nothing to gate.
+    assert by_id[plain["id"]]["bandingProgress"] == {"cutPieces": 0, "totalPieces": 0}
 
 
 def test_workshop_queue_is_fifo_oldest_first(client, db_session):

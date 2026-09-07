@@ -516,6 +516,12 @@ class WorkshopQueueItem(CamelModel):
     progress: CuttingProgress = Field(
         ..., description="Cut pieces out of the total (0/0 if not yet materialized)"
     )
+    banding_progress: CuttingProgress = Field(
+        ...,
+        description="Cut pieces out of the total among the BANDED ones only: the "
+        "bander's gate -- starting needs the first one cut, finishing needs them "
+        "all. 0/0 when the order carries no edge banding",
+    )
     print_consolidated_enabled: bool = Field(
         ...,
         description="Whether the order's branch prints the consolidated packet: "
