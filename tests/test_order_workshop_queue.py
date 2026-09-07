@@ -317,3 +317,52 @@ def test_workshop_queue_rbac(client, db_session):
         client.get(_URL, headers=_token_for(client, db_session, "vendedor")).status_code
         == 403
     )
+
+
+# --- Clocks on the card ---------------------------------------------------------
+def test_workshop_card_carries_the_status_clock(client, db_session):
+    """The card must be able to say "en corte hace 3 h", not only "en cola".
+
+    ``queuedAt`` answers the wait before somebody takes the order; once taken it
+    stops moving, so the card needs the current status's own clock to keep
+    counting through ``cutting`` and ``cut``.
+    """
+    order = _order_with_banding(client, db_session, identifier="0100000322")
+    assert _patch_status(client, order["id"], "queued").status_code == 200
+    queued_card = {i["orderId"]: i for i in client.get(_URL).json()["data"]}[
+        order["id"]
+    ]
+    assert queued_card["statusChangedAt"] is not None
+    assert queued_card["queuedAt"] is not None
+
+    _patch_status(client, order["id"], "cutting")
+    cutting_card = {i["orderId"]: i for i in client.get(_URL).json()["data"]}[
+        order["id"]
+    ]
+    # Entering `cutting` moves the status clock but freezes the arrival time --
+    # that split is the whole reason the card gets both.
+    assert cutting_card["statusChangedAt"] > queued_card["statusChangedAt"]
+    assert cutting_card["queuedAt"] == queued_card["queuedAt"]
+
+
+def test_workshop_card_carries_the_banding_clocks(client, db_session):
+    """`bandingReadyAt` is null while blocked, then both clocks fill in order."""
+    order = _order_mixed_pieces(client, db_session, identifier="0100000330")
+    _to_cutting(client, order["id"])
+
+    def card():
+        return {i["orderId"]: i for i in client.get(_URL).json()["data"]}[order["id"]]
+
+    blocked = card()
+    assert blocked["bandingReadyAt"] is None
+    assert blocked["bandingStartedAt"] is None
+
+    _cut_first_banded_piece(client, order["id"])
+    ready = card()
+    assert ready["bandingReadyAt"] is not None
+    assert ready["bandingStartedAt"] is None
+
+    assert _patch_banding(client, order["id"], "in_progress").status_code == 200
+    started = card()
+    assert started["bandingReadyAt"] == ready["bandingReadyAt"]
+    assert started["bandingStartedAt"] is not None

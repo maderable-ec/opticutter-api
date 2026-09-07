@@ -215,6 +215,19 @@ class OrderModel(TimestampMixin, AuditMixin, Base):
 
     confirmed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
+    # When the order entered the status it is in RIGHT NOW -- the clock the listing
+    # and the shop-floor board show under the badge ("en corte hace 3 h"), which is
+    # how the office pushes an order that stopped moving. There is a timestamp for
+    # some transitions but not for ``cut``/``completed``/``cancelled``, and deriving
+    # it from ``order_status_history`` costs a query per row; this is the same
+    # denormalization ``queued_at`` already is. Written in ``_apply_transition``,
+    # the single choke point of every real status change -- which is why marking an
+    # order as priority (a history row with from == to, written outside it) does
+    # NOT restart the clock.
+    status_changed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True
+    )
+
     # When the order actually entered the production queue (``confirmed -> queued``),
     # which is gated on registering the payment. This -- not ``created_at`` -- is the
     # workshop's arrival time: a quote raised on Monday and paid on Friday reaches the
@@ -257,6 +270,16 @@ class OrderModel(TimestampMixin, AuditMixin, Base):
         String(16),
         default=BandingStatus.not_applicable.value,
         server_default=BandingStatus.not_applicable.value,
+    )
+    # When the banding track stopped being BLOCKED: the moment the first banded
+    # piece was cut, which is exactly the gate ``transition_banding`` checks before
+    # letting the bander start. It is the honest origin for "pending for how long":
+    # counting from the order's creation would run the clock while the bander could
+    # not have worked, and would light up in red somebody who was not late. Sealed
+    # once, in ``mark_piece_cut``; unmarking the piece does not undo it, for the
+    # same reason ``queued_at`` survives the rollback.
+    banding_ready_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True
     )
     banding_started_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime, nullable=True

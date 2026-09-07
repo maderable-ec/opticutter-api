@@ -17,7 +17,7 @@ from src.modules.orders.attachment_service import (
     AttachmentService,
     attachment_service,
 )
-from src.modules.orders.model import OrderStatus
+from src.modules.orders.model import BandingStatus, OrderStatus
 from src.modules.orders.schemas import (
     AttachmentResponse,
     BandingStatusResponse,
@@ -96,10 +96,11 @@ def list_orders(
         alias="createdTo",
         description="Only orders created on or before this day (UTC, inclusive)",
     ),
-    sort: Literal["oldest", "recent"] = Query(
+    sort: Literal["oldest", "recent", "stalest"] = Query(
         default="oldest",
-        description="Listing order: 'oldest' first (FIFO, the workshop's view) "
-        "or 'recent' first (the back office's)",
+        description="Listing order: 'oldest' first (FIFO, the workshop's view), "
+        "'recent' first (the back office's), or 'stalest' -- longest sitting in "
+        "its current status first, closed orders last (the control view)",
     ),
     is_priority: Optional[bool] = Query(
         default=None,
@@ -107,6 +108,12 @@ def list_orders(
         description="Only prioritized orders (true) or only regular ones (false); "
         "omit for both. Filters, never reorders: floating them to the top is the "
         "shop-floor board's rule",
+    ),
+    banding_status: Optional[BandingStatus] = Query(
+        default=None,
+        alias="bandingStatus",
+        description="Narrows to one stage of the parallel edge-banding track "
+        "(e.g. everything still to band)",
     ),
     paging: PageParams = Depends(),
     svc: OrderService = Depends(order_service),
@@ -129,6 +136,7 @@ def list_orders(
         created_to=created_to,
         sort=sort,
         is_priority=is_priority,
+        banding_status=banding_status,
     )
     return page(items, total, paging.limit, paging.offset)
 
