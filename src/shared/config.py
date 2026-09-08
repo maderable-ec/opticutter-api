@@ -267,7 +267,7 @@ class Config:
     # the base ends in "/#" (route = {base}/review/{token}).
     FRONTEND_BASE_URL = env("FRONTEND_BASE_URL", "http://localhost:3000")
 
-    # Company data (proforma letterhead). Dummy defaults that only seed the
+    # Company data (document letterhead). Dummy defaults that only seed the
     # `settings` singleton row on its first read; the runtime source of truth is
     # the `settings` table (editable via PATCH /settings/company).
     COMPANY_NAME = env("COMPANY_NAME", "Mi Empresa")

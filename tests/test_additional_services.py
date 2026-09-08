@@ -146,10 +146,6 @@ def test_preorder_with_services_folds_them_into_total(client):
     assert pricing["taxAmount"] == 7.61
     assert pricing["total"] == 58.33
 
-    # The proforma renders with the services section (no exception).
-    pdf = client.get(f"/api/v1/preorders/{data['id']}/proforma")
-    assert pdf.status_code == 200
-
 
 def test_preorder_update_edits_services(client):
     c = _create_client(client)
@@ -182,6 +178,9 @@ def test_order_freezes_services(client, db_session):
     assert data["total"] == 58.33
     assert len(data["additionalServices"]) == 1
     assert data["additionalServices"][0]["name"] == "Perforación"
+
+    # The document renders with the SERVICIOS ADICIONALES section (no exception).
+    assert client.get(f"/api/v1/orders/{order.id}/document").status_code == 200
 
     # Frozen against later edits: the column holds the total.
     db_session.expire_all()

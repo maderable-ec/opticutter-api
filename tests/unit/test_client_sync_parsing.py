@@ -103,7 +103,7 @@ class TestNormalizePhone:
     @pytest.mark.parametrize("raw", ["N/A", "-", "0", "", "   ", "123"])
     def test_a_placeholder_is_not_a_phone(self, raw):
         """`require_phone` only checks for a non-blank value, so storing "N/A"
-        would sail through the gate that stops a proforma with no contact."""
+        would sail through the gate that stops a quote with no contact."""
         assert normalize_phone(raw, "") is None
 
     def test_tel2_is_a_fallback_not_a_second_number(self):

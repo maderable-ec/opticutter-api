@@ -15,7 +15,7 @@ _FONT_CANDIDATES = [
     "/Library/Fonts/Arial.ttf",
 ]
 
-# Diagram palette (aligned with the proforma's MADERABLE branding).
+# Diagram palette (aligned with the documents' MADERABLE branding).
 COLOR_BOARD_OUTLINE = "#1D1D1B"
 COLOR_PIECE_FILL = "#FCE9E6"
 COLOR_PIECE_OUTLINE = "#E8564B"
@@ -39,7 +39,7 @@ HATCH_STEP = 6
 
 @dataclass(frozen=True)
 class _DiagramTheme:
-    """Diagram colors. ``brand`` (proforma, branded) or ``mono`` (production
+    """Diagram colors. ``brand`` (order document, branded) or ``mono`` (production
     sheet, black and white for the workshop)."""
 
     board_outline: str

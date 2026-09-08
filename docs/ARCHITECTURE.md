@@ -165,8 +165,8 @@ No cycles, enforced by convention:
   affects both the geometry and the result's cache key. Results are
   deterministic and cached in Redis by a hash of the canonical request — nothing
   is persisted to the database here. This module also owns the rendering
-  pipeline shared by every PDF document (proforma, order, production sheet,
-  dispatch sheet): `proforma.py` (document layout via ReportLab) and
+  pipeline shared by every PDF document (order document, production sheet,
+  dispatch sheet): `documents.py` (document layout via ReportLab) and
   `visualization.py` (the cutting diagram via Pillow — see
   [`CUTTING_DIAGRAM.md`](CUTTING_DIAGRAM.md)).
 - **`optimization_drafts`** — lets a seller save a named, editable optimizer

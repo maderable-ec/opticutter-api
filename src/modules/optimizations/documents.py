@@ -30,7 +30,7 @@ from reportlab.platypus import (
     TableStyle,
 )
 
-from src.modules.optimizations.carrier import ProformaCarrier
+from src.modules.optimizations.carrier import DocumentCarrier
 from src.modules.optimizations.labels import BAND_TYPE_LABEL, edge_banding_notation
 from src.modules.optimizations.patterns import group_layouts
 from src.modules.optimizations.schemas import MaterialSource
@@ -47,7 +47,7 @@ TEXT_GREY = colors.HexColor("#424242")
 
 @dataclass(frozen=True)
 class Palette:
-    """Themed colors for a PDF. Lets the proforma go branded and the production
+    """Themed colors for a PDF. Lets the order document go branded and the production
     sheet stay black and white while reusing the same builders."""
 
     accent: colors.Color  # table header, section rule, totals border
@@ -58,7 +58,7 @@ class Palette:
     header_text: colors.Color  # text over the table header
 
 
-# Commercial proforma: brand palette. Production sheet: monochrome for the
+# Commercial document (ORDEN DE PEDIDO): brand palette. Production sheet: monochrome for the
 # workshop (black header with white text, legible when printed/photocopied in B/W).
 BRAND_PALETTE = Palette(
     accent=BRAND_CORAL,
@@ -273,18 +273,17 @@ class _CutterDoc(BaseDocTemplate):
         )
 
 
-class ProformaService:
+class DocumentService:
     @staticmethod
-    def generate_proforma_pdf(
-        carrier: ProformaCarrier,
-        title: str = "PROFORMA",
+    def generate_order_document_pdf(
+        carrier: DocumentCarrier,
+        title: str = "ORDEN DE PEDIDO",
         include_diagram: bool = True,
     ) -> io.BytesIO:
         """Commercial document: requirements, priced materials and layout.
 
-        The same render serves both the quote (``title="PROFORMA"``, non-binding)
-        and the confirmed order (``title="ORDEN DE PEDIDO"``, committed); only the
-        header label changes.
+        ``title`` is a parameter, not a constant, so the header label can be
+        retitled by the caller.
 
         ``include_diagram=False`` drops the cut-layout pages: used by the
         consolidated print packet, where the diagram lives once in the production
@@ -298,15 +297,15 @@ class ProformaService:
         cell_style = _cell_style(styles)
 
         story = []
-        story.extend(ProformaService._build_header(carrier, styles, title))
+        story.extend(DocumentService._build_header(carrier, styles, title))
         story.append(Spacer(1, 0.15 * inch))
 
         story.extend(_section("INFORMACIÓN DEL CLIENTE", heading_style))
-        story.append(ProformaService._build_client_table(carrier))
+        story.append(DocumentService._build_client_table(carrier))
         story.append(Spacer(1, 0.15 * inch))
 
         story.extend(_section("DETALLE DE REQUERIMIENTOS", heading_style))
-        story.append(ProformaService._build_requirements_table(carrier, cell_style))
+        story.append(DocumentService._build_requirements_table(carrier, cell_style))
         story.append(Spacer(1, 0.15 * inch))
 
         # Omitted outright when nothing is billed — a job cut entirely on the
@@ -315,7 +314,7 @@ class ProformaService:
         # the block that does list what was cut.
         if _billable_material_rows(carrier) or carrier.edge_bandings_summary:
             story.extend(_section("RESUMEN DE MATERIALES", heading_style))
-            story.append(ProformaService._build_materials_table(carrier, cell_style))
+            story.append(DocumentService._build_materials_table(carrier, cell_style))
             story.append(Spacer(1, 0.15 * inch))
 
         # The client's own retazos: listed so the document says what was cut, but
@@ -326,7 +325,7 @@ class ProformaService:
         if client_material:
             story.extend(_section("MATERIAL DEL CLIENTE", heading_style))
             story.append(
-                ProformaService._build_client_material_table(
+                DocumentService._build_client_material_table(
                     client_material, cell_style
                 )
             )
@@ -334,28 +333,21 @@ class ProformaService:
 
         if carrier.additional_services:
             story.extend(_section("SERVICIOS ADICIONALES", heading_style))
-            story.append(ProformaService._build_services_table(carrier, cell_style))
+            story.append(DocumentService._build_services_table(carrier, cell_style))
             story.append(Spacer(1, 0.15 * inch))
 
-        story.append(ProformaService._build_totals_table(carrier))
+        story.append(DocumentService._build_totals_table(carrier))
 
-        payment_block = ProformaService._payment_section(carrier, heading_style)
+        payment_block = DocumentService._payment_section(carrier, heading_style)
         if payment_block:
             story.append(Spacer(1, 0.15 * inch))
             story.extend(payment_block)
 
         story.append(Spacer(1, 0.18 * inch))
-        # Validity only applies to quotes (pre-order / live optimization); an
-        # already-confirmed order doesn't carry it (``carrier.validity_days`` is ``None``).
-        validity_note = (
-            f"Esta proforma es válida por {carrier.validity_days} días. "
-            if carrier.validity_days
-            else ""
-        )
         story.append(
             Paragraph(
-                f"{validity_note}Valores en USD. Los precios no incluyen IVA; "
-                f"el impuesto se detalla en el total.",
+                "Valores en USD. Los precios no incluyen IVA; "
+                "el impuesto se detalla en el total.",
                 ParagraphStyle(
                     "Note",
                     parent=styles["Normal"],
@@ -372,7 +364,7 @@ class ProformaService:
             story.append(NextPageTemplate("landscape"))
             story.append(PageBreak())
             story.extend(
-                ProformaService._build_layout_pages(
+                DocumentService._build_layout_pages(
                     carrier,
                     frame_width=LAND_CONTENT_WIDTH,
                     max_height=LAND_FRAME_HEIGHT,
@@ -384,7 +376,7 @@ class ProformaService:
         return buffer
 
     @staticmethod
-    def generate_production_sheet_pdf(carrier: ProformaCarrier) -> io.BytesIO:
+    def generate_production_sheet_pdf(carrier: DocumentCarrier) -> io.BytesIO:
         """Production sheet for the workshop: black and white, no letterhead, cut
         list and layout WITHOUT prices. Makes the most of the paper (compact
         margins and spacing) and differentiates the edge-banding type (soft/hard)."""
@@ -398,21 +390,21 @@ class ProformaService:
         cell_style = _cell_style(styles)
 
         story = []
-        story.extend(ProformaService._build_production_header(carrier, styles, pal))
+        story.extend(DocumentService._build_production_header(carrier, styles, pal))
         story.append(Spacer(1, 0.12 * inch))
 
         story.extend(_section("LISTA DE CORTE", heading_style, pal, space_after=4))
         story.append(
-            ProformaService._build_requirements_table(carrier, cell_style, pal, pad)
+            DocumentService._build_requirements_table(carrier, cell_style, pal, pad)
         )
         story.append(Spacer(1, 0.12 * inch))
 
         story.extend(_section("TABLEROS A UTILIZAR", heading_style, pal, space_after=4))
         story.append(
-            ProformaService._build_materials_plain_table(carrier, cell_style, pal, pad)
+            DocumentService._build_materials_plain_table(carrier, cell_style, pal, pad)
         )
         story.append(Spacer(1, 0.1 * inch))
-        story.append(ProformaService._build_boards_total_table(carrier, pal))
+        story.append(DocumentService._build_boards_total_table(carrier, pal))
 
         if carrier.edge_bandings_summary:
             story.append(Spacer(1, 0.12 * inch))
@@ -420,7 +412,7 @@ class ProformaService:
                 _section("TAPACANTOS A APLICAR", heading_style, pal, space_after=4)
             )
             story.append(
-                ProformaService._build_edge_bandings_table(
+                DocumentService._build_edge_bandings_table(
                     carrier, cell_style, with_prices=False, palette=pal, pad=pad
                 )
             )
@@ -429,12 +421,12 @@ class ProformaService:
         story.extend(
             _section("RESUMEN DE CORTE Y CANTO", heading_style, pal, space_after=4)
         )
-        story.append(ProformaService._build_cut_summary_table(carrier, pal, pad))
+        story.append(DocumentService._build_cut_summary_table(carrier, pal, pad))
 
         story.append(NextPageTemplate("landscape"))
         story.append(PageBreak())
         story.extend(
-            ProformaService._build_layout_pages(
+            DocumentService._build_layout_pages(
                 carrier,
                 mono=True,
                 frame_width=LAND_CONTENT_WIDTH,
@@ -447,7 +439,7 @@ class ProformaService:
         return buffer
 
     @staticmethod
-    def generate_diagram_pdf(carrier: ProformaCarrier) -> io.BytesIO:
+    def generate_diagram_pdf(carrier: DocumentCarrier) -> io.BytesIO:
         """Cutting diagram only (the *gráfico*), B/W, WITHOUT the piece/board lists.
 
         Used by the consolidated print packet: the cut list, boards and edge
@@ -461,7 +453,7 @@ class ProformaService:
         # job, and a header would shrink the first diagram for nothing.
         doc = _CutterDoc(buffer, _draw_page_decoration_plain, start_landscape=True)
 
-        story = ProformaService._build_layout_pages(
+        story = DocumentService._build_layout_pages(
             carrier,
             mono=True,
             frame_width=LAND_CONTENT_WIDTH,
@@ -473,7 +465,7 @@ class ProformaService:
         return buffer
 
     @staticmethod
-    def generate_dispatch_sheet_pdf(carrier: ProformaCarrier) -> io.BytesIO:
+    def generate_dispatch_sheet_pdf(carrier: DocumentCarrier) -> io.BytesIO:
         """Dispatch sheet (delivery to the client): brand letterhead, client data,
         piece detail WITHOUT prices, board count, liability disclaimer note and
         signature block (delivered-by / received-in-good-order)."""
@@ -485,11 +477,11 @@ class ProformaService:
         cell_style = _cell_style(styles)
 
         story = []
-        story.extend(ProformaService._build_header(carrier, styles, "HOJA DE DESPACHO"))
+        story.extend(DocumentService._build_header(carrier, styles, "HOJA DE DESPACHO"))
         story.append(Spacer(1, 0.15 * inch))
 
         story.extend(_section("INFORMACIÓN DEL CLIENTE", heading_style))
-        story.append(ProformaService._build_client_table(carrier))
+        story.append(DocumentService._build_client_table(carrier))
         # Dispatch date and the person responsible for delivery (frozen on the
         # order; fall back to "now" / "—" if not yet dispatched).
         dispatch_date = carrier.dispatch_date or datetime.now()
@@ -511,12 +503,12 @@ class ProformaService:
         story.append(Spacer(1, 0.15 * inch))
 
         story.extend(_section("DETALLE DE PIEZAS", heading_style))
-        story.append(ProformaService._build_requirements_table(carrier, cell_style))
+        story.append(DocumentService._build_requirements_table(carrier, cell_style))
         story.append(Spacer(1, 0.12 * inch))
-        story.append(ProformaService._build_boards_total_table(carrier))
+        story.append(DocumentService._build_boards_total_table(carrier))
         story.append(Spacer(1, 0.15 * inch))
 
-        payment_block = ProformaService._payment_section(carrier, heading_style)
+        payment_block = DocumentService._payment_section(carrier, heading_style)
         if payment_block:
             story.extend(payment_block)
             story.append(Spacer(1, 0.15 * inch))
@@ -538,7 +530,7 @@ class ProformaService:
 
         story.append(
             KeepTogether(
-                [Spacer(1, 0.25 * inch), ProformaService._build_signature_block(styles)]
+                [Spacer(1, 0.25 * inch), DocumentService._build_signature_block(styles)]
             )
         )
 
@@ -604,13 +596,13 @@ class ProformaService:
         return table
 
     @staticmethod
-    def _build_header(carrier: ProformaCarrier, styles, title: str) -> List:
+    def _build_header(carrier: DocumentCarrier, styles, title: str) -> List:
         """MADERABLE letterhead: logo + contact, black rule and title bar."""
         logo = _scaled_image(LOGO_PATH, 1.9 * inch)
         logo.hAlign = "LEFT"
 
         header_table = Table(
-            [[logo, ProformaService._build_contact_block(carrier, styles)]],
+            [[logo, DocumentService._build_contact_block(carrier, styles)]],
             colWidths=[CONTENT_WIDTH * 0.38, CONTENT_WIDTH * 0.62],
         )
         header_table.setStyle(
@@ -683,7 +675,7 @@ class ProformaService:
         return [header_table, rule, title_bar]
 
     @staticmethod
-    def _build_contact_block(carrier: ProformaCarrier, styles) -> Table:
+    def _build_contact_block(carrier: DocumentCarrier, styles) -> Table:
         """Contact block with icons: WhatsApp, email and branches.
 
         Reads the company data (letterhead) live from ``carrier.company``.
@@ -738,7 +730,7 @@ class ProformaService:
 
     @staticmethod
     def _build_production_header(
-        carrier: ProformaCarrier,
+        carrier: DocumentCarrier,
         styles,
         palette: Palette = MONO_PALETTE,
         title: str = "HOJA DE PRODUCCIÓN",
@@ -810,7 +802,7 @@ class ProformaService:
         return [header, rule]
 
     @staticmethod
-    def _build_client_table(carrier: ProformaCarrier) -> Table:
+    def _build_client_table(carrier: DocumentCarrier) -> Table:
         client = carrier.client
         client_name = (
             f"{client.first_name or ''} {client.last_name or ''}".strip() or "N/A"
@@ -842,7 +834,7 @@ class ProformaService:
 
     @staticmethod
     def _build_requirements_table(
-        carrier: ProformaCarrier,
+        carrier: DocumentCarrier,
         cell_style,
         palette: Palette = BRAND_PALETTE,
         pad: int = 5,
@@ -888,13 +880,13 @@ class ProformaService:
 
     @staticmethod
     def _build_edge_bandings_table(
-        carrier: ProformaCarrier,
+        carrier: DocumentCarrier,
         cell_style,
         with_prices: bool = True,
         palette: Palette = BRAND_PALETTE,
         pad: int = 7,
     ) -> Table:
-        """Edge-banding summary by type. With prices (proforma) or without
+        """Edge-banding summary by type. With prices (order document) or without
         (production sheet), with a ``Tipo`` (Soft/Hard) column for the workshop."""
         summary = carrier.edge_bandings_summary
         if with_prices:
@@ -956,7 +948,7 @@ class ProformaService:
         return eb_table
 
     @staticmethod
-    def _build_materials_table(carrier: ProformaCarrier, cell_style) -> Table:
+    def _build_materials_table(carrier: DocumentCarrier, cell_style) -> Table:
         """Single materials summary: boards (quantity in units) and edge banding
         (quantity in meters) in one table with code, description, quantity, unit
         price and subtotal. Spans the full content width.
@@ -1015,7 +1007,7 @@ class ProformaService:
 
     @staticmethod
     def _build_materials_plain_table(
-        carrier: ProformaCarrier,
+        carrier: DocumentCarrier,
         cell_style,
         palette: Palette = BRAND_PALETTE,
         pad: int = 7,
@@ -1064,7 +1056,7 @@ class ProformaService:
         return mat_table
 
     @staticmethod
-    def _build_services_table(carrier: ProformaCarrier, cell_style) -> Table:
+    def _build_services_table(carrier: DocumentCarrier, cell_style) -> Table:
         """Additional services: name, quantity, unit price and subtotal.
 
         Printed NET, like every other line on the document, even though staff
@@ -1139,7 +1131,7 @@ class ProformaService:
         return table
 
     @staticmethod
-    def _build_totals_table(carrier: ProformaCarrier) -> Table:
+    def _build_totals_table(carrier: DocumentCarrier) -> Table:
         """The money block: net breakdown, then one tax line, then the total.
 
         There is no discount row any more. The price level the seller chose is a
@@ -1182,7 +1174,7 @@ class ProformaService:
         return _totals_table(summary_data)
 
     @staticmethod
-    def _payment_section(carrier: ProformaCarrier, heading_style) -> list:
+    def _payment_section(carrier: DocumentCarrier, heading_style) -> list:
         """ "FORMA DE PAGO" block (informational): the methods used + total.
 
         Returns ``[]`` when there's no payment registered, to omit the block on
@@ -1206,7 +1198,7 @@ class ProformaService:
 
     @staticmethod
     def _build_boards_total_table(
-        carrier: ProformaCarrier, palette: Palette = BRAND_PALETTE
+        carrier: DocumentCarrier, palette: Palette = BRAND_PALETTE
     ) -> Table:
         """Total SHEETS to cut, no costs (production sheet and dispatch sheet).
 
@@ -1224,7 +1216,7 @@ class ProformaService:
 
     @staticmethod
     def _build_cut_summary_table(
-        carrier: ProformaCarrier,
+        carrier: DocumentCarrier,
         palette: Palette = BRAND_PALETTE,
         pad: int = 7,
     ) -> Table:
@@ -1277,7 +1269,7 @@ class ProformaService:
 
     @staticmethod
     def _build_layout_pages(
-        carrier: ProformaCarrier,
+        carrier: DocumentCarrier,
         mono: bool = False,
         frame_width: float = CONTENT_WIDTH,
         max_height: float = 9.3 * inch,
@@ -1418,7 +1410,7 @@ def _edge_banding_notation(req: dict) -> str:
     return text or "-"
 
 
-def _reference_lines(carrier: ProformaCarrier, meta_style: ParagraphStyle) -> List:
+def _reference_lines(carrier: DocumentCarrier, meta_style: ParagraphStyle) -> List:
     """ "Ref: ..." line for the document's meta block, or ``[]`` if there's none.
 
     Rides along with the N°/date block on every document, so the commercial
@@ -1463,7 +1455,7 @@ def _cell_style(styles) -> ParagraphStyle:
     )
 
 
-def _client_material_rows(carrier: ProformaCarrier) -> List[dict]:
+def _client_material_rows(carrier: DocumentCarrier) -> List[dict]:
     """Summary lines for material the client brought in (never billed)."""
     return [
         entry
@@ -1472,7 +1464,7 @@ def _client_material_rows(carrier: ProformaCarrier) -> List[dict]:
     ]
 
 
-def _billable_material_rows(carrier: ProformaCarrier) -> List[dict]:
+def _billable_material_rows(carrier: DocumentCarrier) -> List[dict]:
     """Summary lines that belong in the priced table."""
     return [
         entry

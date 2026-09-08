@@ -341,7 +341,7 @@ class ReviewPreOrderResponse(CamelModel):
     notes: Optional[str] = Field(
         default=None,
         description="Commercial reference (project/site); the client also sees it "
-        "on the proforma PDF",
+        "on the review page",
     )
     client_name: Optional[str] = None
     currency: str

@@ -13,13 +13,13 @@ from src.shared.exceptions import BusinessRuleError
 def require_phone(client: ClientModel) -> None:
     """Require a registered phone number before issuing commercial documents.
 
-    Hard business rule: neither the proforma nor the order can be generated
+    Hard business rule: neither the quote nor the order can be generated
     without a valid mobile phone number. Email is optional and never blocks.
     """
     if not (client.phone and client.phone.strip()):
         raise BusinessRuleError(
             "El cliente no tiene un número de celular registrado. Solicita y "
-            "registra su celular antes de generar la proforma o el pedido."
+            "registra su celular antes de generar la cotización o el pedido."
         )
 
 

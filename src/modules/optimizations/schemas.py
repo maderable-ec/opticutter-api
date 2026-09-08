@@ -446,7 +446,7 @@ class OptimizeRequest(CamelModel):
         default=None,
         description=(
             "Optional client ID. The optimization is client-agnostic (the result "
-            "and its hash do not depend on the client); only proformas and orders "
+            "and its hash do not depend on the client); only the documents and orders "
             "require a client, resolved at that point."
         ),
     )

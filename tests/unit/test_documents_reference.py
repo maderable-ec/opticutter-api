@@ -1,6 +1,6 @@
 """Unit tests for the commercial reference (``notes``) carried into the PDFs.
 
-No DB: ``ProformaCarrier`` is a plain dataclass and ``_reference_lines`` a pure
+No DB: ``DocumentCarrier`` is a plain dataclass and ``_reference_lines`` a pure
 helper over it.
 """
 
@@ -8,14 +8,14 @@ from types import SimpleNamespace
 
 from reportlab.lib.styles import getSampleStyleSheet
 
-from src.modules.optimizations.carrier import ProformaCarrier
-from src.modules.optimizations.proforma import _reference_lines
+from src.modules.optimizations.carrier import DocumentCarrier
+from src.modules.optimizations.documents import _reference_lines
 
 _META_STYLE = getSampleStyleSheet()["Normal"]
 
 
 def _fake_order(notes):
-    """Minimal duck-typed order for ``ProformaCarrier.from_order``."""
+    """Minimal duck-typed order for ``DocumentCarrier.from_order``."""
     return SimpleNamespace(
         optimization_snapshot={},
         code="ORD-2026-0007",
@@ -36,34 +36,34 @@ def _fake_order(notes):
 
 
 def test_from_payload_carries_notes():
-    carrier = ProformaCarrier.from_payload(
+    carrier = DocumentCarrier.from_payload(
         {}, client=None, reference="PRE-2026-0001", notes="Proyecto Casa Pérez"
     )
     assert carrier.notes == "Proyecto Casa Pérez"
 
 
 def test_from_payload_without_notes_defaults_to_none():
-    carrier = ProformaCarrier.from_payload({}, client=None, reference="PRE-2026-0001")
+    carrier = DocumentCarrier.from_payload({}, client=None, reference="PRE-2026-0001")
     assert carrier.notes is None
 
 
 def test_from_order_propagates_the_frozen_reference():
     """The order's ``notes`` reaches every document it renders (it isn't in the
     optimization snapshot, so the carrier has to read the column)."""
-    carrier = ProformaCarrier.from_order(_fake_order("Obra Los Álamos — cocina"))
+    carrier = DocumentCarrier.from_order(_fake_order("Obra Los Álamos — cocina"))
     assert carrier.notes == "Obra Los Álamos — cocina"
 
 
 def test_reference_lines_omitted_without_a_reference():
     for blank in (None, "", "   "):
-        carrier = ProformaCarrier(reference="PRE-1", client=None, notes=blank)
+        carrier = DocumentCarrier(reference="PRE-1", client=None, notes=blank)
         assert _reference_lines(carrier, _META_STYLE) == []
 
 
 def test_reference_lines_escapes_user_markup():
     """``Paragraph`` parses mini-HTML: an unescaped ``<`` or ``&`` would blow up
     the render (or swallow the text) instead of printing literally."""
-    carrier = ProformaCarrier(
+    carrier = DocumentCarrier(
         reference="PRE-1", client=None, notes="Cocina <A&B> muebles"
     )
     (paragraph,) = _reference_lines(carrier, _META_STYLE)

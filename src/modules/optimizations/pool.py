@@ -14,7 +14,7 @@ two shapes:
 
 Both reuse the pure cutting engine, so every resulting layout stays
 single-material and flows unchanged through billing, persistence and the
-proforma. Note the offcut half of ``optimize_pool`` is the one packing path that
+documents. Note the offcut half of ``optimize_pool`` is the one packing path that
 never reaches the Rust kernel: the crate exports fills, not a single-bin packer,
 and this needs both the ``unplaced`` list and the trims-exceed-the-sheet
 ``ValueError``.

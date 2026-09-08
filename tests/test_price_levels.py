@@ -259,7 +259,7 @@ def test_dedupe_distinguishes_marked_board_selections(client, db_session):
     assert marked.subtotal == 40.0
 
 
-def test_proforma_prints_the_level_price_and_one_tax_line(client):
+def test_order_document_prints_the_level_price_and_one_tax_line(client, db_session):
     """No discount row: each line already shows what it costs.
 
     The per-board choice is the seller's, so the PDF must not announce which
@@ -288,7 +288,8 @@ def test_proforma_prints_the_level_price_and_one_tax_line(client):
     assert pricing["taxAmount"] == 12.82
     assert pricing["total"] == 98.32
 
-    pdf = client.get(f"/api/v1/preorders/{pre['id']}/proforma")
+    order = OrderService(db_session).create(OrderCreate.model_validate(payload))
+    pdf = client.get(f"/api/v1/orders/{order.id}/document")
     assert pdf.status_code == 200
     text = "\n".join(
         page.extract_text() or "" for page in PdfReader(io.BytesIO(pdf.content)).pages

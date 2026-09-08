@@ -22,7 +22,7 @@ dispatch.
   order snapshots with frozen prices; orders carry a production status machine
   (`confirmed → queued → cutting → cut → completed → dispatched`) plus an
   independent edge-banding track for the `canteador` role.
-- **Commercial & production documents** — PDF proforma/order documents,
+- **Commercial & production documents** — PDF order documents,
   production sheets and dispatch sheets, all rendered from the same snapshot
   and including a cutting diagram.
 - **JWT auth + RBAC** — short-lived access tokens, rotating refresh tokens, and
@@ -92,7 +92,7 @@ migrations, etc.).
   (`src/shared/responses.py`, `src/shared/exceptions.py`).
 - Authentication is a JWT bearer access token plus an opaque, rotating refresh
   token; authorization is role-based. See [`docs/AUTH.md`](docs/AUTH.md).
-- PDF documents (proforma, order, production sheet, dispatch sheet) and the
+- PDF documents (order document, production sheet, dispatch sheet) and the
   public client-review endpoints are the only routes exempt from the standard
   envelope.
 

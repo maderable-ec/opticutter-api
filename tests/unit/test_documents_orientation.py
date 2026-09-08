@@ -2,7 +2,7 @@
 
 The cut diagram is drawn with the board rotated 90 degrees, so it prints on
 landscape sheets (one pattern per sheet) while the piece/board lists stay
-portrait. No DB: the render layer is DB-free and ``ProformaCarrier`` is a plain
+portrait. No DB: the render layer is DB-free and ``DocumentCarrier`` is a plain
 dataclass, so a synthetic carrier is enough.
 """
 
@@ -11,8 +11,8 @@ from types import SimpleNamespace
 import pytest
 from pypdf import PdfReader
 
-from src.modules.optimizations.carrier import ProformaCarrier
-from src.modules.optimizations.proforma import ProformaService
+from src.modules.optimizations.carrier import DocumentCarrier
+from src.modules.optimizations.documents import DocumentService
 
 _CLIENT = SimpleNamespace(
     first_name="Ana",
@@ -67,7 +67,7 @@ def _layout(width, height, index):
 
 
 def _carrier(layouts):
-    return ProformaCarrier(
+    return DocumentCarrier(
         reference="ORD-2026-0007",
         client=_CLIENT,
         company={"name": "Maderable"},
@@ -121,7 +121,7 @@ def _diagram_sizes(buffer):
 def test_production_sheet_prints_lists_portrait_and_diagrams_landscape():
     carrier = _carrier([_layout(1220, 2440, i) for i in (1, 2, 3)])
 
-    orientations = _orientations(ProformaService.generate_production_sheet_pdf(carrier))
+    orientations = _orientations(DocumentService.generate_production_sheet_pdf(carrier))
 
     # The lists come first (portrait) and every pattern gets its own landscape sheet.
     assert orientations[0] == "P"
@@ -132,7 +132,7 @@ def test_diagram_document_is_landscape_throughout():
     carrier = _carrier([_layout(1220, 2440, i) for i in (1, 2)])
 
     # Its only content is diagrams, so it is landscape from page 1.
-    assert _orientations(ProformaService.generate_diagram_pdf(carrier)) == ["L", "L"]
+    assert _orientations(DocumentService.generate_diagram_pdf(carrier)) == ["L", "L"]
 
 
 def test_diagram_pages_carry_no_heading():
@@ -141,7 +141,7 @@ def test_diagram_pages_carry_no_heading():
     is what identifies the job."""
     carrier = _carrier([_layout(1220, 2440, i) for i in (1, 2)])
 
-    reader = PdfReader(ProformaService.generate_diagram_pdf(carrier))
+    reader = PdfReader(DocumentService.generate_diagram_pdf(carrier))
     text = "\n".join(page.extract_text() or "" for page in reader.pages)
 
     assert "DIAGRAMA DE DESPIECE" not in text
@@ -150,7 +150,7 @@ def test_diagram_pages_carry_no_heading():
     # Only the footer survives.
     assert "Página 1" in text
 
-    sizes = _diagram_sizes(ProformaService.generate_diagram_pdf(carrier))
+    sizes = _diagram_sizes(DocumentService.generate_diagram_pdf(carrier))
     assert len(sizes) == 2
     assert sizes[0] == sizes[1]  # uniform: the first one is not shrunk
 
@@ -158,7 +158,9 @@ def test_diagram_pages_carry_no_heading():
 def test_order_document_mixes_portrait_lists_with_landscape_diagrams():
     carrier = _carrier([_layout(1220, 2440, 1)])
 
-    buffer = ProformaService.generate_proforma_pdf(carrier, title="ORDEN DE PEDIDO")
+    buffer = DocumentService.generate_order_document_pdf(
+        carrier, title="ORDEN DE PEDIDO"
+    )
     reader = PdfReader(buffer)
     orientations = [
         "L" if float(p.mediabox.width) > float(p.mediabox.height) else "P"
@@ -174,10 +176,10 @@ def test_order_document_mixes_portrait_lists_with_landscape_diagrams():
 @pytest.mark.parametrize(
     "render",
     [
-        lambda c: ProformaService.generate_proforma_pdf(c, include_diagram=False),
-        ProformaService.generate_dispatch_sheet_pdf,
+        lambda c: DocumentService.generate_order_document_pdf(c, include_diagram=False),
+        DocumentService.generate_dispatch_sheet_pdf,
     ],
-    ids=["proforma-sin-diagrama", "hoja-de-despacho"],
+    ids=["orden-de-pedido-sin-diagrama", "hoja-de-despacho"],
 )
 def test_documents_without_a_diagram_stay_portrait(render):
     carrier = _carrier([_layout(1220, 2440, 1)])
@@ -190,7 +192,7 @@ def test_diagram_fills_the_landscape_sheet():
     full content width (770pt) instead of the portrait 523pt."""
     carrier = _carrier([_layout(1220, 2440, 1), _layout(1220, 2440, 2)])
 
-    sizes = _diagram_sizes(ProformaService.generate_production_sheet_pdf(carrier))
+    sizes = _diagram_sizes(DocumentService.generate_production_sheet_pdf(carrier))
 
     assert len(sizes) == 2
     for width, height in sizes:
@@ -204,8 +206,8 @@ def test_a_tall_board_is_clamped_to_the_landscape_frame():
     (which reportlab would reject with a LayoutError)."""
     carrier = _carrier([_layout(2150, 2800, 1)])
 
-    orientations = _orientations(ProformaService.generate_production_sheet_pdf(carrier))
-    sizes = _diagram_sizes(ProformaService.generate_production_sheet_pdf(carrier))
+    orientations = _orientations(DocumentService.generate_production_sheet_pdf(carrier))
+    sizes = _diagram_sizes(DocumentService.generate_production_sheet_pdf(carrier))
 
     assert orientations == ["P", "L"]
     assert len(sizes) == 1

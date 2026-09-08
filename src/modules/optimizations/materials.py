@@ -29,7 +29,7 @@ class ResolvedMaterial:
     """Material ready for the optimizer: geometry + cost + origin metadata.
 
     ``product_id``/``code``/``name`` are only populated for catalog materials
-    (used for order billing and the proforma); inline sources leave them as
+    (used for order billing and the documents); inline sources leave them as
     ``None`` (``name`` may carry the material's free-text label).
     """
 

@@ -104,9 +104,9 @@ class SettingsService:
     def get_preorder_config(self) -> dict:
         """Current pre-order validity and cap (runtime source of truth).
 
-        Consumed by ``PreOrderService`` (expires_at + open-orders cap),
+        Consumed by ``PreOrderService`` (expires_at + open-orders cap) and
         ``PreOrderReviewService`` (refreshes expires_at when generating the
-        link), and the quote carriers (validity shown on the proforma).
+        link). Nothing prints it: the validity governs expiry only.
         """
         settings = self.get_or_init()
         return {
@@ -145,7 +145,7 @@ class SettingsService:
     def get_company(self) -> dict:
         """Company data in the API contract shape (``name/tagline/...``).
 
-        Consumed by both the endpoint response and the ``ProformaCarrier`` to
+        Consumed by both the endpoint response and the ``DocumentCarrier`` to
         render the letterhead live.
         """
         settings = self.get_or_init()

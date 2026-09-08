@@ -6,7 +6,7 @@ Generates a complete, realistic dataset to populate the dashboard / do QA:
 - **Users**: 1 global admin + 1 seller, 1 operator and 1 bander per branch
   (``admin@empresa.com``, ``vendedor<slug>@empresa.com``, ``operador<slug>@empresa.com``,
   ``canteador<slug>@empresa.com``).
-- **Clients**: 5, all with a phone number (required to issue a proforma/order).
+- **Clients**: 5, all with a phone number (required to issue a quote/order).
 - **Boards and edge bandings**: reuses the catalog if present; otherwise creates
   coordinated demo boards + edge bandings (optimizer input + banding track).
 - **Pre-orders**: one in EVERY status per branch (draft, sent, changes_requested,

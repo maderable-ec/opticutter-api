@@ -15,9 +15,9 @@ from fastapi import Depends
 from sqlalchemy.orm import Session
 
 from src.modules.branches.model import BranchModel
-from src.modules.optimizations.carrier import ProformaCarrier
-from src.modules.optimizations.proforma import (
-    ProformaService,
+from src.modules.optimizations.carrier import DocumentCarrier
+from src.modules.optimizations.documents import (
+    DocumentService,
     attachment_to_pdf_part,
     merge_pdfs,
 )
@@ -165,15 +165,15 @@ class PrintJobService:
         Order document (no diagram) + cut diagram + dispatch sheet + attachments,
         merged into one PDF.
         """
-        carrier = ProformaCarrier.from_order(
+        carrier = DocumentCarrier.from_order(
             order, company=SettingsService(self.db).get_company()
         )
         parts = [
-            ProformaService.generate_proforma_pdf(
+            DocumentService.generate_order_document_pdf(
                 carrier, title="ORDEN DE PEDIDO", include_diagram=False
             ),
-            ProformaService.generate_diagram_pdf(carrier),
-            ProformaService.generate_dispatch_sheet_pdf(carrier),
+            DocumentService.generate_diagram_pdf(carrier),
+            DocumentService.generate_dispatch_sheet_pdf(carrier),
         ]
         for att in AttachmentService(self.db).list_attachments(
             order.id, branch_scope=branch_scope

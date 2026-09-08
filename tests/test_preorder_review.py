@@ -224,7 +224,7 @@ def test_public_review_layout_hides_production_internals(client):
 
 
 def test_public_review_shows_the_commercial_reference(client):
-    """The client sees the same reference that's printed on the proforma PDF."""
+    """The client sees the same reference that's printed on the order document."""
     c = _create_client(client)
     b = _create_board(client)
     payload = _order_payload(c["id"], b["id"])
@@ -424,15 +424,20 @@ def test_confirm_expired_quote_fails(client, db_session):
     assert detail.json()["data"]["status"] == "expired"
 
 
-def test_public_proforma_endpoint_removed(client):
-    """The public review link no longer serves a proforma PDF (removed with the
-    frontend download button); even a valid token 404s on that path."""
+def test_proforma_endpoints_are_gone(client):
+    """No proforma PDF on either surface.
+
+    The client reviews on screen; the priced PDF is the order document
+    (``GET /orders/{id}/document``), issued once the quote is confirmed. Neither
+    a valid review token nor the staff route reaches a proforma any more.
+    """
     pre = _setup_preorder(client)
     link = _generate_link(client, pre["id"])
 
     assert (
         client.get(f"/api/v1/public/review/{link['token']}/proforma").status_code == 404
     )
+    assert client.get(f"/api/v1/preorders/{pre['id']}/proforma").status_code == 404
 
 
 def test_confirmed_order_continues_state_machine(client):

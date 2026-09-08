@@ -6,7 +6,6 @@ from sqlalchemy.orm import Session
 
 from src.modules.branches.service import resolve_branch_for_create
 from src.modules.clients.model import ClientModel
-from src.modules.optimizations.carrier import ProformaCarrier
 from src.modules.optimizations.pricing import build_pricing
 from src.modules.optimizations.schemas import (
     OptimizeRequest,
@@ -309,25 +308,6 @@ class PreOrderService(BranchScopedMixin):
         return self.optimization_service.optimize_response(
             self.build_request(preorder),
             additional_services=preorder.additional_services,
-        )
-
-    def build_carrier(self, preorder: PreOrderModel) -> ProformaCarrier:
-        """Recomputed proforma carrier (PDF) for the pre-order (quote)."""
-        payload, _ = self.compute_payload(preorder)
-        payload = {
-            **payload,
-            "pricing": self.build_pricing_for(preorder, payload),
-            "additional_services": preorder.additional_services,
-        }
-        return ProformaCarrier.from_payload(
-            payload,
-            preorder.client,
-            reference=preorder.code or f"PRE-{preorder.id:06d}",
-            company=self.settings_service.get_company(),
-            validity_days=self.settings_service.get_preorder_config()[
-                "preorder_validity_days"
-            ],
-            notes=preorder.notes,
         )
 
     def _record_transition(

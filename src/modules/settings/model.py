@@ -12,7 +12,7 @@ class SettingsModel(TimestampMixin, AuditMixin, Base):
     """Application's single configuration (singleton row, ``id=1``).
 
     Persists what used to live only in environment variables: the cutting
-    parameters and company data (proforma letterhead). The row is lazily
+    parameters and company data (document letterhead). The row is lazily
     seeded from ``config`` on first read, so deployment is backward-compatible.
     This table is the runtime source of truth; ``config`` only supplies the
     initial values.
@@ -44,7 +44,7 @@ class SettingsModel(TimestampMixin, AuditMixin, Base):
     # changing it here never rewrites what was already invoiced.
     tax_rate: Mapped[float] = mapped_column(Float)
 
-    # Company data (proforma letterhead)
+    # Company data (document letterhead)
     company_name: Mapped[str] = mapped_column(String(128))
     company_tagline: Mapped[str] = mapped_column(String(256))
     company_email: Mapped[str] = mapped_column(String(128))
