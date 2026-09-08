@@ -4,21 +4,18 @@ from typing import List, Optional
 
 
 @dataclass
-class ProformaCarrier:
-    """Duck-typed carrier that the proforma and production sheet know how to render.
+class DocumentCarrier:
+    """Duck-typed carrier that the order document and production sheet render.
 
     Unifies the two sources of the same computation — an ephemeral optimization
     (cached by hash) or an order's immutable snapshot — exposing the same
-    attributes that ``ProformaService`` reads, without coupling the render to a
+    attributes that ``DocumentService`` reads, without coupling the render to a
     concrete ORM model. The render only depends on this shape, not its origin.
     """
 
     reference: str
     client: object
     company: dict = field(default_factory=dict)
-    # Validity (days) shown on the proforma; ``None`` omits it (e.g. an already
-    # confirmed order isn't a current quote). Set by the quoting carriers.
-    validity_days: Optional[int] = None
     # Free-form commercial reference (project/site name) typed by the seller: the
     # differentiator when the same client has several jobs running. ``None``/empty
     # omits the line from every document.
@@ -70,17 +67,15 @@ class ProformaCarrier:
         client,
         reference: str,
         company: dict | None = None,
-        validity_days: Optional[int] = None,
         notes: Optional[str] = None,
-    ) -> "ProformaCarrier":
+    ) -> "DocumentCarrier":
         """Builds the carrier from an optimization payload + the client.
 
         ``company`` is the current letterhead (company data) rendered live,
         including the full configured branch list; it's not part of the priced
-        snapshot. ``validity_days`` is the quote's validity period shown on the
-        proforma (``None`` omits it). ``notes`` is the commercial reference: it
-        lives on the pre-order/order row, not in the optimization payload, so the
-        caller passes it in.
+        snapshot. ``notes`` is the commercial reference: it lives on the
+        pre-order/order row, not in the optimization payload, so the caller
+        passes it in.
         """
         company = company or {}
         # Money block, attached by build_pricing before the carrier is assembled.
@@ -89,7 +84,6 @@ class ProformaCarrier:
             reference=reference,
             client=client,
             company=company,
-            validity_days=validity_days,
             notes=notes,
             requirements=payload.get("requirements") or [],
             materials_summary=payload.get("materials_summary") or [],
@@ -111,7 +105,7 @@ class ProformaCarrier:
         )
 
     @classmethod
-    def from_order(cls, order, company: dict | None = None) -> "ProformaCarrier":
+    def from_order(cls, order, company: dict | None = None) -> "DocumentCarrier":
         """Builds the carrier from an order (snapshot + frozen prices).
 
         The breakdown (boards vs edge banding) is taken from the immutable

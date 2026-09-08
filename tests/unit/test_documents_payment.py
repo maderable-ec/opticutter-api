@@ -1,25 +1,25 @@
 """Unit tests for the "FORMA DE PAGO" block of the commercial documents.
 
-No DB: ``_payment_section`` is a pure static method over the ``ProformaCarrier``
+No DB: ``_payment_section`` is a pure static method over the ``DocumentCarrier``
 dataclass. The integration suite only asserts that the PDFs render, so this is
 where the rows themselves are pinned.
 """
 
 from reportlab.lib.styles import getSampleStyleSheet
 
-from src.modules.optimizations.carrier import ProformaCarrier
-from src.modules.optimizations.proforma import ProformaService
+from src.modules.optimizations.carrier import DocumentCarrier
+from src.modules.optimizations.documents import DocumentService
 
 _HEADING = getSampleStyleSheet()["Heading2"]
 
 
-def _carrier(**amounts) -> ProformaCarrier:
-    return ProformaCarrier(reference="ORD-2026-0007", client=None, **amounts)
+def _carrier(**amounts) -> DocumentCarrier:
+    return DocumentCarrier(reference="ORD-2026-0007", client=None, **amounts)
 
 
 def _rows(**amounts):
     """The rows the block would print for the given registered amounts."""
-    block = ProformaService._payment_section(_carrier(**amounts), _HEADING)
+    block = DocumentService._payment_section(_carrier(**amounts), _HEADING)
     if not block:
         return []
     # The table is the last flowable; `_section` puts the heading before it.
@@ -28,7 +28,7 @@ def _rows(**amounts):
 
 def test_no_payment_omits_the_block():
     """Quotes and orders not yet queued carry no payment: nothing is printed."""
-    assert ProformaService._payment_section(_carrier(), _HEADING) == []
+    assert DocumentService._payment_section(_carrier(), _HEADING) == []
     assert _rows(payment_cash_amount=0, payment_credit_amount=0) == []
 
 

@@ -3,7 +3,6 @@ from typing import List, Literal, Optional
 
 from fastapi import APIRouter, Depends, Query
 
-from src.modules.optimizations.proforma import ProformaService, pdf_response
 from src.modules.preorders.model import PreOrderModel, PreOrderStatus
 from src.modules.preorders.review_service import (
     PreOrderReviewService,
@@ -42,12 +41,6 @@ router = APIRouter(
     tags=["preorders"],
     responses=ERROR_RESPONSES,
     dependencies=[Depends(require_permission("preorders"))],
-)
-
-_FORMAT_QUERY = Query(
-    default="pdf",
-    description="Output format: 'pdf' (file) or 'base64' (JSON)",
-    pattern="^(pdf|base64)$",
 )
 
 
@@ -244,25 +237,3 @@ def get_review_link_info(
 ):
     """Metadata of the latest review link (without the token, unrecoverable)."""
     return ok(svc.get_latest_info(preorder_id, branch_scope=branch_scope))
-
-
-# Exempt from the JSON envelope: PDF file transport (StreamingResponse/base64).
-@router.get("/{preorder_id}/proforma")
-def get_preorder_proforma(
-    preorder_id: int,
-    format: str = _FORMAT_QUERY,
-    svc: PreOrderService = Depends(preorder_service),
-    branch_scope: Optional[int] = Depends(get_branch_scope),
-):
-    """Recomputed commercial proforma (live prices) of the pre-order.
-
-    The cut-layout diagram is omitted: the proforma is a commercial quote, so it
-    lists priced requirements and materials only (the diagram lives in the
-    production sheet / order document).
-    """
-    preorder = svc.get_scoped_or_404(preorder_id, branch_scope)
-    carrier = svc.build_carrier(preorder)
-    pdf_buffer = ProformaService.generate_proforma_pdf(carrier, include_diagram=False)
-    return pdf_response(
-        pdf_buffer, f"proforma_{preorder.code or preorder.id}.pdf", format
-    )

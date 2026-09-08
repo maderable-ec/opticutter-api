@@ -1,7 +1,7 @@
 """Unit tests for how the client's own retazos are rendered on the documents.
 
 No DB: the two row selectors and the two tables are pure functions over the
-``ProformaCarrier`` dataclass. The integration suite only asserts the PDFs
+``DocumentCarrier`` dataclass. The integration suite only asserts the PDFs
 render, so this is where the split between "billed" and "brought by the client"
 is pinned.
 
@@ -13,9 +13,9 @@ traceability but never in a priced table, and a totals row that would print
 
 from reportlab.lib.styles import getSampleStyleSheet
 
-from src.modules.optimizations.carrier import ProformaCarrier
-from src.modules.optimizations.proforma import (
-    ProformaService,
+from src.modules.optimizations.carrier import DocumentCarrier
+from src.modules.optimizations.documents import (
+    DocumentService,
     _billable_material_rows,
     _client_material_rows,
 )
@@ -41,8 +41,8 @@ def _material(key, source, **over):
     return entry
 
 
-def _carrier(*materials, **over) -> ProformaCarrier:
-    return ProformaCarrier(
+def _carrier(*materials, **over) -> DocumentCarrier:
+    return DocumentCarrier(
         reference="PRE-2026-0007",
         client=None,
         materials_summary=list(materials),
@@ -67,7 +67,7 @@ def test_the_workshops_own_retazo_stays_in_the_priced_table():
 
 
 def test_client_material_table_has_no_money_column():
-    rows = ProformaService._build_client_material_table(
+    rows = DocumentService._build_client_material_table(
         [_material("r1", "clientOffcut", product_name="Retazo grande")], _CELL
     )._cellvalues
     assert rows[0] == ["Descripción", "Dimensiones", "Espesor", "Hojas"]
@@ -84,11 +84,11 @@ def test_client_material_never_prints_the_internal_key():
     handed a document naming ``mat-1``.
     """
     unlabelled = _material("r1", "clientOffcut", product_name=None)
-    rows = ProformaService._build_client_material_table([unlabelled], _CELL)._cellvalues
+    rows = DocumentService._build_client_material_table([unlabelled], _CELL)._cellvalues
     assert rows[1][0].text == "Material del cliente"
 
     from_summary = _material("r1", "clientOffcut", product_name="1000×1000")
-    rows = ProformaService._build_client_material_table(
+    rows = DocumentService._build_client_material_table(
         [from_summary], _CELL
     )._cellvalues
     assert rows[1][0].text == "1000×1000"
@@ -107,7 +107,7 @@ def test_totals_omit_the_rows_that_would_print_zero():
         additional_services=[{"name": "Corte", "unit_price": 20.0, "quantity": 1}],
         services_total=17.39,
     )
-    rows = ProformaService._build_totals_table(carrier)._cellvalues
+    rows = DocumentService._build_totals_table(carrier)._cellvalues
     labels = [row[0] for row in rows]
     assert "Costo de tableros:" not in labels
     assert "Total de tableros utilizados:" not in labels
@@ -133,7 +133,7 @@ def test_an_offcut_only_quote_with_banding_prints_only_the_banding():
         total_cost=4.6,
     )
     labels = [
-        row[0] for row in ProformaService._build_totals_table(carrier)._cellvalues
+        row[0] for row in DocumentService._build_totals_table(carrier)._cellvalues
     ]
     assert "Costo de tableros:" not in labels
     assert labels[0] == "Costo de tapacantos:"
@@ -152,7 +152,7 @@ def test_a_catalog_quote_still_prints_its_board_cost():
         total_cost=109.25,
     )
     labels = [
-        row[0] for row in ProformaService._build_totals_table(carrier)._cellvalues
+        row[0] for row in DocumentService._build_totals_table(carrier)._cellvalues
     ]
     assert labels[:2] == ["Costo de tableros:", "Costo de tapacantos:"]
 
@@ -169,7 +169,7 @@ def test_a_quote_with_boards_but_no_banding_keeps_the_board_count():
         total_cost=0.0,
     )
     labels = [
-        row[0] for row in ProformaService._build_totals_table(carrier)._cellvalues
+        row[0] for row in DocumentService._build_totals_table(carrier)._cellvalues
     ]
     assert labels[0] == "Total de tableros utilizados:"
 
@@ -185,7 +185,7 @@ def test_the_workshop_sheet_counts_every_sheet_it_has_to_cut():
         _material("r2", "clientOffcut", count=1),
         total_boards_used=0,
     )
-    rows = ProformaService._build_boards_total_table(carrier)._cellvalues
+    rows = DocumentService._build_boards_total_table(carrier)._cellvalues
     assert rows == [["Total de hojas a cortar:", "3"]]
 
 
@@ -195,5 +195,5 @@ def test_the_workshop_sheet_counts_the_retazo_next_to_the_board():
         _material("r1", "clientOffcut", count=1),
         total_boards_used=2,
     )
-    rows = ProformaService._build_boards_total_table(carrier)._cellvalues
+    rows = DocumentService._build_boards_total_table(carrier)._cellvalues
     assert rows == [["Total de hojas a cortar:", "3"]]

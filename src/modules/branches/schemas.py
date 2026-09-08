@@ -11,7 +11,7 @@ class BranchBase(CamelModel):
     )
     name: str = Field(..., min_length=1, max_length=128, description="Branch name")
     address: Optional[str] = Field(
-        None, max_length=256, description="Address (proforma letterhead)"
+        None, max_length=256, description="Address (document letterhead)"
     )
     phone: Optional[str] = Field(None, max_length=32, description="Contact phone")
     print_labels_enabled: bool = Field(

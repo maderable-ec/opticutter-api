@@ -205,23 +205,3 @@ def test_patch_company_persists(client):
     after = client.get("/api/v1/settings/company").json()["data"]
     assert after["phone"] == "0100000017"
     assert after["branches"][0]["name"] == "Matriz"
-
-
-def test_company_settings_render_in_proforma(client):
-    """The quote proforma uses the current company data (live letterhead).
-
-    The optimizer no longer emits a document: the proforma lives in the quote
-    (live prices) and in the order. Here it's exercised via the pre-order.
-    """
-    created_client = _create_client(client)
-    board = _create_board(client)
-    preorder = client.post(
-        "/api/v1/preorders/", json=_optimize_payload(created_client["id"], board["id"])
-    ).json()["data"]
-
-    client.patch("/api/v1/settings/company", json={"phone": "0999999999"})
-
-    proforma = client.get(f"/api/v1/preorders/{preorder['id']}/proforma")
-    assert proforma.status_code == 200
-    assert proforma.headers["content-type"] == "application/pdf"
-    assert len(proforma.content) > 1000

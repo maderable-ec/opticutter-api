@@ -22,7 +22,7 @@ def build_materials_summary(layouts: List[dict], materials: List[dict]) -> List[
     Carries the origin metadata (``material_key``/``source`` and, for catalog
     materials only, ``product_id``/``product_code``/``product_name``). For
     inline materials it falls back to the key as code and the dimensions as a
-    readable name, so the proforma renders without special handling.
+    readable name, so the documents render without special handling.
     """
     # Composite key (material, half?) so full and half boards of the same
     # material end up as separate billing lines (different width, cost, label).

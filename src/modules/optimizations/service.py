@@ -99,7 +99,7 @@ class OptimizationService:
 
     The computation is deterministic and ephemeral: it's cached by a hash of the
     inputs and is **not** persisted to the DB (the order is the durable source of
-    truth). The hash is the identifier used to retrieve the proforma. The material
+    truth). The hash is the identifier used to retrieve the result. The material
     is source-agnostic: a ``MaterialResolver`` translates catalog/offcut/manual into
     dimensions and cost before optimizing, so ``cutting`` only ever sees geometry.
     """
@@ -694,9 +694,9 @@ class OptimizationService:
         """Dumps a requirement to the payload with the edge-banding display attributes.
 
         ``product_code`` carries the material's label (catalog code, or
-        name/key for inline sources) that the proforma shows in the "Tablero"
+        name/key for inline sources) that the documents show in the "Tablero"
         column. ``band_type`` and ``alias`` live in the product's attributes,
-        not in the ``EdgeBandingSpec``; they're injected here so the proforma can
+        not in the ``EdgeBandingSpec``; they're injected here so the documents can
         build the edge notation (``2L1C CS CSH``) without re-resolving the
         product at render time.
         """
@@ -760,7 +760,7 @@ class OptimizationService:
     ) -> dict:
         """Builds the cacheable/serializable payload for the optimization result.
 
-        Same keys consumed by ``proforma`` and the order snapshot. ``results``
+        Same keys consumed by ``documents`` and the order snapshot. ``results``
         groups by material as ``(edge_map, net_map, layouts)`` (maps indexed by the
         unique piece id from ``_build_pieces``) to enrich each placed piece with its
         banded sides and length without id collisions.

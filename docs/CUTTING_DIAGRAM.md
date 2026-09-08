@@ -6,7 +6,7 @@ edge-banded sides, with dimensions and an efficiency percentage. It is built
 on Pillow (PIL) and used as an **internal building block**, not a
 standalone endpoint — there is no `/optimize/visualize/{hash}` route. The
 diagram is embedded directly into the PDF documents rendered by
-`proforma.py`:
+`documents.py`:
 
 - the order document (`GET /orders/{id}/document`),
 - the order's production sheet (`GET /orders/{id}/production-sheet`),
@@ -15,12 +15,11 @@ diagram is embedded directly into the PDF documents rendered by
   (`POST /print/consolidated`) carry. It has no header of its own — it only ever
   travels inside the packet, where the ORDEN DE PEDIDO identifies the job.
 
-The pre-order proforma (`GET /preorders/{id}/proforma`) and the dispatch sheet
-(`GET /orders/{id}/dispatch-sheet`) render **no** diagram.
+The dispatch sheet (`GET /orders/{id}/dispatch-sheet`) renders **no** diagram.
 
 If you need a diagram outside of those documents (e.g. for a new export or a
 debugging script), call `VisualizationService` directly rather than adding a
-new public image endpoint — see `proforma.py` for the call pattern.
+new public image endpoint — see `documents.py` for the call pattern.
 
 ## Themes
 
@@ -28,7 +27,7 @@ Two color themes share the same drawing code:
 
 | Theme | Used in | Notes |
 |-------|---------|-------|
-| `brand` | Proforma / order document | Branded palette (coral pieces, dark outlines), matches the MADERABLE letterhead. |
+| `brand` | Order document | Branded palette (coral pieces, dark outlines), matches the MADERABLE letterhead. |
 | `mono` | Production sheet, diagram-only document | Black & white, optimized for workshop printing. |
 
 In both themes, a banded edge is drawn as a colored strip along that side of
@@ -50,7 +49,7 @@ color alone can't carry it.
 
 - **One cutting pattern per page, on a landscape sheet.** The board is drawn
   rotated 90° (`_rotated_rect`), so the PNG is always wider than it is tall; on
-  a portrait A4 that left ~60% of the paper blank. `proforma._CutterDoc`
+  a portrait A4 that left ~60% of the paper blank. `documents._CutterDoc`
   registers a portrait and a landscape `PageTemplate`, and the story switches
   with `NextPageTemplate("landscape")` before the `DISPOSICIÓN DE CORTES`
   section — the piece/board lists stay portrait, the diagrams go landscape, page

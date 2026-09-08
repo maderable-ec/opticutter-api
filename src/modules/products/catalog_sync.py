@@ -107,7 +107,7 @@ _OBS_SEP = " - "
 # (``EdgeBandingAttributes.alias``, 20 chars). A right-hand side that doesn't
 # look like one is not an alias — it's part of the family. This keeps
 # "Cashmere - Cashmere Claro" from becoming an alias that overflows the
-# proforma's "Cantos" column, sized for "2L1C CS CSH".
+# order document's "Cantos" column, sized for "2L1C CS CSH".
 _ALIAS_RE = re.compile(r"^\S{1,20}$")
 
 

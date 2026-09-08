@@ -499,9 +499,52 @@ def test_order_document_pdf_and_base64(client, db_session):
     assert order["code"] in body["filename"]
 
 
+def test_order_document_renders_inline_material_without_label(client, db_session):
+    """Regression: an inline (manual/offcut) material leaves product_code/product_name
+    None; the document must render "N/A" instead of crashing on Paragraph(None) (was
+    a 500)."""
+    c = _create_client(client)
+    payload = {
+        "clientId": c["id"],
+        "branchId": _BRANCH,
+        "materials": [
+            {
+                "key": "m1",
+                "source": "manual",
+                "height": 2000,
+                "width": 1000,
+                "thickness": 18,
+                "costPerUnit": 30.0,
+                # label omitted -> product_name/product_code resolve to None
+            }
+        ],
+        "requirements": [
+            {
+                "priority": 0,
+                "height": 400,
+                "width": 600,
+                "quantity": 2,
+                "materialKey": "m1",
+                "label": "Puerta",
+                "canRotate": True,
+            }
+        ],
+    }
+    order = _mint_order(db_session, payload)
+
+    pdf = client.get(f"/api/v1/orders/{order.id}/document?format=pdf")
+    assert pdf.status_code == 200, pdf.text
+    assert pdf.headers["content-type"] == "application/pdf"
+    assert len(pdf.content) > 1000
+
+
 def test_order_document_shows_all_configured_branches(client, db_session):
     """The letterhead lists every configured branch, not just the order's own
-    branch (previously collapsed to a single one)."""
+    branch (previously collapsed to a single one).
+
+    Also the settings->letterhead pin: the company data is read live on every
+    render, never frozen into the order's snapshot.
+    """
     import io
 
     from pypdf import PdfReader

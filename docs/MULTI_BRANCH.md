@@ -61,7 +61,7 @@ orders/pre-orders/drafts; its "Create" column follows the generic rule.)
   (admin/vendedor).
 - **Orders** (`GET /orders`): accepts `?branchId=` for the global roles
   (admin/vendedor). An order is born with its pre-order's branch on
-  confirmation; its proforma/production-sheet letterhead shows that branch.
+  confirmation; its order-document/production-sheet letterhead shows that branch.
 - **Drafts** (`POST /optimization-drafts`): accepts `branchId` (same rule as
   pre-orders); `GET` accepts `?branchId=` (admin/vendedor).
 

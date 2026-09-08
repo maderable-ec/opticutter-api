@@ -137,74 +137,6 @@ def test_create_preorder_unknown_client_404(client):
     assert resp.status_code == 404
 
 
-def test_preorder_proforma_pdf(client):
-    c, b = _setup(client)
-    pre = _create_preorder(client, c, b).json()["data"]
-    pdf = client.get(f"/api/v1/preorders/{pre['id']}/proforma")
-    assert pdf.status_code == 200
-    assert pdf.headers["content-type"] == "application/pdf"
-    assert len(pdf.content) > 1000
-
-
-def test_preorder_proforma_prints_the_reference(client):
-    """``notes`` reaches the proforma as the "Ref:" line next to the N°/date."""
-    import io
-
-    from pypdf import PdfReader
-
-    c, b = _setup(client)
-    payload = _order_payload(c["id"], b["id"])
-    payload["notes"] = "Proyecto Alfa"
-    pre = client.post("/api/v1/preorders/", json=payload).json()["data"]
-
-    pdf = client.get(f"/api/v1/preorders/{pre['id']}/proforma")
-    assert pdf.status_code == 200
-    text = "\n".join(
-        page.extract_text() or "" for page in PdfReader(io.BytesIO(pdf.content)).pages
-    )
-    assert "Ref: Proyecto Alfa" in text
-
-
-def test_preorder_proforma_pdf_inline_material_without_label(client):
-    """Regression: an inline (manual/offcut) material leaves product_code/product_name None; the
-    proforma must render "N/A" instead of crashing on Paragraph(None) (was a 500)."""
-    c = _create_client(client)
-    payload = {
-        "clientId": c["id"],
-        "branchId": _BRANCH,
-        "materials": [
-            {
-                "key": "m1",
-                "source": "manual",
-                "height": 2000,
-                "width": 1000,
-                "thickness": 18,
-                "costPerUnit": 30.0,
-                # label omitted → product_name/product_code resolve to None
-            }
-        ],
-        "requirements": [
-            {
-                "priority": 0,
-                "height": 400,
-                "width": 600,
-                "quantity": 2,
-                "materialKey": "m1",
-                "label": "Puerta",
-                "canRotate": True,
-            }
-        ],
-    }
-    pre = client.post("/api/v1/preorders/", json=payload)
-    assert pre.status_code == 201, pre.text
-    pdf = client.get(
-        f"/api/v1/preorders/{pre.json()['data']['id']}/proforma?format=pdf"
-    )
-    assert pdf.status_code == 200, pdf.text
-    assert pdf.headers["content-type"] == "application/pdf"
-    assert len(pdf.content) > 1000
-
-
 def test_preorder_persists_strategy_and_recomputes_with_it(client):
     """The strategy is saved and the recompute (cache-first) uses it on every read."""
     c, b = _setup(client)
@@ -464,6 +396,3 @@ def test_preorder_on_client_offcuts_only_round_trips(client):
     # Two retazos hold one 900×900 each; the third piece is reported, not dropped.
     assert len(opt["layouts"]) == 2
     assert opt["unplaced"][0]["quantity"] == 1
-
-    # The proforma renders over the same snapshot.
-    assert client.get(f"/api/v1/preorders/{data['id']}/proforma").status_code == 200

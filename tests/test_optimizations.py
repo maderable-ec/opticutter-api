@@ -177,9 +177,9 @@ def test_optimize_consolidates_the_leftovers_it_reports(client):
 
 def test_carrier_exposes_linear_meter_totals():
     """``from_payload`` exposes the new totals; an old payload falls back to 0.0."""
-    from src.modules.optimizations.carrier import ProformaCarrier
+    from src.modules.optimizations.carrier import DocumentCarrier
 
-    carrier = ProformaCarrier.from_payload(
+    carrier = DocumentCarrier.from_payload(
         {"total_cut_linear_m": 12.5, "total_edge_banding_linear_m": 3.2},
         client=None,
         reference="OPT-x",
@@ -187,7 +187,7 @@ def test_carrier_exposes_linear_meter_totals():
     assert carrier.total_cut_linear_m == 12.5
     assert carrier.total_edge_banding_linear_m == 3.2
 
-    legacy = ProformaCarrier.from_payload({}, client=None, reference="OPT-y")
+    legacy = DocumentCarrier.from_payload({}, client=None, reference="OPT-y")
     assert legacy.total_cut_linear_m == 0.0
     assert legacy.total_edge_banding_linear_m == 0.0
 

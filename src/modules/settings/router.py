@@ -53,7 +53,7 @@ def update_preorder_settings(
 
 @router.get("/company", response_model=DataResponse[CompanySettingsResponse])
 def get_company_settings(svc: SettingsService = Depends(settings_service)):
-    """Returns the company data (proforma letterhead)."""
+    """Returns the company data (document letterhead)."""
     return ok(svc.get_company())
 
 

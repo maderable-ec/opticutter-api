@@ -94,7 +94,7 @@ def test_edge_dims_re_rejects_missing_unit():
         # stays on the family side.
         ("Roble Barroco - Dorado - RBD", ("Roble Barroco - Dorado", "RBD")),
         # An alias is a short code: whitespace on the right means this is a
-        # hyphenated family, not an alias. Guards the proforma's "Cantos"
+        # hyphenated family, not an alias. Guards the order document's "Cantos"
         # column, which is sized for "2L1C CS CSH".
         ("Cashmere - Cashmere Claro", ("Cashmere - Cashmere Claro", None)),
         # ...and so does the 20-char cap (EdgeBandingAttributes.alias): over it,

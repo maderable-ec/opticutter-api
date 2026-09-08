@@ -75,14 +75,14 @@ class TaxSettingsUpdate(CamelModel):
 
 # --- Company data -----------------------------------------------------------------
 class Branch(CamelModel):
-    """A branch shown on the proforma letterhead."""
+    """A branch shown on the document letterhead."""
 
     name: str = Field(..., min_length=1, max_length=128)
     address: str = Field(..., min_length=1, max_length=256)
 
 
 class CompanySettingsResponse(CamelModel):
-    """Current company data (proforma letterhead)."""
+    """Current company data (document letterhead)."""
 
     name: str = Field(..., max_length=128)
     tagline: str = Field(..., max_length=256)

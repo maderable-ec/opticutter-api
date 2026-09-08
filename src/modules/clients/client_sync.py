@@ -49,7 +49,7 @@ _IDENTIFIER_MAX = 32
 # Below this many digits it isn't a phone number, it's a placeholder — SIFAC
 # holds "N/A" among others. Storing it would be worse than storing nothing:
 # `clients.require_phone` only checks for a non-blank value, so "N/A" would
-# sail through the gate that exists to stop a proforma without a real contact.
+# sail through the gate that exists to stop a quote without a real contact.
 _PHONE_MIN_DIGITS = 7
 
 
