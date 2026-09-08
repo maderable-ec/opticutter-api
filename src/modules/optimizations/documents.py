@@ -966,7 +966,7 @@ class DocumentService:
                 [
                     entry.get("product_code") or "N/A",
                     Paragraph(
-                        entry.get("product_name") or entry.get("product_code") or "N/A",
+                        _material_label(entry, entry.get("product_code") or "N/A"),
                         cell_style,
                     ),
                     f"{entry.get('count', 0)} u",
@@ -1023,9 +1023,7 @@ class DocumentService:
                     [
                         entry.get("product_code") or "N/A",
                         Paragraph(
-                            entry.get("product_name")
-                            or entry.get("product_code")
-                            or "N/A",
+                            _material_label(entry, entry.get("product_code") or "N/A"),
                             cell_style,
                         ),
                         f"{entry.get('height', 0):.0f}×{entry.get('width', 0):.0f} mm",
@@ -1109,7 +1107,7 @@ class DocumentService:
                     # summary already falls back to the dimensions when the seller
                     # typed no label, and the next column repeats them anyway.
                     Paragraph(
-                        entry.get("product_name") or "Material del cliente",
+                        _material_label(entry, "Material del cliente"),
                         cell_style,
                     ),
                     f"{entry.get('height', 0):.0f}×{entry.get('width', 0):.0f} mm",
@@ -1453,6 +1451,21 @@ def _cell_style(styles) -> ParagraphStyle:
         textColor=TEXT_GREY,
         alignment=TA_LEFT,
     )
+
+
+def _material_label(entry: dict, fallback: str) -> str:
+    """The material's printed name, flagged when the sheet is cut untrimmed.
+
+    Every document that lists boards goes through here, because the shop squares
+    a board by reflex: a plan that deliberately uses the full sheet has to say so
+    on the paper the operator holds, not only in the quote that priced it. Sits
+    next to the "(medio tablero)" suffix the summary already builds, and stays a
+    suffix rather than a column — none of the three tables has room for one.
+    """
+    name = entry.get("product_name") or fallback
+    if not entry.get("skip_trim"):
+        return name
+    return f"{name} <font color='#6B7280'>· sin refilar</font>"
 
 
 def _client_material_rows(carrier: DocumentCarrier) -> List[dict]:

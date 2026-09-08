@@ -1477,3 +1477,303 @@ def test_optimize_puts_the_half_board_after_the_whole_ones(client):
     # And the costs table, whose order comes from first appearance in `layouts`.
     summary_halves = [m["halfBoard"] for m in data["materialsSummary"]]
     assert summary_halves == sorted(summary_halves)
+
+
+# ---------------------------------------------------------------------------
+# skipTrim: the refilado the seller turns off per material
+# ---------------------------------------------------------------------------
+
+
+def _trim_the_boards(client, trim=10.0):
+    """Turns the shop's default squaring ON for a test.
+
+    ``config`` ships the four trims at 0.0, so a geometry assertion about the
+    refilado has to set them first or it measures nothing.
+    """
+    resp = client.patch(
+        "/api/v1/settings/cutting",
+        json={
+            "topTrim": trim,
+            "bottomTrim": trim,
+            "leftTrim": trim,
+            "rightTrim": trim,
+        },
+    )
+    assert resp.status_code == 200
+
+
+def _trim_payload(client_id, product_id, skip_trim=None):
+    """One piece on one catalog board; ``skipTrim`` omitted unless asked for."""
+    material = {"key": "b1", "source": "catalog", "productId": product_id}
+    if skip_trim is not None:
+        material["skipTrim"] = skip_trim
+    return {
+        "clientId": client_id,
+        "materials": [material],
+        "requirements": [
+            {
+                "priority": 0,
+                "height": 400,
+                "width": 600,
+                "quantity": 2,
+                "materialKey": "b1",
+                "label": "Puerta",
+                "canRotate": True,
+            }
+        ],
+    }
+
+
+def test_skip_trim_changes_the_hash(client):
+    """Unlike applyPriceLevel/wholeBoard, this flag moves the geometry.
+
+    So it cannot be a post-hoc reshape of a cached payload: it has to re-run the
+    search, which means it has to be part of the hash.
+    """
+    created_client = _create_client(client)
+    board = _create_board(client)
+
+    plain = client.post(
+        "/api/v1/optimize/", json=_trim_payload(created_client["id"], board["id"])
+    ).json()["data"]
+    marked = client.post(
+        "/api/v1/optimize/",
+        json=_trim_payload(created_client["id"], board["id"], skip_trim=True),
+    ).json()["data"]
+
+    assert marked["optimizationHash"] != plain["optimizationHash"]
+
+
+def test_skip_trim_absent_keeps_the_hash_of_every_existing_quote(client):
+    """The guard behind emitting the key only when it is set.
+
+    A new hash key with a ``False`` value would invalidate every payload in
+    Redis on deploy, for geometry that did not move — and every open pre-order
+    re-optimizes on read.
+    """
+    created_client = _create_client(client)
+    board = _create_board(client)
+
+    omitted = client.post(
+        "/api/v1/optimize/", json=_trim_payload(created_client["id"], board["id"])
+    ).json()["data"]
+    explicit_false = client.post(
+        "/api/v1/optimize/",
+        json=_trim_payload(created_client["id"], board["id"], skip_trim=False),
+    ).json()["data"]
+
+    assert explicit_false["optimizationHash"] == omitted["optimizationHash"]
+
+
+def test_skip_trim_uses_the_sheet_edge_to_edge(client):
+    """With the refilado on, nothing may sit on the board's own edge."""
+    _trim_the_boards(client)
+    created_client = _create_client(client)
+    board = _create_board(client)
+
+    trimmed = client.post(
+        "/api/v1/optimize/", json=_trim_payload(created_client["id"], board["id"])
+    ).json()["data"]
+    untrimmed = client.post(
+        "/api/v1/optimize/",
+        json=_trim_payload(created_client["id"], board["id"], skip_trim=True),
+    ).json()["data"]
+
+    def origin(data):
+        pieces = data["layouts"][0]["placedPieces"]
+        return min((p["x"], p["y"]) for p in pieces)
+
+    assert origin(trimmed) == (10, 10)
+    assert origin(untrimmed) == (0, 0)
+    # The usable area grows, so the plan is at least as efficient.
+    assert (
+        untrimmed["layouts"][0]["statistics"]["efficiency"]
+        >= trimmed["layouts"][0]["statistics"]["efficiency"]
+    )
+
+
+def test_skip_trim_applies_to_the_whole_pool(client):
+    """The business rule: the mark covers the board AND its attached retazos.
+
+    It is why the flag becomes one ``CuttingParameters`` per pool rather than a
+    property of each sheet.
+    """
+    _trim_the_boards(client)
+    created_client = _create_client(client)
+    board = _create_board(client)
+
+    payload = _pool_payload(created_client["id"], board["id"])
+    payload["materials"][0]["skipTrim"] = True
+    data = client.post("/api/v1/optimize/", json=payload).json()["data"]
+
+    by_key = {lay["material"]["materialKey"]: lay for lay in data["layouts"]}
+    for key in ("b1", "off1"):
+        placed = by_key[key]["placedPieces"]
+        assert min((p["x"], p["y"]) for p in placed) == (
+            0,
+            0,
+        ), f"{key} was trimmed even though the pool's anchor is marked"
+
+
+def test_skip_trim_is_read_from_the_anchor_only(client):
+    """The flag on a POOLED offcut is inert, and must not move the hash.
+
+    The service reads it off the anchor alone, so leaving it live on a pooled
+    material would buy a second cache entry for an identical plan.
+    """
+    created_client = _create_client(client)
+    board = _create_board(client)
+
+    plain = client.post(
+        "/api/v1/optimize/", json=_pool_payload(created_client["id"], board["id"])
+    ).json()["data"]
+
+    payload = _pool_payload(created_client["id"], board["id"])
+    payload["materials"][1]["skipTrim"] = True  # the pooled retazo
+    marked = client.post("/api/v1/optimize/", json=payload).json()["data"]
+
+    assert marked["optimizationHash"] == plain["optimizationHash"]
+
+
+def test_skip_trim_rescues_an_offcut_the_trims_made_unusable(client):
+    """A retazo smaller than twice the trim is unusable while the refilado is on.
+
+    The small-retazo case the shop asked for: the client brings a piece already
+    squared, and squaring it again leaves nothing to cut.
+    """
+    _trim_the_boards(client)
+    created_client = _create_client(client)
+
+    def payload(skip_trim):
+        material = {
+            "key": "r1",
+            "source": "clientOffcut",
+            "height": 100,
+            "width": 100,
+            "thickness": 18,
+            "quantity": 1,
+            "label": "Retazo chico",
+        }
+        if skip_trim:
+            material["skipTrim"] = True
+        return {
+            "clientId": created_client["id"],
+            "materials": [material],
+            "requirements": [
+                {
+                    "priority": 0,
+                    "height": 90,
+                    "width": 90,
+                    "quantity": 1,
+                    "materialKey": "r1",
+                    "label": "Tapa",
+                    "canRotate": True,
+                }
+            ],
+        }
+
+    trimmed = client.post("/api/v1/optimize/", json=payload(False)).json()["data"]
+    assert trimmed["unplaced"], "the trims should leave no room for the piece"
+
+    untrimmed = client.post("/api/v1/optimize/", json=payload(True)).json()["data"]
+    assert untrimmed["unplaced"] == []
+    assert untrimmed["layouts"][0]["placedPieces"][0]["pieceId"] == "Tapa"
+
+
+def test_skip_trim_never_poisons_the_cached_plan(client):
+    """Two hashes, two payloads: the marked plan can't be served to a plain quote."""
+    _trim_the_boards(client)
+    created_client = _create_client(client)
+    board = _create_board(client)
+
+    marked = client.post(
+        "/api/v1/optimize/",
+        json=_trim_payload(created_client["id"], board["id"], skip_trim=True),
+    ).json()["data"]
+    assert min((p["x"], p["y"]) for p in marked["layouts"][0]["placedPieces"]) == (0, 0)
+
+    plain = client.post(
+        "/api/v1/optimize/", json=_trim_payload(created_client["id"], board["id"])
+    ).json()["data"]
+    assert min((p["x"], p["y"]) for p in plain["layouts"][0]["placedPieces"]) == (
+        10,
+        10,
+    )
+
+
+def test_skip_trim_is_threaded_into_the_marked_job_only(client, monkeypatch):
+    """One material marked, one not, in the SAME request.
+
+    Pins the mechanism: the flag is resolved in the parent into that pool's own
+    ``CuttingParameters``, so a second material in the same quote keeps the
+    shop's configured refilado.
+    """
+    from src.modules.optimizations import service as service_module
+
+    _trim_the_boards(client)
+    created_client = _create_client(client)
+    marked_board = _create_board(client, code="MEL15")
+    plain_board = _create_board(client, code="MEL12")
+
+    real = service_module.run_pool_jobs
+    seen = {}
+
+    def spy(jobs):
+        for job in jobs:
+            seen[job.material_key] = job.cutting_params
+        return real(jobs)
+
+    monkeypatch.setattr(service_module, "run_pool_jobs", spy)
+
+    resp = client.post(
+        "/api/v1/optimize/",
+        json={
+            "clientId": created_client["id"],
+            "materials": [
+                {
+                    "key": "marked",
+                    "source": "catalog",
+                    "productId": marked_board["id"],
+                    "skipTrim": True,
+                },
+                {"key": "plain", "source": "catalog", "productId": plain_board["id"]},
+            ],
+            "requirements": [
+                {
+                    "priority": 0,
+                    "height": 500,
+                    "width": 700,
+                    "quantity": 1,
+                    "materialKey": key,
+                    "label": f"Pieza {key}",
+                    "canRotate": True,
+                }
+                for key in ("marked", "plain")
+            ],
+        },
+    )
+    assert resp.status_code == 200
+
+    assert seen["marked"].top_trim == 0.0
+    assert seen["marked"].left_trim == 0.0
+    assert seen["plain"].top_trim == 10.0
+    assert seen["plain"].left_trim == 10.0
+    # The one parameter the flag must NOT touch.
+    assert seen["marked"].kerf == seen["plain"].kerf
+
+
+def test_skip_trim_reaches_the_materials_summary(client):
+    """The documents print "sin refilar" off this line, so it has to carry it."""
+    created_client = _create_client(client)
+    board = _create_board(client)
+
+    marked = client.post(
+        "/api/v1/optimize/",
+        json=_trim_payload(created_client["id"], board["id"], skip_trim=True),
+    ).json()["data"]
+    plain = client.post(
+        "/api/v1/optimize/", json=_trim_payload(created_client["id"], board["id"])
+    ).json()["data"]
+
+    assert marked["materialsSummary"][0]["skipTrim"] is True
+    assert plain["materialsSummary"][0]["skipTrim"] is False

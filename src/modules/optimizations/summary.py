@@ -56,6 +56,11 @@ def build_materials_summary(layouts: List[dict], materials: List[dict]) -> List[
                 "cost_per_unit": material.get("cost_per_unit", 0.0),
                 "total_cost": 0.0,
                 "half_board": is_half,
+                # Comes off the resolved material, not off the layout: the
+                # documents print "sin refilar" so the operator doesn't square a
+                # board the quote priced whole. Defaulted, because a payload
+                # cached before the field existed has no key.
+                "skip_trim": bool((rm or {}).get("skip_trim", False)),
             }
         entry = summary[group]
         entry["count"] += 1

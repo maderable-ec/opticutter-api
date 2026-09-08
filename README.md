@@ -11,7 +11,8 @@ dispatch.
 - **2D guillotine cutting optimizer** — a pure, framework-free domain layer
   (`src/cutting/`) that packs pieces onto boards with a selectable heuristic
   (max efficiency, or one that concentrates waste into a single reusable
-  offcut), respecting kerf and trim margins.
+  offcut), respecting kerf and trim margins — the latter per material, since
+  the seller can turn the refilado off for a given cut list.
 - **Material-source agnostic** — the optimizer accepts stock from the product
   catalog, company/client offcuts, or ad-hoc manual entries through a single
   resolver, so `cutting/` only ever deals with geometry.
