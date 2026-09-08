@@ -396,3 +396,42 @@ def test_preorder_on_client_offcuts_only_round_trips(client):
     # Two retazos hold one 900×900 each; the third piece is reported, not dropped.
     assert len(opt["layouts"]) == 2
     assert opt["unplaced"][0]["quantity"] == 1
+
+
+def test_skip_trim_survives_the_preorder_round_trip(client):
+    """A pre-order re-optimizes on every read, so the flag has to come back.
+
+    It rides inside the stored ``materials`` JSON — no column, no migration —
+    and ``build_request`` revives it by re-validating the union.
+    """
+    c, b = _setup(client)
+    payload = _order_payload(c["id"], b["id"])
+    payload["materials"][0]["skipTrim"] = True
+
+    created = client.post("/api/v1/preorders/", json=payload)
+    assert created.status_code == 201
+    preorder_id = created.json()["data"]["id"]
+
+    read = client.get(f"/api/v1/preorders/{preorder_id}").json()["data"]
+    assert read["materials"][0]["skipTrim"] is True
+    # And the recompute agrees: the summary the documents read is marked too.
+    assert read["optimization"]["materialsSummary"][0]["skipTrim"] is True
+
+
+def test_a_preorder_can_turn_the_refilado_off_after_the_fact(client):
+    """The seller changes their mind on a saved quote; the PUT re-optimizes."""
+    c, b = _setup(client)
+    created = _create_preorder(client, c, b).json()["data"]
+    assert created["materials"][0].get("skipTrim") in (False, None)
+    before = created["optimization"]["optimizationHash"]
+
+    materials = [dict(created["materials"][0], skipTrim=True)]
+    updated = client.put(
+        f"/api/v1/preorders/{created['id']}",
+        json={"materials": materials, "requirements": created["requirements"]},
+    )
+    assert updated.status_code == 200
+    data = updated.json()["data"]
+    assert data["materials"][0]["skipTrim"] is True
+    # It moves the geometry, so unlike a price mark it moves the hash too.
+    assert data["optimization"]["optimizationHash"] != before

@@ -92,6 +92,10 @@ class MaterialSummary(CamelModel):
         default=False,
         description="True if this line is a half board (length kept, width/2, cost/2)",
     )
+    skip_trim: bool = Field(
+        default=False,
+        description="True if these sheets are cut without the configured trim margins",
+    )
 
 
 class EdgeSide(str, Enum):
@@ -237,6 +241,18 @@ class CatalogMaterialInput(CamelModel):
             "when the board has no pooled offcuts. Affects geometry and the hash."
         ),
     )
+    skip_trim: bool = Field(
+        default=False,
+        description=(
+            "Whether this board is cut WITHOUT the trim margins configured in "
+            "settings, so the sheet is used edge to edge. The shop squares every "
+            "board by default, but some cut lists don't need it and the seller "
+            "decides that per job. Applies to the whole pool: this board and "
+            "every offcut whose `poolKey` points at it. Unlike `applyPriceLevel`/"
+            "`wholeBoard`, this one DOES move the geometry, so it is part of the "
+            "hash and re-runs the search."
+        ),
+    )
     apply_price_level: bool = Field(
         default=False,
         description=(
@@ -318,6 +334,18 @@ class InlineMaterialInput(CamelModel):
         ),
     )
 
+    skip_trim: bool = Field(
+        default=False,
+        description=(
+            "Whether this material is cut WITHOUT the trim margins configured in "
+            "settings. Same flag as the catalog board's: a client's retazo usually "
+            "arrives already squared, and a pool can be anchored on one. Read from "
+            "the pool's ANCHOR only — on a pooled offcut it is coerced to false, "
+            "since the anchor's setting already covers the whole pool. Affects "
+            "geometry and the hash."
+        ),
+    )
+
     @model_validator(mode="after")
     def _client_material_is_free(self) -> "InlineMaterialInput":
         """A client offcut is the client's own material: it never has a price.
@@ -328,6 +356,20 @@ class InlineMaterialInput(CamelModel):
         """
         if self.source == MaterialSource.client_offcut:
             self.cost_per_unit = 0.0
+        return self
+
+    @model_validator(mode="after")
+    def _only_the_anchor_decides_the_trim(self) -> "InlineMaterialInput":
+        """``skipTrim`` belongs to the pool, so a pooled offcut never carries it.
+
+        The service reads the flag off the anchor alone (the material the
+        requirements point at) and hands ONE ``CuttingParameters`` to the whole
+        pool. Left alone, the flag on a pooled offcut would move ``_compute_hash``
+        without moving a single piece: a second cache entry for the identical
+        plan. Coerced rather than rejected for the same reason as the rule above.
+        """
+        if self.pool_key is not None:
+            self.skip_trim = False
         return self
 
 

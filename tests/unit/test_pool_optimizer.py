@@ -445,3 +445,73 @@ def test_finite_pool_is_never_worse_than_the_sequential_fill():
     assert finite_plan_objective(layouts, unplaced) <= finite_plan_objective(
         baseline_layouts, baseline_rest
     )
+
+
+TRIMMED = CuttingParameters(
+    kerf=3, top_trim=10, bottom_trim=10, left_trim=10, right_trim=10
+)
+
+
+def test_one_parameter_set_trims_the_anchor_and_its_offcuts_alike():
+    """The premise behind ``skipTrim`` being a per-POOL flag.
+
+    ``PoolJob`` carries one ``CuttingParameters`` and ``_optimize_job`` hands the
+    same object to the catalog board and to every offcut attached to it — which
+    is why a checkbox on the group covers the retazos hanging off it without
+    ``src/cutting/`` learning that the flag exists.
+    """
+    primary = _mat("board", 2440, 1220, fill_order=PoolFillOrder.offcuts_first)
+    offcuts = [_offcut("off1", 800, 600)]
+    pieces = [
+        Piece(id="big", width=2000, height=1000),
+        Piece(id="small", width=500, height=400),
+    ]
+
+    trimmed = _pool(pieces, primary, offcuts, TRIMMED)
+    untrimmed = _pool(pieces, primary, offcuts, PARAMS)
+
+    def origin(layouts, key):
+        placed = [
+            pp for lay in layouts if lay.material.id == key for pp in lay.placed_pieces
+        ]
+        return min((pp.x, pp.y) for pp in placed)
+
+    # Trimmed, nothing may touch the edge: the first free rect starts at the trim.
+    assert origin(trimmed, "board") == (10, 10)
+    assert origin(trimmed, "off1") == (10, 10)
+    # Untrimmed, both the board and the client's retazo are used edge to edge.
+    assert origin(untrimmed, "board") == (0, 0)
+    assert origin(untrimmed, "off1") == (0, 0)
+
+
+def test_skipping_the_trims_rescues_an_offcut_they_made_unusable():
+    """A retazo smaller than twice the trim is unusable while the trims apply.
+
+    ``pool._pack_offcut`` catches the packer's "trims exceed the sheet"
+    ``ValueError`` and reports the piece as unplaced. Turning the refilado off is
+    what puts that retazo back in play — the small-retazo case the shop asked
+    for.
+    """
+    anchor = _mat("r1", 100, 100, source="clientOffcut", quantity=1)
+    pieces = [Piece(id="p1", width=80, height=80)]
+
+    _, stranded = optimize_offcut_pool(
+        pieces=pieces,
+        anchor=anchor,
+        offcuts=[],
+        cutting_params=CuttingParameters(
+            kerf=3, top_trim=60, bottom_trim=60, left_trim=60, right_trim=60
+        ),
+        strategy=PackingStrategy.MAX_EFFICIENCY,
+    )
+    assert [p.id for p in stranded] == ["p1"]
+
+    layouts, none_stranded = optimize_offcut_pool(
+        pieces=pieces,
+        anchor=anchor,
+        offcuts=[],
+        cutting_params=PARAMS,
+        strategy=PackingStrategy.MAX_EFFICIENCY,
+    )
+    assert none_stranded == []
+    assert _all_placed_ids(layouts) == ["p1"]

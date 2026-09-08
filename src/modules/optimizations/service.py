@@ -251,6 +251,23 @@ class OptimizationService:
             if not pieces:
                 # Raised here so no domain error ever crosses a process boundary.
                 raise ValidationError("La lista de piezas no puede estar vacía")
+            # ``skipTrim`` is the one cutting parameter the seller sets per job.
+            # One ``CuttingParameters`` per pool is all it takes: ``PoolJob``
+            # already carries its own, and ``_optimize_job`` hands that same
+            # object to the anchor, to every attached offcut and to the
+            # consolidation pass — which is why the flag covers the whole group
+            # without ``src/cutting/`` (or the Rust kernel) learning about it.
+            job_params = (
+                dataclasses.replace(
+                    cutting_params,
+                    top_trim=0.0,
+                    bottom_trim=0.0,
+                    left_trim=0.0,
+                    right_trim=0.0,
+                )
+                if resolved[key].skip_trim
+                else cutting_params
+            )
             jobs.append(
                 PoolJob(
                     material_key=key,
@@ -258,7 +275,7 @@ class OptimizationService:
                     material=resolved[key],
                     # Pooled offcuts: extra finite stock for this catalog board.
                     offcuts=tuple(pools.get(key) or ()),
-                    cutting_params=cutting_params,
+                    cutting_params=job_params,
                     strategy=strategy,
                     half_spec=self._half_spec(resolved[key], half_board_markup_pct),
                     budget=SearchBudget.scaled(
@@ -443,6 +460,13 @@ class OptimizationService:
                 "quantity": rm.quantity,
                 "pool_key": rm.pool_key,
                 "fill_order": rm.fill_order.value,
+                # Emitted ONLY when set, so the canonical JSON of every quote
+                # that trims normally stays byte-identical to the one this hash
+                # produced before the flag existed — a new key with a ``False``
+                # value would invalidate every entry in Redis on deploy for a
+                # geometry that did not move. ``ENGINE_VERSION`` stays put for
+                # the same reason.
+                **({"skip_trim": True} if rm.skip_trim else {}),
             }
             for key, rm in resolved.items()
         }

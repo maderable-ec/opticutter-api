@@ -102,3 +102,19 @@ def test_zero_area_does_not_divide_by_zero():
     layout = _layout()
     layout["material"]["area"] = 0.0
     assert build_materials_summary([layout], [_catalog()])[0]["avg_efficiency"] == 0.0
+
+
+def test_the_untrimmed_mark_rides_from_the_material_to_the_line():
+    """``skip_trim`` is a property of the material, not of the layout.
+
+    The render layer is DB-free, so anything the PDFs print about a material has
+    to be denormalized into the payload — the summary is where it lands.
+    """
+    lines = build_materials_summary([_layout()], [dict(_catalog(), skip_trim=True)])
+    assert lines[0]["skip_trim"] is True
+
+
+def test_a_payload_that_predates_the_mark_reads_as_trimmed():
+    """Orders keep their snapshot forever; a missing key is not a missing board."""
+    lines = build_materials_summary([_layout()], [_catalog()])
+    assert lines[0]["skip_trim"] is False

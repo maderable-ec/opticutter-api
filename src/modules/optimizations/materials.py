@@ -54,6 +54,12 @@ class ResolvedMaterial:
     quantity: Optional[int] = None
     pool_key: Optional[str] = None
     fill_order: PoolFillOrder = PoolFillOrder.auto
+    # Whether this material's sheets are cut without the configured trim
+    # margins. A property of the POOL, read off its anchor: the service builds
+    # one ``CuttingParameters`` per job from this, so it covers the anchor and
+    # every offcut attached to it. Always ``False`` on a pooled offcut (the
+    # schema coerces it there).
+    skip_trim: bool = False
     # The catalog's reduced price levels, ``None`` when the vendor never loaded
     # them. Deliberately NOT serialized by ``to_dict``: baking them into the
     # cached payload would let a catalog price edit stay invisible for a whole
@@ -93,6 +99,12 @@ class ResolvedMaterial:
             "height": self.height,
             "thickness": self.thickness,
             "cost_per_unit": self.cost_per_unit,
+            # Printed on the documents ("sin refilar"): the render layer is
+            # DB-free, so anything a PDF has to say about a material is
+            # denormalized into the payload here. A payload carrying the flag is
+            # always a fresh compute (the flag is in the hash), so no cached
+            # entry can be marked and missing the key — readers still default it.
+            "skip_trim": self.skip_trim,
         }
 
 
@@ -128,6 +140,7 @@ class MaterialResolver:
             code=product.code,
             name=product.name,
             fill_order=material.fill_order,
+            skip_trim=material.skip_trim,
             price_2=product.price_2,
             price_3=product.price_3,
         )
@@ -154,4 +167,5 @@ class MaterialResolver:
             name=material.label,
             quantity=(material.quantity or 1) if is_offcut else None,
             pool_key=material.pool_key,
+            skip_trim=material.skip_trim,
         )

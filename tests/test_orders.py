@@ -1163,3 +1163,44 @@ def test_timestamps_are_serialized_as_utc(client, db_session):
         assert row[field].endswith("Z"), f"{field} = {row[field]!r}"
     # Nested models inherit it, and keep their camelCase aliases.
     assert row["history"][0]["createdAt"].endswith("Z")
+
+
+def test_two_orders_differing_only_in_skip_trim_are_not_duplicates(client, db_session):
+    """This flag IS in the hash, so the dedupe separates them without help.
+
+    The mirror of ``wholeBoard``, which needs the subtotal to tell two orders
+    apart because it never reaches the hash.
+    """
+    c = _create_client(client)
+    b = _create_board(client)
+
+    trimmed = _order_payload(c["id"], b["id"])
+    untrimmed = _order_payload(c["id"], b["id"])
+    untrimmed["materials"][0]["skipTrim"] = True
+
+    first = _mint_order(db_session, trimmed)
+    second = _mint_order(db_session, untrimmed)
+    assert first.id != second.id
+    assert first.optimization_hash != second.optimization_hash
+
+    # Idempotency is untouched.
+    assert _mint_order(db_session, untrimmed).id == second.id
+
+
+def test_order_snapshot_keeps_the_refilado_decision(client, db_session):
+    """The order freezes it, so the documents keep saying "sin refilar" forever."""
+    c = _create_client(client)
+    b = _create_board(client)
+
+    payload = _order_payload(c["id"], b["id"])
+    payload["materials"][0]["skipTrim"] = True
+    order = _mint_order(db_session, payload)
+
+    materials = order.optimization_snapshot["materials"]
+    assert materials[0]["skip_trim"] is True
+    assert order.optimization_snapshot["materials_summary"][0]["skip_trim"] is True
+
+    # And the PDF still renders with the mark in it.
+    resp = client.get(f"/api/v1/orders/{order.id}/document")
+    assert resp.status_code == 200
+    assert resp.content[:4] == b"%PDF"

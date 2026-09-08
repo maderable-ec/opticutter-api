@@ -365,3 +365,34 @@ def test_one_worker_reports_the_in_process_path(monkeypatch):
     monkeypatch.setattr(config, "OPT_POOL_WORKERS", 1)
 
     assert runs_in_process([_job("a"), _job("b")]) is True
+
+
+def test_an_untrimmed_job_crosses_the_pickle_boundary_intact():
+    """``skipTrim`` reaches the worker as the job's own ``CuttingParameters``.
+
+    The service resolves the flag in the parent and ships zeroed trims, so the
+    child never has to know the flag exists — but the parameters it packs with
+    have to survive the trip byte for byte, or the two paths would produce
+    different geometry for the same hash.
+    """
+    material = _mat("board")
+    material.skip_trim = True
+    job = PoolJob(
+        material_key="board",
+        pieces=_pieces("board", 4),
+        material=material,
+        offcuts=(_offcut("scrap", 600.0, 400.0),),
+        cutting_params=CuttingParameters(
+            kerf=3, top_trim=0.0, bottom_trim=0.0, left_trim=0.0, right_trim=0.0
+        ),
+        strategy=PackingStrategy.MAX_EFFICIENCY,
+        half_spec=None,
+        budget=BUDGET,
+        seed=0,
+        exact_config=NO_EXACT,
+    )
+
+    restored = pickle.loads(pickle.dumps(job))
+    assert restored == job
+    assert restored.material.skip_trim is True
+    assert restored.cutting_params.top_trim == 0.0
