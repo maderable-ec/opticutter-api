@@ -674,14 +674,10 @@ def test_order_document_with_edge_banding_renders(client, db_session):
     assert document.status_code == 200
     assert len(document.content) > 1000
 
-    sheet = client.get(f"/api/v1/orders/{order['id']}/production-sheet")
-    assert sheet.status_code == 200
-    assert len(sheet.content) > 1000
 
-
-def test_production_sheet_renders_soft_and_hard_bands(client, db_session):
-    """The production sheet (B/W) renders pieces with soft and hard edges: exercises
-    the hard-edge hatching and both legend entries. The summary exposes bandType."""
+def test_the_diagram_renders_soft_and_hard_bands(client, db_session):
+    """The B/W cut diagram renders pieces with soft and hard edges: exercises the
+    hard-edge hatching and both legend entries. The summary exposes bandType."""
     c = _create_client(client)
     b = _create_board(client)
     soft = _create_edge_banding(client, code="TAP-SOFT", price=2.0, band_type="Soft")
@@ -706,6 +702,6 @@ def test_production_sheet_renders_soft_and_hard_bands(client, db_session):
     assert by_code["TAP-HARD"]["bandType"] == "Hard"
 
     order = _mint_order(client, db_session, payload)
-    sheet = client.get(f"/api/v1/orders/{order['id']}/production-sheet")
-    assert sheet.status_code == 200
-    assert len(sheet.content) > 1000
+    packet = client.get(f"/api/v1/orders/{order['id']}/document")
+    assert packet.status_code == 200
+    assert len(packet.content) > 1000

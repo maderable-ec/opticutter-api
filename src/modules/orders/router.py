@@ -6,12 +6,7 @@ from fastapi import APIRouter, Depends, File, Query, UploadFile
 from fastapi.responses import StreamingResponse
 
 from src.modules.optimizations.carrier import DocumentCarrier
-from src.modules.optimizations.documents import (
-    DocumentService,
-    attachment_to_pdf_part,
-    merge_pdfs,
-    pdf_response,
-)
+from src.modules.optimizations.documents import build_order_packet, pdf_response
 from src.modules.orders import attachment_storage
 from src.modules.orders.attachment_service import (
     AttachmentService,
@@ -49,10 +44,10 @@ from src.shared.responses import (
 
 router = APIRouter(prefix="/orders", tags=["orders"], responses=ERROR_RESPONSES)
 
-# Read/documents: admin + seller + operator. Write (create, invoice, export):
+# Read/document: admin + seller + operator. Write (create, invoice, export):
 # admin + seller. State transition: admin + seller + operator (TRANSITION_ROLES
-# filters by specific transition in the service). Cutting plan (view + production
-# sheet): admin + seller + operator. Marking pieces: admin + operator.
+# filters by specific transition in the service). Cutting plan: admin + seller +
+# operator. Marking pieces: admin + operator.
 _READ = Depends(require_permission("orders:read"))
 _WRITE = Depends(require_permission("orders:write"))
 _CUTTING = Depends(require_permission("cutting_plan"))
@@ -356,91 +351,25 @@ def get_order_document(
     order_id: int,
     format: str = _FORMAT_QUERY,
     svc: OrderService = Depends(order_service),
-    settings_svc: SettingsService = Depends(settings_service),
-    branch_scope: Optional[int] = Depends(get_branch_scope),
-):
-    """Order document (committed document, frozen prices) from the snapshot.
-
-    Not a proforma (non-binding quote): it's the document for an already
-    confirmed order, hence the header reads "ORDEN DE PEDIDO".
-    """
-    order = svc.get_scoped_or_404(order_id, branch_scope)
-    carrier = DocumentCarrier.from_order(order, company=settings_svc.get_company())
-    pdf_buffer = DocumentService.generate_order_document_pdf(
-        carrier, title="ORDEN DE PEDIDO"
-    )
-    return pdf_response(
-        pdf_buffer, f"orden_pedido_{order.code or order.id}.pdf", format
-    )
-
-
-@router.get("/{order_id}/production-sheet", dependencies=[_CUTTING])
-def get_order_production_sheet(
-    order_id: int,
-    format: str = _FORMAT_QUERY,
-    svc: OrderService = Depends(order_service),
-    settings_svc: SettingsService = Depends(settings_service),
-    branch_scope: Optional[int] = Depends(get_branch_scope),
-):
-    """Production sheet (cut list and layout, NO prices) for the workshop."""
-    order = svc.get_scoped_or_404(order_id, branch_scope)
-    carrier = DocumentCarrier.from_order(order, company=settings_svc.get_company())
-    pdf_buffer = DocumentService.generate_production_sheet_pdf(carrier)
-    return pdf_response(pdf_buffer, f"produccion_{order.code or order.id}.pdf", format)
-
-
-@router.get("/{order_id}/dispatch-sheet", dependencies=[_READ])
-def get_order_dispatch_sheet(
-    order_id: int,
-    format: str = _FORMAT_QUERY,
-    svc: OrderService = Depends(order_service),
-    settings_svc: SettingsService = Depends(settings_service),
-    branch_scope: Optional[int] = Depends(get_branch_scope),
-):
-    """Dispatch sheet (handover to the client): pieces with NO prices, a liability
-    disclaimer and signatures. Shows the snapshot's dispatch date/responsible party."""
-    order = svc.get_scoped_or_404(order_id, branch_scope)
-    carrier = DocumentCarrier.from_order(order, company=settings_svc.get_company())
-    pdf_buffer = DocumentService.generate_dispatch_sheet_pdf(carrier)
-    return pdf_response(pdf_buffer, f"despacho_{order.code or order.id}.pdf", format)
-
-
-@router.get("/{order_id}/consolidated", dependencies=[_READ])
-def get_order_consolidated(
-    order_id: int,
-    format: str = _FORMAT_QUERY,
-    svc: OrderService = Depends(order_service),
     att_svc: AttachmentService = Depends(attachment_service),
     settings_svc: SettingsService = Depends(settings_service),
     branch_scope: Optional[int] = Depends(get_branch_scope),
 ):
-    """Consolidated print packet: one PDF for the printer.
+    """The order's ONLY document, as one PDF ready for the printer.
 
-    Merges, in order: the order document (ORDEN DE PEDIDO, with the cut list and
-    materials but without its embedded diagram), the cut diagram only (DIAGRAMA DE
-    DESPIECE — just the gráfico, no repeated piece/board lists), the dispatch sheet,
+    Merges the ORDEN DE PEDIDO (frozen prices from the snapshot, plus the
+    delivery block the client signs), the cut diagram on its own landscape pages,
     and every attachment (PDFs as-is, screenshots wrapped one per page).
+
+    It is a committed document, not a proforma: the mutable quote lives on the
+    pre-order and has no PDF of its own.
     """
     order = svc.get_scoped_or_404(order_id, branch_scope)
     carrier = DocumentCarrier.from_order(order, company=settings_svc.get_company())
-    parts = [
-        DocumentService.generate_order_document_pdf(
-            carrier, title="ORDEN DE PEDIDO", include_diagram=False
-        ),
-        DocumentService.generate_diagram_pdf(carrier),
-        DocumentService.generate_dispatch_sheet_pdf(carrier),
-    ]
-    for att in att_svc.list_attachments(order_id, branch_scope=branch_scope):
-        try:
-            data = attachment_storage.read(att.stored_key)
-        except OSError:
-            continue  # file missing on disk: skip, still print the rest
-        part = attachment_to_pdf_part(data, att.content_type)
-        if part is not None:
-            parts.append(part)
-
-    merged = merge_pdfs(parts)
-    return pdf_response(merged, f"consolidado_{order.code or order.id}.pdf", format)
+    packet = build_order_packet(
+        carrier, att_svc.iter_annex_bytes(order_id, branch_scope=branch_scope)
+    )
+    return pdf_response(packet, f"orden_pedido_{order.code or order.id}.pdf", format)
 
 
 # --------------------------------------------------------------------------- #

@@ -1,6 +1,6 @@
 import io
 from dataclasses import dataclass
-from typing import Optional, Set, Tuple
+from typing import List, Optional, Set, Tuple
 
 from PIL import Image, ImageColor, ImageDraw, ImageFont
 
@@ -73,6 +73,19 @@ PIECE_OUTLINE_WIDTH = 2
 EDGE_BANDING_WIDTH = PIECE_OUTLINE_WIDTH + 5
 # Step (px) of the diagonal hatching that distinguishes hard edge banding in mono mode.
 HATCH_STEP = 6
+
+# The header strip above the board: legend, then the board's name. Its height is
+# DERIVED from the text it holds (see ``generate_layout_image``) rather than
+# reserved as a fixed 150px — that number was sized for a 36px header face, so
+# every later trim to the fonts left the gaps behind, floating the name in the
+# middle of an empty band.
+LEGEND_BOX = 32  # swatch side
+LEGEND_TEXT_GAP = 12  # swatch → its text
+LEGEND_ITEM_GAP = 50  # one entry → the next
+LEGEND_ROW_GAP = 16  # a wrapped legend row → the next
+LEGEND_TOP = 24  # canvas top → legend
+HEADER_GAP_ABOVE = 16  # legend → board name
+HEADER_GAP_BELOW = 14  # board name → the board itself
 
 
 @dataclass(frozen=True)
@@ -271,6 +284,19 @@ def _text_size(text: str, font: ImageFont.ImageFont) -> Tuple[int, int]:
     return bbox[2] - bbox[0], bbox[3] - bbox[1]
 
 
+def _text_bounds(text: str, font: ImageFont.ImageFont) -> Tuple[int, int, int]:
+    """``(width, top, bottom)`` of the text RELATIVE to the anchor point.
+
+    ``draw.text((x, y), …)`` anchors on the font's ascent, not on the glyphs, so
+    a line drawn at ``y`` actually inks from ``y + top`` to ``y + bottom`` — with
+    ``top`` often a third of the size. Measuring the glyph box alone (what
+    ``_text_size`` returns) and treating it as the line's height is what made the
+    header's gaps come out smaller than the numbers that set them.
+    """
+    bbox = ImageDraw.Draw(Image.new("RGBA", (1, 1))).textbbox((0, 0), text, font=font)
+    return bbox[2] - bbox[0], bbox[1], bbox[3]
+
+
 def _text_image(
     text: str, font: ImageFont.ImageFont, fill: str, pad: int = 2
 ) -> Image.Image:
@@ -295,6 +321,66 @@ def _fit_label(
     while truncated and _text_size(truncated + "…", font)[0] > max_width:
         truncated = truncated[:-1]
     return (truncated + "…") if truncated else None
+
+
+def _legend_entries(
+    theme: "_DiagramTheme", mono: bool, band_types: Set[str]
+) -> List[Tuple[str, str, int, str, str]]:
+    """The legend's entries: ``(fill, outline, width, text, swatch)``.
+
+    ``swatch`` is ``""`` for a plain box, ``"hatch"`` for the hard-edge hatching
+    or ``"grain"`` for the veta. In monochrome the two banding types get one
+    entry each (only hatching tells them apart with no colour); branded mode uses
+    a single "Lado canteado".
+    """
+    entries = [
+        (theme.piece_fill, theme.piece_outline, PIECE_OUTLINE_WIDTH, "Pieza", ""),
+        (
+            theme.waste_fill,
+            theme.waste_outline,
+            PIECE_OUTLINE_WIDTH,
+            "Retazo / Desperdicio",
+            "",
+        ),
+        ("white", theme.board_outline, 1, "Veta", "grain"),
+    ]
+    if mono:
+        if "Soft" in band_types:
+            entries.append((theme.edge, theme.edge, 1, "Canto suave", ""))
+        if "Hard" in band_types:
+            entries.append(("white", theme.edge, 1, "Canto duro", "hatch"))
+    elif band_types:
+        entries.append(("white", theme.edge, EDGE_BANDING_WIDTH, "Lado canteado", ""))
+    return entries
+
+
+def _legend_layout(
+    entries: List[Tuple[str, str, int, str, str]],
+    font: ImageFont.ImageFont,
+    x0: int,
+    y0: int,
+    max_x: Optional[int] = None,
+) -> Tuple[List[Tuple[int, int]], int]:
+    """Top-left corner of each entry's swatch, plus the legend's bottom edge.
+
+    Split out from the drawing so the canvas can be sized BEFORE it is created:
+    the header's height follows the legend's, and the legend wraps to a second
+    row on a narrow board. One implementation, so the measure and the drawing
+    cannot disagree about where an entry lands.
+    """
+    positions: List[Tuple[int, int]] = []
+    x, y = x0, y0
+    for _, _, _, text, _ in entries:
+        tw, _ = _text_size(text, font)
+        if (
+            max_x is not None
+            and x > x0
+            and x + LEGEND_BOX + LEGEND_TEXT_GAP + tw > max_x
+        ):
+            x, y = x0, y + LEGEND_BOX + LEGEND_ROW_GAP
+        positions.append((x, y))
+        x += LEGEND_BOX + LEGEND_TEXT_GAP + tw + LEGEND_ITEM_GAP
+    return positions, y + LEGEND_BOX
 
 
 def _draw_remainder_labels(
@@ -343,7 +429,10 @@ def _draw_remainder_labels(
 class VisualizationService:
     @staticmethod
     def generate_layout_image(
-        group: dict, target_long: int = 2000, mono: bool = False
+        group: dict,
+        target_long: int = 2000,
+        mono: bool = False,
+        board_name: Optional[str] = None,
     ) -> Tuple[io.BytesIO, Tuple[int, int]]:
         """Draws a single cutting pattern filling the whole canvas.
 
@@ -354,6 +443,13 @@ class VisualizationService:
         color) when they are large enough to hold the text. The wood grain is laid
         over the finished board. Returns the PNG buffer and its dimensions in px
         so it can be embedded preserving the aspect ratio.
+
+        ``board_name`` is the material's printed name, resolved by the caller off
+        the payload's ``materials_summary`` (the render layer never touches the
+        DB). The header said "Tablero 1", a pattern index that means nothing at
+        the saw: on a multi-material job the operator has to know WHICH board this
+        pattern is cut on. Falls back to the old label when the name is unknown —
+        a snapshot from before the summary carried it, say.
         """
         layout = group.get("layout", group)
         count = group.get("count", 1)
@@ -362,7 +458,6 @@ class VisualizationService:
         board_height = material.get("height", 2440)
 
         margin = 60
-        info_height = 150
 
         # The board is drawn rotated 90° clockwise (landscape): the board's height
         # becomes the canvas's horizontal extent and its width the vertical one.
@@ -371,20 +466,19 @@ class VisualizationService:
         scaled_board_height = int(board_width * scale)
 
         canvas_width = scaled_board_width + 2 * margin
-        canvas_height = info_height + scaled_board_height + 2 * margin
 
-        img = Image.new("RGB", (canvas_width, canvas_height), color="white")
-        draw = ImageDraw.Draw(img)
-
-        header_font = _load_font(36)
+        # The header now carries the board's full name instead of "Tablero 1",
+        # so it is set smaller than the index was: a long melamine name has to
+        # fit on the line next to the dimensions and the efficiency.
+        header_font = _load_font(18)
         # Dimensions and labels are deliberately smaller than the canvas would
-        # suggest: the diagram now prints on a landscape sheet at ~1.47x the old
+        # suggest: the diagram prints on a landscape sheet at ~1.47x the old
         # scale, so these still come out larger on paper than before (~7.6pt and
         # ~8.7pt vs 6.4pt and 7.4pt), and the smaller face lets ``_fit_label``
         # keep labels that used to be dropped for not fitting.
         dim_font = _load_font(21)
         label_font = _load_font(24)
-        legend_font = _load_font(32)
+        legend_font = _load_font(16)
 
         theme = _MONO_THEME if mono else _BRAND_THEME
 
@@ -397,11 +491,35 @@ class VisualizationService:
                 bt = edges.get("band_type")
                 band_types.add(bt if bt in ("Soft", "Hard") else "Soft")
 
+        badge = f"  ·  ×{count}" if count > 1 else ""
+        name = board_name or f"Tablero {group.get('pattern_id', 1)}"
+        board_label = f"{name}{badge}  ·  {int(board_height)}×{int(board_width)} mm"
+        label_w, label_top, label_bottom = _text_bounds(board_label, header_font)
+
+        # The header band is measured, not reserved: legend, gap, name, gap. Both
+        # gaps used to be whatever was left over inside a fixed 150px band, so
+        # trimming the fonts only made the empty space bigger. ``label_top`` is
+        # subtracted back out so the two constants are the INKED gaps, the ones
+        # the eye sees, not distances to an invisible anchor line.
+        _, legend_bottom = _legend_layout(
+            _legend_entries(theme, mono, band_types),
+            legend_font,
+            margin,
+            LEGEND_TOP,
+            canvas_width - margin,
+        )
+        label_y = legend_bottom + HEADER_GAP_ABOVE - label_top
+        info_height = label_y + label_bottom + HEADER_GAP_BELOW
+        canvas_height = info_height + scaled_board_height + 2 * margin
+
+        img = Image.new("RGB", (canvas_width, canvas_height), color="white")
+        draw = ImageDraw.Draw(img)
+
         VisualizationService._draw_legend(
             img,
             draw,
             margin,
-            24,
+            LEGEND_TOP,
             legend_font,
             theme,
             mono=mono,
@@ -412,16 +530,10 @@ class VisualizationService:
         board_x = margin
         board_y = info_height
 
-        badge = f"  ·  ×{count}" if count > 1 else ""
-        board_label = (
-            f"Tablero {group.get('pattern_id', 1)}{badge}  ·  "
-            f"{int(board_height)}×{int(board_width)} mm"
-        )
-        draw.text((board_x, board_y - 48), board_label, fill="black", font=header_font)
-        label_w, _ = _text_size(board_label, header_font)
+        draw.text((board_x, label_y), board_label, fill="black", font=header_font)
         efficiency = layout.get("statistics", {}).get("efficiency", 0)
         draw.text(
-            (board_x + label_w + 30, board_y - 48),
+            (board_x + label_w + 30, label_y),
             f"Eficiencia: {efficiency:.1f}%",
             fill=theme.efficiency,
             font=header_font,
@@ -529,45 +641,13 @@ class VisualizationService:
         (hatched swatch) based on the types present; branded mode uses a single
         "Lado canteado" entry. Wraps to a new row when an entry would overflow ``max_x``.
         """
-        band_types = band_types or set()
-        # entries: (fill, outline, width, text, swatch) where swatch is "" for a
-        # plain box, "hatch" for the hard-edge hatching or "grain" for the veta.
-        legend = [
-            (
-                theme.piece_fill,
-                theme.piece_outline,
-                PIECE_OUTLINE_WIDTH,
-                "Pieza",
-                "",
-            ),
-            (
-                theme.waste_fill,
-                theme.waste_outline,
-                PIECE_OUTLINE_WIDTH,
-                "Retazo / Desperdicio",
-                "",
-            ),
-            ("white", theme.board_outline, 1, "Veta", "grain"),
-        ]
-        if mono:
-            if "Soft" in band_types:
-                legend.append((theme.edge, theme.edge, 1, "Canto suave", ""))
-            if "Hard" in band_types:
-                legend.append(("white", theme.edge, 1, "Canto duro", "hatch"))
-        elif band_types:
-            legend.append(
-                ("white", theme.edge, EDGE_BANDING_WIDTH, "Lado canteado", "")
-            )
+        legend = _legend_entries(theme, mono, band_types or set())
+        positions, _ = _legend_layout(legend, legend_font, x, y, max_x)
 
         text_color = theme.label if mono else "black"
-        box = 32
-        start_x = x
-        for fill, outline, width, text, swatch in legend:
-            tw, th = _text_size(text, legend_font)
-            item_w = box + 12 + tw + 50
-            if max_x is not None and x > start_x and x + box + 12 + tw > max_x:
-                x = start_x
-                y += box + 16
+        box = LEGEND_BOX
+        for (fill, outline, width, text, swatch), (x, y) in zip(legend, positions):
+            _, th = _text_size(text, legend_font)
             if swatch == "hatch":
                 _draw_edge_strip(img, draw, (x, y, x + box, y + box), outline, True)
             else:
@@ -587,12 +667,11 @@ class VisualizationService:
                             width=1,
                         )
             draw.text(
-                (x + box + 12, y + (box - th) // 2),
+                (x + box + LEGEND_TEXT_GAP, y + (box - th) // 2),
                 text,
                 fill=text_color,
                 font=legend_font,
             )
-            x += item_w
 
     @staticmethod
     def _draw_piece(

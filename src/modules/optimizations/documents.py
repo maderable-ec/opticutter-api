@@ -3,7 +3,7 @@ import io
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import Iterable, List, Optional, Tuple, Union
 from xml.sax.saxutils import escape
 
 from fastapi.responses import StreamingResponse
@@ -21,7 +21,6 @@ from reportlab.platypus import (
     HRFlowable,
     Image,
     KeepTogether,
-    NextPageTemplate,
     PageBreak,
     PageTemplate,
     Paragraph,
@@ -31,7 +30,7 @@ from reportlab.platypus import (
 )
 
 from src.modules.optimizations.carrier import DocumentCarrier
-from src.modules.optimizations.labels import BAND_TYPE_LABEL, edge_banding_notation
+from src.modules.optimizations.labels import edge_banding_notation
 from src.modules.optimizations.patterns import group_layouts
 from src.modules.optimizations.schemas import MaterialSource
 from src.modules.optimizations.visualization import VisualizationService
@@ -47,8 +46,7 @@ TEXT_GREY = colors.HexColor("#424242")
 
 @dataclass(frozen=True)
 class Palette:
-    """Themed colors for a PDF. Lets the order document go branded and the production
-    sheet stay black and white while reusing the same builders."""
+    """Themed colors for a PDF: table headers, section rules and the totals box."""
 
     accent: colors.Color  # table header, section rule, totals border
     accent_fill: colors.Color  # totals box / TOTAL row background
@@ -58,8 +56,9 @@ class Palette:
     header_text: colors.Color  # text over the table header
 
 
-# Commercial document (ORDEN DE PEDIDO): brand palette. Production sheet: monochrome for the
-# workshop (black header with white text, legible when printed/photocopied in B/W).
+# The only document the order emits (ORDEN DE PEDIDO) is branded. The monochrome
+# sibling died with the production sheet; the B/W cut diagram gets its greys from
+# ``visualization._MONO_THEME``, not from here.
 BRAND_PALETTE = Palette(
     accent=BRAND_CORAL,
     accent_fill=LIGHT_CORAL,
@@ -68,14 +67,6 @@ BRAND_PALETTE = Palette(
     zebra=ZEBRA_GREY,
     header_text=colors.whitesmoke,
 )
-MONO_PALETTE = Palette(
-    accent=BRAND_BLACK,
-    accent_fill=colors.HexColor("#EAEAEA"),
-    text=BRAND_BLACK,
-    text_grey=colors.HexColor("#333333"),
-    zebra=colors.HexColor("#F2F2F2"),
-    header_text=colors.white,
-)
 
 PAGE_WIDTH, PAGE_HEIGHT = A4
 LEFT_MARGIN = RIGHT_MARGIN = 0.5 * inch
@@ -83,6 +74,29 @@ CONTENT_WIDTH = PAGE_WIDTH - LEFT_MARGIN - RIGHT_MARGIN
 
 TOP_MARGIN = 0.4 * inch
 BOTTOM_MARGIN = 0.45 * inch
+
+# Typography and spacing of the ORDEN DE PEDIDO, gathered here rather than left
+# inline in each builder: the document has to carry the piece list, the money, the
+# disclaimer and the signatures on as few sheets as possible, and how tight it
+# runs is one decision, retuned by looking at a printed sheet. Everything below is
+# in points.
+FOOTER_BASELINE = 0.35 * inch  # running footer, stamped on the merged packet
+
+BODY_SIZE = 8  # table cells
+HEADER_SIZE = 9  # table header row
+CELL_LEADING = 9.5  # wrapped cells (Paragraph inside a table)
+ROW_PAD = 2  # above and below every table row
+CLIENT_SIZE = 8.5  # the client block, which is read at a glance
+CLIENT_PAD = 1.5
+TOTALS_SIZE = 9  # totals box and FORMA DE PAGO
+TOTALS_PAD = 2.5
+SECTION_SIZE = 10.5  # section titles
+SECTION_LEADING = 12  # explicit: Heading2 would hand down ~17.2 for a 13pt letter
+BLOCK_SPACER = 0.07 * inch  # between one section and the next
+# The one gap that is deliberately NOT tight: the disclaimer is what the client
+# is signing under, and running the signature lines up against it reads as one
+# block of small print.
+SIGNATURE_GAP = 0.3 * inch
 
 # Cut diagrams print on landscape sheets: the PNG is already drawn with the board
 # rotated 90 degrees (see ``visualization.generate_layout_image``), so a portrait
@@ -104,8 +118,9 @@ ICON_WHATSAPP = ASSETS_DIR / "whatsapp.jpg"
 ICON_EMAIL = ASSETS_DIR / "email.jpg"
 ICON_ADDRESS = ASSETS_DIR / "address.jpg"
 
-# Dispatch sheet disclaimer: by signing it the client accepts the goods as
-# delivered in good order and releases the company from later claims.
+# Delivery disclaimer, printed above the signatures: by signing it the client
+# accepts the goods as delivered in good order and releases the company from later
+# claims.
 DISPATCH_DISCLAIMER = (
     "Con la firma de este documento, el cliente declara haber recibido y revisado a "
     "entera conformidad las piezas detalladas, verificando cantidades, medidas, color "
@@ -175,41 +190,24 @@ def _page_size(doc) -> tuple:
     return getattr(doc.pageTemplate, "pagesize", None) or doc.pagesize
 
 
-def _draw_footer_line(canvas, page_width: float) -> None:
-    """Generation date on the left, page number on the right margin."""
-    canvas.setFont("Helvetica", 8)
-    canvas.setFillColor(colors.grey)
-    canvas.drawString(
-        LEFT_MARGIN,
-        0.35 * inch,
-        f"Generado el {datetime.now().strftime('%d/%m/%Y %H:%M')}",
-    )
-    canvas.drawRightString(
-        page_width - RIGHT_MARGIN,
-        0.35 * inch,
-        f"Página {canvas.getPageNumber()}",
-    )
-
-
 def _draw_page_decoration(canvas, doc) -> None:
-    """Watermark, footer accent and generation/page line on every sheet."""
+    """Watermark and footer accent on every sheet of the ORDEN DE PEDIDO.
+
+    The footer *text* is not drawn here: it is stamped on the merged packet by
+    ``stamp_packet_footer``, which is the only place that knows the real page
+    count. A document that numbered its own pages restarted at 1 halfway through
+    the printout, once for the order and again for the diagram.
+    """
     page_width, page_height = _page_size(doc)
     canvas.saveState()
     _draw_watermark(canvas, page_width, page_height)
     _draw_footer_accent(canvas, page_width)
-    _draw_footer_line(canvas, page_width)
     canvas.restoreState()
 
 
-def _draw_page_decoration_plain(canvas, doc) -> None:
-    """Minimal footer for the production sheet: only generation date and page.
-
-    No watermark or footer band (the workshop sheet is black and white).
-    """
-    page_width, _ = _page_size(doc)
-    canvas.saveState()
-    _draw_footer_line(canvas, page_width)
-    canvas.restoreState()
+def _no_decoration(canvas, doc) -> None:
+    """The diagram pages carry nothing of their own: a diagram claims the whole
+    sheet, and the footer arrives with the packet's stamp."""
 
 
 class _CutterDoc(BaseDocTemplate):
@@ -275,19 +273,15 @@ class _CutterDoc(BaseDocTemplate):
 
 class DocumentService:
     @staticmethod
-    def generate_order_document_pdf(
-        carrier: DocumentCarrier,
-        title: str = "ORDEN DE PEDIDO",
-        include_diagram: bool = True,
-    ) -> io.BytesIO:
-        """Commercial document: requirements, priced materials and layout.
+    def generate_order_document_pdf(carrier: DocumentCarrier) -> io.BytesIO:
+        """The order's ONLY document: client, pieces, priced materials, the money,
+        and the delivery block the client signs on handover.
 
-        ``title`` is a parameter, not a constant, so the header label can be
-        retitled by the caller.
-
-        ``include_diagram=False`` drops the cut-layout pages: used by the
-        consolidated print packet, where the diagram lives once in the production
-        sheet and would otherwise be duplicated here.
+        It carries no diagram of its own: the cut layout travels as its own
+        landscape pages inside ``build_order_packet``, which is what the endpoint
+        and the print queue both serve. The dispatch sheet used to repeat the
+        piece list, the payment block and the letterhead just to carry the last
+        three blocks here; it is gone.
         """
         buffer = io.BytesIO()
         doc = _CutterDoc(buffer, _draw_page_decoration)
@@ -297,16 +291,17 @@ class DocumentService:
         cell_style = _cell_style(styles)
 
         story = []
-        story.extend(DocumentService._build_header(carrier, styles, title))
-        story.append(Spacer(1, 0.15 * inch))
+        story.extend(DocumentService._build_header(carrier, styles))
+        story.append(Spacer(1, BLOCK_SPACER))
 
         story.extend(_section("INFORMACIÓN DEL CLIENTE", heading_style))
         story.append(DocumentService._build_client_table(carrier))
-        story.append(Spacer(1, 0.15 * inch))
+        story.append(DocumentService._dispatch_line(carrier, styles))
+        story.append(Spacer(1, BLOCK_SPACER))
 
         story.extend(_section("DETALLE DE REQUERIMIENTOS", heading_style))
         story.append(DocumentService._build_requirements_table(carrier, cell_style))
-        story.append(Spacer(1, 0.15 * inch))
+        story.append(Spacer(1, BLOCK_SPACER))
 
         # Omitted outright when nothing is billed — a job cut entirely on the
         # client's material would otherwise print a "RESUMEN DE MATERIALES"
@@ -315,7 +310,7 @@ class DocumentService:
         if _billable_material_rows(carrier) or carrier.edge_bandings_summary:
             story.extend(_section("RESUMEN DE MATERIALES", heading_style))
             story.append(DocumentService._build_materials_table(carrier, cell_style))
-            story.append(Spacer(1, 0.15 * inch))
+            story.append(Spacer(1, BLOCK_SPACER))
 
         # The client's own retazos: listed so the document says what was cut, but
         # never priced. Putting them in the table above would fill a Subtotal
@@ -329,21 +324,21 @@ class DocumentService:
                     client_material, cell_style
                 )
             )
-            story.append(Spacer(1, 0.15 * inch))
+            story.append(Spacer(1, BLOCK_SPACER))
 
         if carrier.additional_services:
             story.extend(_section("SERVICIOS ADICIONALES", heading_style))
             story.append(DocumentService._build_services_table(carrier, cell_style))
-            story.append(Spacer(1, 0.15 * inch))
+            story.append(Spacer(1, BLOCK_SPACER))
 
         story.append(DocumentService._build_totals_table(carrier))
 
         payment_block = DocumentService._payment_section(carrier, heading_style)
         if payment_block:
-            story.append(Spacer(1, 0.15 * inch))
+            story.append(Spacer(1, BLOCK_SPACER))
             story.extend(payment_block)
 
-        story.append(Spacer(1, 0.18 * inch))
+        story.append(Spacer(1, BLOCK_SPACER))
         story.append(
             Paragraph(
                 "Valores en USD. Los precios no incluyen IVA; "
@@ -351,168 +346,17 @@ class DocumentService:
                 ParagraphStyle(
                     "Note",
                     parent=styles["Normal"],
-                    fontSize=8,
+                    fontSize=7.5,
+                    leading=9,
                     textColor=colors.grey,
                     alignment=TA_LEFT,
                 ),
             )
         )
 
-        if include_diagram:
-            # The diagrams go on landscape sheets and stay there until the end of
-            # the document, so the note above has to be emitted before the switch.
-            story.append(NextPageTemplate("landscape"))
-            story.append(PageBreak())
-            story.extend(
-                DocumentService._build_layout_pages(
-                    carrier,
-                    frame_width=LAND_CONTENT_WIDTH,
-                    max_height=LAND_FRAME_HEIGHT,
-                )
-            )
-
-        doc.build(story)
-        buffer.seek(0)
-        return buffer
-
-    @staticmethod
-    def generate_production_sheet_pdf(carrier: DocumentCarrier) -> io.BytesIO:
-        """Production sheet for the workshop: black and white, no letterhead, cut
-        list and layout WITHOUT prices. Makes the most of the paper (compact
-        margins and spacing) and differentiates the edge-banding type (soft/hard)."""
-        buffer = io.BytesIO()
-        doc = _CutterDoc(buffer, _draw_page_decoration_plain)
-        pal = MONO_PALETTE
-        pad = 4
-
-        styles = getSampleStyleSheet()
-        heading_style = _heading_style(styles)
-        cell_style = _cell_style(styles)
-
-        story = []
-        story.extend(DocumentService._build_production_header(carrier, styles, pal))
-        story.append(Spacer(1, 0.12 * inch))
-
-        story.extend(_section("LISTA DE CORTE", heading_style, pal, space_after=4))
-        story.append(
-            DocumentService._build_requirements_table(carrier, cell_style, pal, pad)
-        )
-        story.append(Spacer(1, 0.12 * inch))
-
-        story.extend(_section("TABLEROS A UTILIZAR", heading_style, pal, space_after=4))
-        story.append(
-            DocumentService._build_materials_plain_table(carrier, cell_style, pal, pad)
-        )
-        story.append(Spacer(1, 0.1 * inch))
-        story.append(DocumentService._build_boards_total_table(carrier, pal))
-
-        if carrier.edge_bandings_summary:
-            story.append(Spacer(1, 0.12 * inch))
-            story.extend(
-                _section("TAPACANTOS A APLICAR", heading_style, pal, space_after=4)
-            )
-            story.append(
-                DocumentService._build_edge_bandings_table(
-                    carrier, cell_style, with_prices=False, palette=pal, pad=pad
-                )
-            )
-
-        story.append(Spacer(1, 0.12 * inch))
-        story.extend(
-            _section("RESUMEN DE CORTE Y CANTO", heading_style, pal, space_after=4)
-        )
-        story.append(DocumentService._build_cut_summary_table(carrier, pal, pad))
-
-        story.append(NextPageTemplate("landscape"))
-        story.append(PageBreak())
-        story.extend(
-            DocumentService._build_layout_pages(
-                carrier,
-                mono=True,
-                frame_width=LAND_CONTENT_WIDTH,
-                max_height=LAND_FRAME_HEIGHT,
-            )
-        )
-
-        doc.build(story)
-        buffer.seek(0)
-        return buffer
-
-    @staticmethod
-    def generate_diagram_pdf(carrier: DocumentCarrier) -> io.BytesIO:
-        """Cutting diagram only (the *gráfico*), B/W, WITHOUT the piece/board lists.
-
-        Used by the consolidated print packet: the cut list, boards and edge
-        banding already appear in the ORDEN DE PEDIDO, so here we print just the
-        visual layout (``DISPOSICIÓN DE CORTES``) under a compact identifying header.
-        """
-        buffer = io.BytesIO()
-        # Every page of this document is a diagram, so it is landscape throughout
-        # and carries no header at all: it only ever travels inside the
-        # consolidated packet, where the ORDEN DE PEDIDO already identifies the
-        # job, and a header would shrink the first diagram for nothing.
-        doc = _CutterDoc(buffer, _draw_page_decoration_plain, start_landscape=True)
-
-        story = DocumentService._build_layout_pages(
-            carrier,
-            mono=True,
-            frame_width=LAND_CONTENT_WIDTH,
-            max_height=LAND_FRAME_HEIGHT,
-        )
-
-        doc.build(story)
-        buffer.seek(0)
-        return buffer
-
-    @staticmethod
-    def generate_dispatch_sheet_pdf(carrier: DocumentCarrier) -> io.BytesIO:
-        """Dispatch sheet (delivery to the client): brand letterhead, client data,
-        piece detail WITHOUT prices, board count, liability disclaimer note and
-        signature block (delivered-by / received-in-good-order)."""
-        buffer = io.BytesIO()
-        doc = _CutterDoc(buffer, _draw_page_decoration)
-
-        styles = getSampleStyleSheet()
-        heading_style = _heading_style(styles)
-        cell_style = _cell_style(styles)
-
-        story = []
-        story.extend(DocumentService._build_header(carrier, styles, "HOJA DE DESPACHO"))
-        story.append(Spacer(1, 0.15 * inch))
-
-        story.extend(_section("INFORMACIÓN DEL CLIENTE", heading_style))
-        story.append(DocumentService._build_client_table(carrier))
-        # Dispatch date and the person responsible for delivery (frozen on the
-        # order; fall back to "now" / "—" if not yet dispatched).
-        dispatch_date = carrier.dispatch_date or datetime.now()
-        story.append(
-            Paragraph(
-                f"<b>Fecha de despacho:</b> {dispatch_date.strftime('%d/%m/%Y')}"
-                f" &nbsp;&nbsp; <b>Despachado por:</b> "
-                f"{carrier.dispatched_by_label or '—'}",
-                ParagraphStyle(
-                    "DispatchMeta",
-                    parent=styles["Normal"],
-                    fontSize=9,
-                    textColor=TEXT_GREY,
-                    alignment=TA_LEFT,
-                    spaceBefore=6,
-                ),
-            )
-        )
-        story.append(Spacer(1, 0.15 * inch))
-
-        story.extend(_section("DETALLE DE PIEZAS", heading_style))
-        story.append(DocumentService._build_requirements_table(carrier, cell_style))
-        story.append(Spacer(1, 0.12 * inch))
-        story.append(DocumentService._build_boards_total_table(carrier))
-        story.append(Spacer(1, 0.15 * inch))
-
-        payment_block = DocumentService._payment_section(carrier, heading_style)
-        if payment_block:
-            story.extend(payment_block)
-            story.append(Spacer(1, 0.15 * inch))
-
+        # The handover, in the order it is filled in: what was agreed, what the
+        # client accepts by signing, and the signatures themselves.
+        story.append(Spacer(1, BLOCK_SPACER))
         story.extend(_section("DESCARGO DE RESPONSABILIDAD", heading_style))
         story.append(
             Paragraph(
@@ -520,21 +364,73 @@ class DocumentService:
                 ParagraphStyle(
                     "Disclaimer",
                     parent=styles["Normal"],
-                    fontSize=8,
-                    leading=11,
+                    fontSize=7,
+                    leading=8.5,
                     textColor=colors.grey,
                     alignment=TA_JUSTIFY,
                 ),
             )
         )
-
         story.append(
             KeepTogether(
-                [Spacer(1, 0.25 * inch), DocumentService._build_signature_block(styles)]
+                [
+                    Spacer(1, SIGNATURE_GAP),
+                    DocumentService._build_signature_block(styles),
+                ]
             )
         )
 
         doc.build(story)
+        buffer.seek(0)
+        return buffer
+
+    @staticmethod
+    def _dispatch_line(carrier: DocumentCarrier, styles) -> Paragraph:
+        """Delivery date and who handed the goods over, on one line.
+
+        Printed on every order, not only on a dispatched one: the shop prints this
+        document when the cutting is done, which is *before* anyone delivers
+        anything, so the two fields come out as rules to fill in by hand and get
+        signed at the counter. It used to fall back to ``datetime.now()``, which
+        stamped today's date as the dispatch date on an order nobody had
+        dispatched — a made-up fact on a document the client signs.
+        """
+        blank = "_" * 18
+        date = (
+            carrier.dispatch_date.strftime("%d/%m/%Y")
+            if carrier.dispatch_date
+            else blank
+        )
+        return Paragraph(
+            f"<b>Fecha de despacho:</b> {date}"
+            f" &nbsp;&nbsp; <b>Despachado por:</b> "
+            f"{escape(carrier.dispatched_by_label) if carrier.dispatched_by_label else blank}",
+            ParagraphStyle(
+                "DispatchMeta",
+                parent=styles["Normal"],
+                fontSize=CLIENT_SIZE,
+                leading=CLIENT_SIZE + 2,
+                textColor=TEXT_GREY,
+                alignment=TA_LEFT,
+                spaceBefore=4,
+            ),
+        )
+
+    @staticmethod
+    def generate_diagram_pdf(carrier: DocumentCarrier) -> io.BytesIO:
+        """Cutting diagram only (the *gráfico*), B/W, WITHOUT the piece/board lists.
+
+        Used by the order packet: the cut list, boards and edge banding already
+        appear in the ORDEN DE PEDIDO, so here we print just the visual layout.
+        """
+        buffer = io.BytesIO()
+        # Every page of this document is a diagram, so it is landscape throughout
+        # and carries no header at all: it only ever travels inside the order
+        # packet, where the ORDEN DE PEDIDO already identifies the job, and a
+        # header would shrink the first diagram for nothing.
+        doc = _CutterDoc(buffer, _no_decoration, start_landscape=True)
+
+        doc.build(DocumentService._build_layout_pages(carrier))
         buffer.seek(0)
         return buffer
 
@@ -588,15 +484,15 @@ class DocumentService:
                     ("LINEABOVE", (1, 0), (1, 0), 0.75, BRAND_BLACK),
                     ("LINEABOVE", (2, 0), (2, 0), 0.75, BRAND_BLACK),
                     ("LINEABOVE", (0, 1), (-1, 1), 0.75, BRAND_BLACK),
-                    ("TOPPADDING", (0, 0), (-1, 0), 6),
-                    ("TOPPADDING", (0, 1), (-1, 1), 40),
+                    ("TOPPADDING", (0, 0), (-1, 0), 5),
+                    ("TOPPADDING", (0, 1), (-1, 1), 26),
                 ]
             )
         )
         return table
 
     @staticmethod
-    def _build_header(carrier: DocumentCarrier, styles, title: str) -> List:
+    def _build_header(carrier: DocumentCarrier, styles) -> List:
         """MADERABLE letterhead: logo + contact, black rule and title bar."""
         logo = _scaled_image(LOGO_PATH, 1.9 * inch)
         logo.hAlign = "LEFT"
@@ -647,7 +543,7 @@ class DocumentService:
         title_bar = Table(
             [
                 [
-                    Paragraph(title, title_style),
+                    Paragraph("ORDEN DE PEDIDO", title_style),
                     [
                         Paragraph(
                             f"N° {carrier.reference}<br/>"
@@ -729,79 +625,6 @@ class DocumentService:
         return table
 
     @staticmethod
-    def _build_production_header(
-        carrier: DocumentCarrier,
-        styles,
-        palette: Palette = MONO_PALETTE,
-        title: str = "HOJA DE PRODUCCIÓN",
-        content_width: float = CONTENT_WIDTH,
-    ) -> List:
-        """Compact workshop header: title + No./date/client, no logo or
-        letterhead. The client name goes here (the sheet has no CLIENT section).
-        """
-        client = carrier.client
-        client_name = (
-            f"{getattr(client, 'first_name', '') or ''} "
-            f"{getattr(client, 'last_name', '') or ''}".strip()
-            or "N/A"
-        )
-
-        title_style = ParagraphStyle(
-            "ProdTitle",
-            parent=styles["Normal"],
-            fontSize=15,
-            leading=18,
-            textColor=palette.text,
-            fontName="Helvetica-Bold",
-            alignment=TA_LEFT,
-        )
-        meta_style = ParagraphStyle(
-            "ProdMeta",
-            parent=styles["Normal"],
-            fontSize=9,
-            leading=12,
-            textColor=palette.text,
-            alignment=TA_RIGHT,
-        )
-
-        header = Table(
-            [
-                [
-                    Paragraph(title, title_style),
-                    [
-                        Paragraph(
-                            f"N° {carrier.reference}<br/>"
-                            f"Fecha: {datetime.now().strftime('%d/%m/%Y')}<br/>"
-                            f"Cliente: {client_name}",
-                            meta_style,
-                        ),
-                        *_reference_lines(carrier, meta_style),
-                    ],
-                ]
-            ],
-            colWidths=[content_width * 0.5, content_width * 0.5],
-        )
-        header.setStyle(
-            TableStyle(
-                [
-                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                    ("LEFTPADDING", (0, 0), (-1, -1), 0),
-                    ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-                    ("TOPPADDING", (0, 0), (-1, -1), 0),
-                    ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
-                ]
-            )
-        )
-        rule = HRFlowable(
-            width="100%",
-            thickness=1.0,
-            color=palette.text,
-            spaceBefore=4,
-            spaceAfter=4,
-        )
-        return [header, rule]
-
-    @staticmethod
     def _build_client_table(carrier: DocumentCarrier) -> Table:
         client = carrier.client
         client_name = (
@@ -821,11 +644,12 @@ class DocumentService:
                 [
                     ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
                     ("FONTNAME", (1, 0), (1, -1), "Helvetica"),
-                    ("FONTSIZE", (0, 0), (-1, -1), 10),
+                    ("FONTSIZE", (0, 0), (-1, -1), CLIENT_SIZE),
+                    ("LEADING", (0, 0), (-1, -1), CLIENT_SIZE + 2),
                     ("TEXTCOLOR", (0, 0), (-1, -1), TEXT_GREY),
                     ("BACKGROUND", (0, 0), (0, -1), ZEBRA_GREY),
-                    ("TOPPADDING", (0, 0), (-1, -1), 3),
-                    ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                    ("TOPPADDING", (0, 0), (-1, -1), CLIENT_PAD),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), CLIENT_PAD),
                     ("LEFTPADDING", (0, 0), (-1, -1), 8),
                 ]
             )
@@ -833,12 +657,7 @@ class DocumentService:
         return client_table
 
     @staticmethod
-    def _build_requirements_table(
-        carrier: DocumentCarrier,
-        cell_style,
-        palette: Palette = BRAND_PALETTE,
-        pad: int = 5,
-    ) -> Table:
+    def _build_requirements_table(carrier: DocumentCarrier, cell_style) -> Table:
         requirements = carrier.requirements
         # "Material", not "Tablero": the row can name a retazo, and a quote can be
         # made of nothing else.
@@ -873,79 +692,8 @@ class DocumentService:
             ],
             repeatRows=1,
         )
-        req_table.setStyle(
-            _data_table_style(header_size=10, body_size=9, palette=palette, pad=pad)
-        )
+        req_table.setStyle(_data_table_style())
         return req_table
-
-    @staticmethod
-    def _build_edge_bandings_table(
-        carrier: DocumentCarrier,
-        cell_style,
-        with_prices: bool = True,
-        palette: Palette = BRAND_PALETTE,
-        pad: int = 7,
-    ) -> Table:
-        """Edge-banding summary by type. With prices (order document) or without
-        (production sheet), with a ``Tipo`` (Soft/Hard) column for the workshop."""
-        summary = carrier.edge_bandings_summary
-        if with_prices:
-            header = [
-                "Código",
-                "Descripción",
-                "Tipo",
-                "Espesor",
-                "Metros",
-                "P. Unit.",
-                "Subtotal",
-            ]
-        else:
-            header = ["Código", "Descripción", "Tipo", "Espesor", "Metros"]
-        eb_data = [header]
-        for entry in summary:
-            row = [
-                entry.get("product_code") or "N/A",
-                Paragraph(
-                    entry.get("product_name") or entry.get("product_code") or "N/A",
-                    cell_style,
-                ),
-                BAND_TYPE_LABEL.get(entry.get("band_type"), "-"),
-                f"{(entry.get('thickness') or 0):.2f} mm",
-                f"{entry.get('billed_linear_m', 0):.2f} m",
-            ]
-            if with_prices:
-                row.append(f"${entry.get('price_per_m', 0):.2f}")
-                row.append(f"${entry.get('total_cost', 0):.2f}")
-            eb_data.append(row)
-
-        if with_prices:
-            col_widths = [
-                0.9 * inch,
-                CONTENT_WIDTH - 5.1 * inch,
-                0.8 * inch,  # Tipo
-                0.9 * inch,
-                0.8 * inch,
-                0.8 * inch,
-                0.9 * inch,
-            ]
-        else:
-            col_widths = [
-                1.4 * inch,  # Código (más ancho: códigos largos tipo TAP-SL-CSH-22)
-                CONTENT_WIDTH - 3.8 * inch,  # Descripción (flexible)
-                0.8 * inch,  # Tipo (Suave/Duro)
-                0.8 * inch,  # Espesor
-                0.8 * inch,  # Metros
-            ]
-        eb_table = Table(eb_data, colWidths=col_widths, repeatRows=1)
-        eb_table.setStyle(
-            _data_table_style(
-                header_size=9 if with_prices else 10,
-                body_size=8 if with_prices else 9,
-                palette=palette,
-                pad=pad,
-            )
-        )
-        return eb_table
 
     @staticmethod
     def _build_materials_table(carrier: DocumentCarrier, cell_style) -> Table:
@@ -1002,55 +750,7 @@ class DocumentService:
             ],
             repeatRows=1,
         )
-        mat_table.setStyle(_data_table_style(header_size=10, body_size=9))
-        return mat_table
-
-    @staticmethod
-    def _build_materials_plain_table(
-        carrier: DocumentCarrier,
-        cell_style,
-        palette: Palette = BRAND_PALETTE,
-        pad: int = 7,
-    ) -> Table:
-        """Boards to use WITHOUT prices (production sheet): code, dimensions, qty.
-
-        Spans the full content width to align with the cut list."""
-        materials_summary = carrier.materials_summary
-        mat_data = [["Código", "Nombre", "Dimensiones", "Espesor", "Cantidad"]]
-        if isinstance(materials_summary, list) and materials_summary:
-            for entry in materials_summary:
-                mat_data.append(
-                    [
-                        entry.get("product_code") or "N/A",
-                        Paragraph(
-                            _material_label(entry, entry.get("product_code") or "N/A"),
-                            cell_style,
-                        ),
-                        f"{entry.get('height', 0):.0f}×{entry.get('width', 0):.0f} mm",
-                        # ``g`` so a whole thickness prints "15 mm" while a
-                        # fractional one (OSB 11.1, MDF fondo 5.5) keeps its
-                        # decimal instead of being rounded to a wrong number.
-                        f"{entry.get('thickness', 0):g} mm",
-                        str(entry.get("count", 0)),
-                    ]
-                )
-        else:
-            mat_data.append(["Sin datos de materiales", "", "", "", ""])
-
-        mat_table = Table(
-            mat_data,
-            colWidths=[
-                1.3 * inch,  # Código (más ancho: códigos largos tipo MDP-SL-CSH-15)
-                CONTENT_WIDTH - 4.0 * inch,  # Nombre (flexible)
-                1.1 * inch,  # Dimensiones
-                0.7 * inch,  # Espesor
-                0.9 * inch,  # Cantidad
-            ],
-            repeatRows=1,
-        )
-        mat_table.setStyle(
-            _data_table_style(header_size=10, body_size=9, palette=palette, pad=pad)
-        )
+        mat_table.setStyle(_data_table_style())
         return mat_table
 
     @staticmethod
@@ -1086,16 +786,16 @@ class DocumentService:
             ],
             repeatRows=1,
         )
-        table.setStyle(_data_table_style(header_size=10, body_size=9))
+        table.setStyle(_data_table_style())
         return table
 
     @staticmethod
     def _build_client_material_table(entries: List[dict], cell_style) -> Table:
         """The client's own material: what was cut on, without a price.
 
-        Same shape as the production sheet's board table (``Descripción``,
-        dimensions, thickness, sheets) because it answers the same question —
-        which material this work ran on — and deliberately no money column.
+        Its own shape (``Descripción``, dimensions, thickness, sheets) rather
+        than the priced table's, because it answers a different question — which
+        material this work ran on — and deliberately carries no money column.
         """
         data = [["Descripción", "Dimensiones", "Espesor", "Hojas"]]
         for entry in entries:
@@ -1125,7 +825,7 @@ class DocumentService:
             ],
             repeatRows=1,
         )
-        table.setStyle(_data_table_style(header_size=10, body_size=9))
+        table.setStyle(_data_table_style())
         return table
 
     @staticmethod
@@ -1195,92 +895,14 @@ class DocumentService:
         return [*_section("FORMA DE PAGO", heading_style), _totals_table(rows)]
 
     @staticmethod
-    def _build_boards_total_table(
-        carrier: DocumentCarrier, palette: Palette = BRAND_PALETTE
-    ) -> Table:
-        """Total SHEETS to cut, no costs (production sheet and dispatch sheet).
+    def _build_layout_pages(carrier: DocumentCarrier) -> List:
+        """One image per pattern, each alone on a full landscape page.
 
-        Counted off the materials summary rather than from ``total_boards_used``,
-        which answers a commercial question — how many boards the client buys —
-        and therefore excludes every retazo. The shop cuts the retazos too, and on
-        a job made only of the client's material that number was 0 next to a table
-        listing two sheets.
-        """
-        sheets = sum(entry.get("count", 0) for entry in carrier.materials_summary or [])
-        return _totals_table(
-            [["Total de hojas a cortar:", str(sheets)]],
-            palette=palette,
-        )
-
-    @staticmethod
-    def _build_cut_summary_table(
-        carrier: DocumentCarrier,
-        palette: Palette = BRAND_PALETTE,
-        pad: int = 7,
-    ) -> Table:
-        """Linear meters of cut and edge banding per sheet + overall total (workshop).
-
-        One row per cutting pattern (deduplicated) with the per-sheet values; the
-        TOTAL row is the sum across all physical sheets.
-        """
-        groups = carrier.layout_groups
-        if not (isinstance(groups, list) and groups):
-            groups = group_layouts(carrier.layouts or [])
-
-        data = [["Patrón", "Planchas", "Corte (m)", "Canto (m)"]]
-        for group in groups:
-            stats = (group.get("layout") or {}).get("statistics") or {}
-            data.append(
-                [
-                    f"#{group.get('pattern_id', '?')}",
-                    str(group.get("count", 0)),
-                    f"{stats.get('cut_linear_m', 0):.2f}",
-                    f"{stats.get('edge_banding_linear_m', 0):.2f}",
-                ]
-            )
-        data.append(
-            [
-                "TOTAL",
-                str(carrier.total_boards_used),
-                f"{carrier.total_cut_linear_m:.2f}",
-                f"{carrier.total_edge_banding_linear_m:.2f}",
-            ]
-        )
-
-        table = Table(
-            data,
-            colWidths=[
-                CONTENT_WIDTH - 3.6 * inch,
-                1.2 * inch,
-                1.2 * inch,
-                1.2 * inch,
-            ],
-            repeatRows=1,
-        )
-        style = _data_table_style(header_size=10, body_size=9, palette=palette, pad=pad)
-        # Highlights the TOTAL row (last) as a totals box.
-        style.add("BACKGROUND", (0, -1), (-1, -1), palette.accent_fill)
-        style.add("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold")
-        style.add("TEXTCOLOR", (0, -1), (-1, -1), palette.text)
-        table.setStyle(style)
-        return table
-
-    @staticmethod
-    def _build_layout_pages(
-        carrier: DocumentCarrier,
-        mono: bool = False,
-        frame_width: float = CONTENT_WIDTH,
-        max_height: float = 9.3 * inch,
-    ) -> List:
-        """One image per pattern, each alone on a full page using the whole sheet.
-
-        ``frame_width``/``max_height`` describe the frame the images are drawn
-        into: the callers print the diagrams on landscape sheets, where the frame
-        is wider (770pt vs 523pt) but *shorter* (522pt vs 769pt) than a portrait
-        one — so both bounds have to travel together or a tall board overflows.
-
-        Nothing else shares a diagram sheet (no heading, no header), so every
-        pattern is drawn at the same, maximum size.
+        The diagrams print on landscape sheets, where the frame is wider (770pt
+        vs 523pt) but *shorter* (522pt vs 769pt) than a portrait one — so both
+        bounds are applied or a tall board overflows. Nothing else shares a
+        diagram sheet (no heading, no header), so every pattern is drawn at the
+        same, maximum size.
         """
         layouts = carrier.layouts
         if not (isinstance(layouts, list) and layouts):
@@ -1292,18 +914,28 @@ class DocumentService:
         if not (isinstance(groups, list) and groups):
             groups = group_layouts(layouts)
 
+        names = _board_names(carrier)
+
         flowables: List = []
         for idx, group in enumerate(groups):
             if idx > 0:
                 flowables.append(PageBreak())
 
+            material = (group.get("layout") or group).get("material") or {}
             img_buffer, (img_w, img_h) = VisualizationService.generate_layout_image(
-                group, mono=mono
+                group,
+                mono=True,
+                board_name=names.get(
+                    (
+                        material.get("material_key"),
+                        bool(material.get("half_board", False)),
+                    )
+                ),
             )
-            draw_width = frame_width
+            draw_width = LAND_CONTENT_WIDTH
             draw_height = draw_width * (img_h / img_w)
-            if draw_height > max_height:
-                draw_height = max_height
+            if draw_height > LAND_FRAME_HEIGHT:
+                draw_height = LAND_FRAME_HEIGHT
                 draw_width = draw_height * (img_w / img_h)
 
             image = Image(img_buffer, width=draw_width, height=draw_height)
@@ -1313,11 +945,74 @@ class DocumentService:
         return flowables
 
 
+def stamp_packet_footer(merged: io.BytesIO, reference: str) -> io.BytesIO:
+    """Stamps the running footer on every page of the merged packet.
+
+    The packet is printed and handed over as ONE body, so its pages are numbered
+    once, end to end — including the annexes. Each document used to number its
+    own, so a printout read "Página 1" for the order and "Página 1" again for the
+    first diagram; and only reportlab knew how to draw a footer, which is exactly
+    the layer that cannot know how many pages follow it.
+
+    The order number rides here too: a sheet that gets separated from the rest on
+    the shop floor still says which order it belongs to.
+    """
+    reader = PdfReader(merged)
+    total = len(reader.pages)
+    stamped = PdfWriter()
+    generated = datetime.now().strftime("%d/%m/%Y %H:%M")
+    for number, page in enumerate(reader.pages, 1):
+        width = float(page.mediabox.width)
+        height = float(page.mediabox.height)
+        overlay = io.BytesIO()
+        pdf = canvas.Canvas(overlay, pagesize=(width, height))
+        pdf.setFont("Helvetica", 8)
+        pdf.setFillColor(colors.grey)
+        pdf.drawString(
+            LEFT_MARGIN, FOOTER_BASELINE, f"Generado el {generated} · N° {reference}"
+        )
+        pdf.drawRightString(
+            width - RIGHT_MARGIN, FOOTER_BASELINE, f"Página {number} de {total}"
+        )
+        pdf.save()
+        overlay.seek(0)
+        page.merge_page(PdfReader(overlay).pages[0])
+        stamped.add_page(page)
+    out = io.BytesIO()
+    stamped.write(out)
+    out.seek(0)
+    return out
+
+
+def build_order_packet(
+    carrier: DocumentCarrier, annexes: Iterable[Tuple[bytes, str]]
+) -> io.BytesIO:
+    """The order's whole paperwork as ONE pdf: document, diagram and annexes.
+
+    This is what ``GET /orders/{id}/document`` serves and what the print queue
+    spools, from one implementation: the two used to be the same twenty-eight
+    lines copied, which is how they drift.
+
+    ``annexes`` are ``(bytes, content_type)`` pairs, already read from storage by
+    the caller — the render layer stays DB- and disk-free. One that cannot be
+    parsed is skipped rather than breaking the packet.
+    """
+    parts = [
+        DocumentService.generate_order_document_pdf(carrier),
+        DocumentService.generate_diagram_pdf(carrier),
+    ]
+    for data, content_type in annexes:
+        part = attachment_to_pdf_part(data, content_type)
+        if part is not None:
+            parts.append(part)
+    return stamp_packet_footer(merge_pdfs(parts), carrier.reference)
+
+
 def merge_pdfs(buffers: List[io.BytesIO]) -> io.BytesIO:
     """Concatenates every page of each PDF buffer into a single PDF.
 
-    Used by the consolidated print packet to stitch the order document, the
-    production sheet, the dispatch sheet and the attachment pages into one file.
+    Used by the order packet to stitch the ORDEN DE PEDIDO, the cut diagram and
+    the attachment pages into one file.
     """
     writer = PdfWriter()
     for buf in buffers:
@@ -1334,7 +1029,7 @@ def image_to_pdf_buffer(data: bytes) -> io.BytesIO:
     """Wraps a raster image (a screenshot annex) into a one-page A4 PDF.
 
     The image is scaled to fit the page margins (never upscaled) and centered, so
-    it merges cleanly into the consolidated packet like any other PDF page.
+    it merges cleanly into the order packet like any other PDF page.
     """
     reader = ImageReader(io.BytesIO(data))
     img_w, img_h = reader.getSize()
@@ -1360,7 +1055,7 @@ def attachment_to_pdf_part(data: bytes, content_type: str) -> Optional[io.BytesI
 
     A PDF is passed through (after a structural read); an image is wrapped into a
     page. Returns ``None`` if the bytes can't be parsed/rendered, so a single
-    corrupt annex is skipped instead of breaking the whole consolidated packet.
+    corrupt annex is skipped instead of breaking the whole order packet.
     """
     try:
         if content_type == "application/pdf":
@@ -1434,10 +1129,13 @@ def _heading_style(styles) -> ParagraphStyle:
     return ParagraphStyle(
         "SectionHeading",
         parent=styles["Heading2"],
-        fontSize=13,
+        fontSize=SECTION_SIZE,
+        # Explicit: Heading2 hands down a leading sized for its own 14pt letter,
+        # which reserved ~17pt of height per title across seven sections.
+        leading=SECTION_LEADING,
         textColor=BRAND_BLACK,
-        spaceAfter=2,
-        spaceBefore=4,
+        spaceAfter=1,
+        spaceBefore=3,
         fontName="Helvetica-Bold",
     )
 
@@ -1446,26 +1144,53 @@ def _cell_style(styles) -> ParagraphStyle:
     return ParagraphStyle(
         "Cell",
         parent=styles["Normal"],
-        fontSize=9,
-        leading=11,
+        fontSize=BODY_SIZE,
+        leading=CELL_LEADING,
         textColor=TEXT_GREY,
         alignment=TA_LEFT,
     )
 
 
-def _material_label(entry: dict, fallback: str) -> str:
+def _plain_material_label(entry: dict, fallback: str) -> str:
     """The material's printed name, flagged when the sheet is cut untrimmed.
 
-    Every document that lists boards goes through here, because the shop squares
+    Every surface that names a board goes through here, because the shop squares
     a board by reflex: a plan that deliberately uses the full sheet has to say so
     on the paper the operator holds, not only in the quote that priced it. Sits
     next to the "(medio tablero)" suffix the summary already builds, and stays a
-    suffix rather than a column — none of the three tables has room for one.
+    suffix rather than a column — neither table has room for one.
     """
     name = entry.get("product_name") or fallback
+    return name if not entry.get("skip_trim") else f"{name} · sin refilar"
+
+
+def _material_label(entry: dict, fallback: str) -> str:
+    """``_plain_material_label`` for a reportlab ``Paragraph``: the mark greyed.
+
+    Only the table cells get the markup. The diagram is drawn with Pillow, which
+    has no mini-HTML and would letter the ``<font>`` tag onto the sheet.
+    """
+    label = _plain_material_label(entry, fallback)
     if not entry.get("skip_trim"):
-        return name
-    return f"{name} <font color='#6B7280'>· sin refilar</font>"
+        return label
+    return label.replace(
+        " · sin refilar", " <font color='#6B7280'>· sin refilar</font>"
+    )
+
+
+def _board_names(carrier: DocumentCarrier) -> dict:
+    """``(material_key, half_board)`` → the board's name for its diagram header.
+
+    Keyed on the pair and not on the key alone because ``build_materials_summary``
+    splits a half board into its own line, with "(medio tablero)" already in the
+    name — the same board cut both ways is two entries and two diagram headers.
+    """
+    return {
+        (entry.get("material_key"), bool(entry.get("half_board", False))): (
+            _plain_material_label(entry, entry.get("product_code") or "")
+        )
+        for entry in carrier.materials_summary or []
+    }
 
 
 def _client_material_rows(carrier: DocumentCarrier) -> List[dict]:
@@ -1486,41 +1211,36 @@ def _billable_material_rows(carrier: DocumentCarrier) -> List[dict]:
     ]
 
 
-def _section(
-    title: str,
-    heading_style,
-    palette: Palette = BRAND_PALETTE,
-    space_after: int = 5,
-) -> List:
+def _section(title: str, heading_style) -> List:
     """Section title with a colored rule underneath."""
     return [
         Paragraph(title, heading_style),
         HRFlowable(
             width="100%",
             thickness=1.2,
-            color=palette.accent,
-            spaceBefore=2,
-            spaceAfter=space_after,
+            color=BRAND_PALETTE.accent,
+            spaceBefore=1,
+            spaceAfter=3,
         ),
     ]
 
 
-def _totals_table(rows: List[List[str]], palette: Palette = BRAND_PALETTE) -> Table:
+def _totals_table(rows: List[List[str]]) -> Table:
     """Highlighted totals box (key on the left, value on the right)."""
     table = Table(rows, colWidths=[CONTENT_WIDTH - 2.0 * inch, 2.0 * inch])
     table.setStyle(
         TableStyle(
             [
-                ("BACKGROUND", (0, 0), (-1, -1), palette.accent_fill),
-                ("BOX", (0, 0), (-1, -1), 1, palette.accent),
+                ("BACKGROUND", (0, 0), (-1, -1), BRAND_PALETTE.accent_fill),
+                ("BOX", (0, 0), (-1, -1), 1, BRAND_PALETTE.accent),
                 ("LINEBELOW", (0, 0), (-1, 0), 0.5, colors.HexColor("#F5C9C3")),
                 ("FONTNAME", (0, 0), (-1, -1), "Helvetica-Bold"),
-                ("FONTSIZE", (0, 0), (-1, -1), 11),
-                ("TEXTCOLOR", (0, 0), (-1, -1), palette.text),
+                ("FONTSIZE", (0, 0), (-1, -1), TOTALS_SIZE),
+                ("TEXTCOLOR", (0, 0), (-1, -1), BRAND_PALETTE.text),
                 ("ALIGN", (0, 0), (0, -1), "LEFT"),
                 ("ALIGN", (1, 0), (1, -1), "RIGHT"),
-                ("TOPPADDING", (0, 0), (-1, -1), 6),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                ("TOPPADDING", (0, 0), (-1, -1), TOTALS_PAD),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), TOTALS_PAD),
                 ("LEFTPADDING", (0, 0), (-1, -1), 12),
                 ("RIGHTPADDING", (0, 0), (-1, -1), 12),
             ]
@@ -1529,26 +1249,21 @@ def _totals_table(rows: List[List[str]], palette: Palette = BRAND_PALETTE) -> Ta
     return table
 
 
-def _data_table_style(
-    header_size: int,
-    body_size: int,
-    palette: Palette = BRAND_PALETTE,
-    pad: int = 5,
-) -> TableStyle:
+def _data_table_style() -> TableStyle:
     """Common style for data tables: accent header + zebra rows."""
     return TableStyle(
         [
-            ("BACKGROUND", (0, 0), (-1, 0), palette.accent),
-            ("TEXTCOLOR", (0, 0), (-1, 0), palette.header_text),
+            ("BACKGROUND", (0, 0), (-1, 0), BRAND_PALETTE.accent),
+            ("TEXTCOLOR", (0, 0), (-1, 0), BRAND_PALETTE.header_text),
             ("ALIGN", (0, 0), (-1, -1), "CENTER"),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
             ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-            ("FONTSIZE", (0, 0), (-1, 0), header_size),
+            ("FONTSIZE", (0, 0), (-1, 0), HEADER_SIZE),
             ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
-            ("FONTSIZE", (0, 1), (-1, -1), body_size),
-            ("TOPPADDING", (0, 0), (-1, -1), pad),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), pad),
+            ("FONTSIZE", (0, 1), (-1, -1), BODY_SIZE),
+            ("TOPPADDING", (0, 0), (-1, -1), ROW_PAD),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), ROW_PAD),
             ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
-            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, palette.zebra]),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, BRAND_PALETTE.zebra]),
         ]
     )

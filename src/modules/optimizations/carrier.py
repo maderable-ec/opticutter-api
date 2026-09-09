@@ -5,7 +5,7 @@ from typing import List, Optional
 
 @dataclass
 class DocumentCarrier:
-    """Duck-typed carrier that the order document and production sheet render.
+    """Duck-typed carrier the order's document renders from.
 
     Unifies the two sources of the same computation — an ephemeral optimization
     (cached by hash) or an order's immutable snapshot — exposing the same
@@ -45,8 +45,10 @@ class DocumentCarrier:
     # registers them). The renderers divide by ``1 + tax_rate`` to print them
     # net like every other line. Empty for documents without services.
     additional_services: List[dict] = field(default_factory=list)
-    # Dispatch data (only the dispatch sheet uses it; ``None`` omits it). Set by
-    # ``from_order`` from the order; the ephemeral-optimization path doesn't.
+    # Dispatch data, printed on the document's delivery line — as rules to fill
+    # in by hand while it is ``None``, which is the normal case: the shop prints
+    # the document when the cutting is done, before anyone delivers anything.
+    # Set by ``from_order``; the ephemeral-optimization path doesn't.
     dispatch_date: Optional[datetime] = None
     dispatched_by_label: Optional[str] = None
     # Frozen payment method (informational). Only ``from_order`` sets it; ephemeral
@@ -133,7 +135,7 @@ class DocumentCarrier:
         carrier.tax_rate = order.tax_rate
         carrier.tax_amount = order.tax_amount
         carrier.total_cost = order.total
-        # Frozen dispatch data (shown by the dispatch sheet; ``None`` before dispatch).
+        # Frozen dispatch data (``None`` before dispatch — the line prints blank).
         carrier.dispatch_date = order.dispatched_at
         carrier.dispatched_by_label = order.dispatched_by_label
         # Frozen payment method (``None`` before moving to the queue).

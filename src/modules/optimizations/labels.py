@@ -18,8 +18,8 @@ def edge_banding_notation(
 
     Three parts, each omitted when unknown: the sides count, the edge **type**
     (``CS``/``CD``) and the banding's short **alias** (``CSH``). The alias is
-    what tells two banded designs apart on the dispatch sheet, the only document
-    without a banding summary table.
+    what tells two banded designs apart on the thermal label and on the cut
+    diagram, neither of which carries a banding summary table.
 
     ``alias`` is a separate, purely cosmetic field (max 20 chars) — it plays no
     role in board↔tapacanto coordination, which still uses the product's

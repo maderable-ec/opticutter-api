@@ -118,16 +118,6 @@ def _diagram_sizes(buffer):
     return sizes
 
 
-def test_production_sheet_prints_lists_portrait_and_diagrams_landscape():
-    carrier = _carrier([_layout(1220, 2440, i) for i in (1, 2, 3)])
-
-    orientations = _orientations(DocumentService.generate_production_sheet_pdf(carrier))
-
-    # The lists come first (portrait) and every pattern gets its own landscape sheet.
-    assert orientations[0] == "P"
-    assert orientations[1:] == ["L", "L", "L"]
-
-
 def test_diagram_document_is_landscape_throughout():
     carrier = _carrier([_layout(1220, 2440, i) for i in (1, 2)])
 
@@ -135,10 +125,10 @@ def test_diagram_document_is_landscape_throughout():
     assert _orientations(DocumentService.generate_diagram_pdf(carrier)) == ["L", "L"]
 
 
-def test_diagram_pages_carry_no_heading():
-    """Nothing shares a diagram sheet: no document header, no section title, so
-    every pattern is drawn at the same maximum size. The packet's ORDEN DE PEDIDO
-    is what identifies the job."""
+def test_diagram_pages_carry_nothing_of_their_own():
+    """Nothing shares a diagram sheet: no document header, no section title and
+    not even a footer — the running one is stamped later, on the merged packet,
+    which is the only layer that knows the real page count."""
     carrier = _carrier([_layout(1220, 2440, i) for i in (1, 2)])
 
     reader = PdfReader(DocumentService.generate_diagram_pdf(carrier))
@@ -147,57 +137,44 @@ def test_diagram_pages_carry_no_heading():
     assert "DIAGRAMA DE DESPIECE" not in text
     assert "DISPOSICIÓN DE CORTES" not in text
     assert "ORD-2026-0007" not in text
-    # Only the footer survives.
-    assert "Página 1" in text
+    assert "Página" not in text
 
     sizes = _diagram_sizes(DocumentService.generate_diagram_pdf(carrier))
     assert len(sizes) == 2
     assert sizes[0] == sizes[1]  # uniform: the first one is not shrunk
 
 
-def test_order_document_mixes_portrait_lists_with_landscape_diagrams():
+def test_order_document_stays_portrait_throughout():
+    """The order document carries no diagram of its own — the layout travels as
+    its own landscape pages inside the packet — so it never switches template."""
     carrier = _carrier([_layout(1220, 2440, 1)])
 
-    buffer = DocumentService.generate_order_document_pdf(
-        carrier, title="ORDEN DE PEDIDO"
-    )
+    buffer = DocumentService.generate_order_document_pdf(carrier)
     reader = PdfReader(buffer)
-    orientations = [
-        "L" if float(p.mediabox.width) > float(p.mediabox.height) else "P"
-        for p in reader.pages
-    ]
 
-    assert orientations == ["P", "L"]
-    # The commercial pages keep their titles; the diagram sheet is bare.
+    assert set(_orientations(buffer)) == {"P"}
     assert "ORDEN DE PEDIDO" in (reader.pages[0].extract_text() or "")
-    assert "DISPOSICIÓN DE CORTES" not in (reader.pages[1].extract_text() or "")
-
-
-@pytest.mark.parametrize(
-    "render",
-    [
-        lambda c: DocumentService.generate_order_document_pdf(c, include_diagram=False),
-        DocumentService.generate_dispatch_sheet_pdf,
-    ],
-    ids=["orden-de-pedido-sin-diagrama", "hoja-de-despacho"],
-)
-def test_documents_without_a_diagram_stay_portrait(render):
-    carrier = _carrier([_layout(1220, 2440, 1)])
-
-    assert set(_orientations(render(carrier))) == {"P"}
 
 
 def test_diagram_fills_the_landscape_sheet():
     """The whole point of the landscape page: the standard board is drawn at the
-    full content width (770pt) instead of the portrait 523pt."""
+    full content width (770pt) instead of the portrait 523pt.
+
+    The height is asserted as a range, not a number: the canvas carries a header
+    band whose height is measured off the legend and the board's name, so any
+    change to those font sizes moves it. What must hold is that the diagram
+    claims most of the frame without overflowing it.
+    """
+    from src.modules.optimizations.documents import LAND_FRAME_HEIGHT
+
     carrier = _carrier([_layout(1220, 2440, 1), _layout(1220, 2440, 2)])
 
-    sizes = _diagram_sizes(DocumentService.generate_production_sheet_pdf(carrier))
+    sizes = _diagram_sizes(DocumentService.generate_diagram_pdf(carrier))
 
     assert len(sizes) == 2
     for width, height in sizes:
         assert width == pytest.approx(769.9, abs=1.0)
-        assert height == pytest.approx(461.0, abs=1.0)
+        assert 400 < height <= LAND_FRAME_HEIGHT
 
 
 def test_a_tall_board_is_clamped_to_the_landscape_frame():
@@ -206,10 +183,10 @@ def test_a_tall_board_is_clamped_to_the_landscape_frame():
     (which reportlab would reject with a LayoutError)."""
     carrier = _carrier([_layout(2150, 2800, 1)])
 
-    orientations = _orientations(DocumentService.generate_production_sheet_pdf(carrier))
-    sizes = _diagram_sizes(DocumentService.generate_production_sheet_pdf(carrier))
+    orientations = _orientations(DocumentService.generate_diagram_pdf(carrier))
+    sizes = _diagram_sizes(DocumentService.generate_diagram_pdf(carrier))
 
-    assert orientations == ["P", "L"]
+    assert orientations == ["L"]
     assert len(sizes) == 1
     width, height = sizes[0]
     assert height <= 522.1  # the landscape frame's usable height

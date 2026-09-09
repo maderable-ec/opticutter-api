@@ -16,12 +16,7 @@ from sqlalchemy.orm import Session
 
 from src.modules.branches.model import BranchModel
 from src.modules.optimizations.carrier import DocumentCarrier
-from src.modules.optimizations.documents import (
-    DocumentService,
-    attachment_to_pdf_part,
-    merge_pdfs,
-)
-from src.modules.orders import attachment_storage
+from src.modules.optimizations.documents import build_order_packet
 from src.modules.orders.attachment_service import AttachmentService
 from src.modules.orders.model import OrderModel, OrderPlacedPieceModel
 from src.modules.print_jobs import label as label_renderer
@@ -160,32 +155,19 @@ class PrintJobService:
     def _render_consolidated(
         self, order: OrderModel, branch_scope: Optional[int]
     ) -> bytes:
-        """Same packet as ``GET /orders/{id}/consolidated``, as raw PDF bytes.
+        """Same packet as ``GET /orders/{id}/document``, as raw PDF bytes.
 
-        Order document (no diagram) + cut diagram + dispatch sheet + attachments,
-        merged into one PDF.
+        ORDEN DE PEDIDO + cut diagram + attachments, merged into one PDF by the
+        same function the endpoint calls — the two used to be the same loop
+        copied on both sides.
         """
         carrier = DocumentCarrier.from_order(
             order, company=SettingsService(self.db).get_company()
         )
-        parts = [
-            DocumentService.generate_order_document_pdf(
-                carrier, title="ORDEN DE PEDIDO", include_diagram=False
-            ),
-            DocumentService.generate_diagram_pdf(carrier),
-            DocumentService.generate_dispatch_sheet_pdf(carrier),
-        ]
-        for att in AttachmentService(self.db).list_attachments(
+        annexes = AttachmentService(self.db).iter_annex_bytes(
             order.id, branch_scope=branch_scope
-        ):
-            try:
-                data = attachment_storage.read(att.stored_key)
-            except OSError:
-                continue  # file missing on disk: skip, still print the rest
-            part = attachment_to_pdf_part(data, att.content_type)
-            if part is not None:
-                parts.append(part)
-        return merge_pdfs(parts).getvalue()
+        )
+        return build_order_packet(carrier, annexes).getvalue()
 
     def _spool_and_create(
         self,
