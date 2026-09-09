@@ -13,7 +13,11 @@ way.
 from reportlab.lib.styles import getSampleStyleSheet
 
 from src.modules.optimizations.carrier import DocumentCarrier
-from src.modules.optimizations.documents import DocumentService, _material_label
+from src.modules.optimizations.documents import (
+    DocumentService,
+    _billable_material_rows,
+    _material_label,
+)
 
 _CELL = getSampleStyleSheet()["BodyText"]
 
@@ -77,7 +81,9 @@ def test_the_mark_falls_back_with_the_name_it_annotates():
 def test_the_priced_table_carries_the_mark():
     """The ORDEN DE PEDIDO: the commercial record of what was agreed."""
     carrier = _carrier(_material("b1", "catalog", skip_trim=True))
-    rows = DocumentService._build_materials_table(carrier, _CELL)._cellvalues
+    rows = DocumentService._build_materials_table(
+        carrier.materials_summary, [], _CELL
+    )._cellvalues
     assert "sin refilar" in rows[1][1].text
     # The mark never leaks into the money columns.
     assert rows[1][3] == "$45.50"
@@ -94,7 +100,9 @@ def test_the_client_material_table_carries_the_mark():
 
 def test_a_trimmed_job_prints_no_mark_anywhere():
     carrier = _carrier(_material("b1", "catalog"), _material("r1", "clientOffcut"))
-    priced = DocumentService._build_materials_table(carrier, _CELL)._cellvalues
+    priced = DocumentService._build_materials_table(
+        _billable_material_rows(carrier), [], _CELL
+    )._cellvalues
     client = DocumentService._build_client_material_table(
         [_material("r1", "clientOffcut")], _CELL
     )._cellvalues

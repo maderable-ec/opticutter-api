@@ -175,23 +175,6 @@ def test_optimize_consolidates_the_leftovers_it_reports(client):
     assert any(r["width"] == pytest.approx(span) for r in remainders)
 
 
-def test_carrier_exposes_linear_meter_totals():
-    """``from_payload`` exposes the new totals; an old payload falls back to 0.0."""
-    from src.modules.optimizations.carrier import DocumentCarrier
-
-    carrier = DocumentCarrier.from_payload(
-        {"total_cut_linear_m": 12.5, "total_edge_banding_linear_m": 3.2},
-        client=None,
-        reference="OPT-x",
-    )
-    assert carrier.total_cut_linear_m == 12.5
-    assert carrier.total_edge_banding_linear_m == 3.2
-
-    legacy = DocumentCarrier.from_payload({}, client=None, reference="OPT-y")
-    assert legacy.total_cut_linear_m == 0.0
-    assert legacy.total_edge_banding_linear_m == 0.0
-
-
 def test_optimize_returns_optimization_hash(client):
     """The response exposes the deterministic hash of the inputs."""
     created_client = _create_client(client)

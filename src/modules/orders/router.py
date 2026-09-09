@@ -44,10 +44,11 @@ from src.shared.responses import (
 
 router = APIRouter(prefix="/orders", tags=["orders"], responses=ERROR_RESPONSES)
 
-# Read/document: admin + seller + operator. Write (create, invoice, export):
-# admin + seller. State transition: admin + seller + operator (TRANSITION_ROLES
-# filters by specific transition in the service). Cutting plan: admin + seller +
-# operator. Marking pieces: admin + operator.
+# Read/document: admin + seller + operator. Write (invoice, export, attachments,
+# branch, priority): admin + seller — an order is not created here, it is born
+# when a client confirms a pre-order's review. State transition: admin + seller +
+# operator (TRANSITION_ROLES filters by specific transition in the service).
+# Cutting plan: admin + seller + operator. Marking pieces: admin + operator.
 _READ = Depends(require_permission("orders:read"))
 _WRITE = Depends(require_permission("orders:write"))
 _CUTTING = Depends(require_permission("cutting_plan"))

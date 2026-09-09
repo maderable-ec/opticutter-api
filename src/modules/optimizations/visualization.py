@@ -1,5 +1,4 @@
 import io
-from dataclasses import dataclass
 from typing import List, Optional, Set, Tuple
 
 from PIL import Image, ImageColor, ImageDraw, ImageFont
@@ -15,24 +14,20 @@ _FONT_CANDIDATES = [
     "/Library/Fonts/Arial.ttf",
 ]
 
-# Diagram palette (aligned with the documents' MADERABLE branding).
-COLOR_BOARD_OUTLINE = "#1D1D1B"
-COLOR_PIECE_FILL = "#FCE9E6"
-COLOR_PIECE_OUTLINE = "#E8564B"
-COLOR_DIM = "#1D1D1B"
-COLOR_LABEL = "#212121"
-COLOR_EFFICIENCY = "#2E7D32"
-COLOR_WASTE_FILL = "#ECECEC"  # neutral grey: contrasts with the pieces' coral
+# Diagram palette. The cut diagram only ever prints inside the order packet, on
+# the shop's own printer, so it is monochrome throughout: outlines, dimensions and
+# labels in black, pieces white, offcuts a neutral grey. The branded (coral) twin
+# died with the documents that carried it, and colour was never what carried the
+# distinction that matters -- a banded edge is told apart by its FILL (solid for
+# soft, hatched for hard), which is exactly what survives a black-and-white print.
+COLOR_INK = "black"  # outlines, dimensions, labels, efficiency, banded edges
+COLOR_PIECE_FILL = "white"
+COLOR_WASTE_FILL = "#ECECEC"  # neutral grey: an offcut is not a piece
 COLOR_WASTE_OUTLINE = "#9E9E9E"
-# Offcut size labels: darker than the outline so they read over the fill, lighter
-# than COLOR_DIM so a leftover never competes with a piece dimension for attention
-# (mirrors the web diagram's WASTE_LABEL).
-COLOR_WASTE_LABEL = "#6C757D"
 # Wood grain. The board is melamine and it has a direction: the operator has to
 # lay the sheet the right way round before the first cut, and nothing in the
 # drawing used to say which way that was.
-COLOR_GRAIN = "#8A7F72"
-COLOR_GRAIN_MONO = "#6E6E6E"
+COLOR_GRAIN = "#6E6E6E"
 # Alpha of the grain overlay. It is painted OVER everything (see ``_draw_grain``),
 # so this is what keeps the dimensions and labels underneath readable. It is the
 # knob to turn if the grain comes out heavy on paper.
@@ -71,14 +66,20 @@ GRAIN_JITTER = (0.0, 0.22, -0.15, 0.3, -0.28, 0.12, -0.05, 0.18, -0.22, 0.08, -0
 # along the edge, inside the piece.
 PIECE_OUTLINE_WIDTH = 2
 EDGE_BANDING_WIDTH = PIECE_OUTLINE_WIDTH + 5
-# Step (px) of the diagonal hatching that distinguishes hard edge banding in mono mode.
+# Step (px) of the diagonal hatching that distinguishes hard edge banding.
 HATCH_STEP = 6
 
+# White space around the board inside the canvas. A module constant because the
+# canvas is the only thing that reports the board's pixel box: with the header
+# band measured rather than reserved, its height is ``canvas_height -
+# scaled_board_height - 2 * MARGIN`` and nothing else can derive it.
+MARGIN = 60
+
 # The header strip above the board: legend, then the board's name. Its height is
-# DERIVED from the text it holds (see ``generate_layout_image``) rather than
-# reserved as a fixed 150px — that number was sized for a 36px header face, so
-# every later trim to the fonts left the gaps behind, floating the name in the
-# middle of an empty band.
+# DERIVED from the text it holds (see ``render_layout``) rather than reserved as a
+# fixed 150px — that number was sized for a 36px header face, so every later trim
+# to the fonts left the gaps behind, floating the name in the middle of an empty
+# band.
 LEGEND_BOX = 32  # swatch side
 LEGEND_TEXT_GAP = 12  # swatch → its text
 LEGEND_ITEM_GAP = 50  # one entry → the next
@@ -86,55 +87,6 @@ LEGEND_ROW_GAP = 16  # a wrapped legend row → the next
 LEGEND_TOP = 24  # canvas top → legend
 HEADER_GAP_ABOVE = 16  # legend → board name
 HEADER_GAP_BELOW = 14  # board name → the board itself
-
-
-@dataclass(frozen=True)
-class _DiagramTheme:
-    """Diagram colors. ``brand`` (order document, branded) or ``mono`` (production
-    sheet, black and white for the workshop)."""
-
-    board_outline: str
-    piece_fill: str
-    piece_outline: str
-    dim: str
-    label: str
-    efficiency: str
-    waste_fill: str
-    waste_outline: str
-    waste_label: str  # offcut size labels
-    edge: str  # edge-banding strip color
-    grain: str  # wood grain overlay color
-
-
-_BRAND_THEME = _DiagramTheme(
-    board_outline=COLOR_BOARD_OUTLINE,
-    piece_fill=COLOR_PIECE_FILL,
-    piece_outline=COLOR_PIECE_OUTLINE,
-    dim=COLOR_DIM,
-    label=COLOR_LABEL,
-    efficiency=COLOR_EFFICIENCY,
-    waste_fill=COLOR_WASTE_FILL,
-    waste_outline=COLOR_WASTE_OUTLINE,
-    waste_label=COLOR_WASTE_LABEL,
-    edge=COLOR_PIECE_OUTLINE,
-    grain=COLOR_GRAIN,
-)
-# Monochrome: outlines/dimensions/labels in black, piece in white; the grey
-# offcut is already neutral and works as-is. Edge banding is distinguished by
-# fill (solid vs. hatched).
-_MONO_THEME = _DiagramTheme(
-    board_outline="black",
-    piece_fill="white",
-    piece_outline="black",
-    dim="black",
-    label="black",
-    efficiency="black",
-    waste_fill=COLOR_WASTE_FILL,
-    waste_outline=COLOR_WASTE_OUTLINE,
-    waste_label="black",
-    edge="black",
-    grain=COLOR_GRAIN_MONO,
-)
 
 
 def _draw_edge_strip(
@@ -278,10 +230,10 @@ def _load_font(size: int) -> ImageFont.FreeTypeFont:
     return ImageFont.load_default()
 
 
-def _text_size(text: str, font: ImageFont.ImageFont) -> Tuple[int, int]:
-    """Measures the width and height of a text with the given font."""
-    bbox = ImageDraw.Draw(Image.new("RGBA", (1, 1))).textbbox((0, 0), text, font=font)
-    return bbox[2] - bbox[0], bbox[3] - bbox[1]
+# Measuring a string needs a drawing context but no canvas, and a board asks for
+# hundreds of measurements (every label truncation walks one character at a time).
+# One throwaway 1x1 for the process, instead of one per question.
+_MEASURE = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
 
 
 def _text_bounds(text: str, font: ImageFont.ImageFont) -> Tuple[int, int, int]:
@@ -293,18 +245,24 @@ def _text_bounds(text: str, font: ImageFont.ImageFont) -> Tuple[int, int, int]:
     ``_text_size`` returns) and treating it as the line's height is what made the
     header's gaps come out smaller than the numbers that set them.
     """
-    bbox = ImageDraw.Draw(Image.new("RGBA", (1, 1))).textbbox((0, 0), text, font=font)
+    bbox = _MEASURE.textbbox((0, 0), text, font=font)
     return bbox[2] - bbox[0], bbox[1], bbox[3]
+
+
+def _text_size(text: str, font: ImageFont.ImageFont) -> Tuple[int, int]:
+    """Width and height of the text's glyph box — what it occupies, not where it
+    inks. Use ``_text_bounds`` whenever the answer positions a line."""
+    width, top, bottom = _text_bounds(text, font)
+    return width, bottom - top
 
 
 def _text_image(
     text: str, font: ImageFont.ImageFont, fill: str, pad: int = 2
 ) -> Image.Image:
     """Renders the text onto a transparent RGBA image (for pasting/rotating)."""
-    bbox = ImageDraw.Draw(Image.new("RGBA", (1, 1))).textbbox((0, 0), text, font=font)
-    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-    img = Image.new("RGBA", (tw + 2 * pad, th + 2 * pad), (0, 0, 0, 0))
-    ImageDraw.Draw(img).text((pad - bbox[0], pad - bbox[1]), text, font=font, fill=fill)
+    x0, y0, x1, y1 = _MEASURE.textbbox((0, 0), text, font=font)
+    img = Image.new("RGBA", (x1 - x0 + 2 * pad, y1 - y0 + 2 * pad), (0, 0, 0, 0))
+    ImageDraw.Draw(img).text((pad - x0, pad - y0), text, font=font, fill=fill)
     return img
 
 
@@ -323,34 +281,29 @@ def _fit_label(
     return (truncated + "…") if truncated else None
 
 
-def _legend_entries(
-    theme: "_DiagramTheme", mono: bool, band_types: Set[str]
-) -> List[Tuple[str, str, int, str, str]]:
+def _legend_entries(band_types: Set[str]) -> List[Tuple[str, str, int, str, str]]:
     """The legend's entries: ``(fill, outline, width, text, swatch)``.
 
     ``swatch`` is ``""`` for a plain box, ``"hatch"`` for the hard-edge hatching
-    or ``"grain"`` for the veta. In monochrome the two banding types get one
-    entry each (only hatching tells them apart with no colour); branded mode uses
-    a single "Lado canteado".
+    or ``"grain"`` for the veta. The two banding types get one entry each and only
+    the ones present in the pattern: with no colour, the hatching is the only
+    thing that tells them apart, so it has to be spelled out.
     """
     entries = [
-        (theme.piece_fill, theme.piece_outline, PIECE_OUTLINE_WIDTH, "Pieza", ""),
+        (COLOR_PIECE_FILL, COLOR_INK, PIECE_OUTLINE_WIDTH, "Pieza", ""),
         (
-            theme.waste_fill,
-            theme.waste_outline,
+            COLOR_WASTE_FILL,
+            COLOR_WASTE_OUTLINE,
             PIECE_OUTLINE_WIDTH,
             "Retazo / Desperdicio",
             "",
         ),
-        ("white", theme.board_outline, 1, "Veta", "grain"),
+        ("white", COLOR_INK, 1, "Veta", "grain"),
     ]
-    if mono:
-        if "Soft" in band_types:
-            entries.append((theme.edge, theme.edge, 1, "Canto suave", ""))
-        if "Hard" in band_types:
-            entries.append(("white", theme.edge, 1, "Canto duro", "hatch"))
-    elif band_types:
-        entries.append(("white", theme.edge, EDGE_BANDING_WIDTH, "Lado canteado", ""))
+    if "Soft" in band_types:
+        entries.append((COLOR_INK, COLOR_INK, 1, "Canto suave", ""))
+    if "Hard" in band_types:
+        entries.append(("white", COLOR_INK, 1, "Canto duro", "hatch"))
     return entries
 
 
@@ -385,13 +338,9 @@ def _legend_layout(
 
 def _draw_remainder_labels(
     img: Image.Image,
-    board_x: int,
-    board_y: int,
-    board_height: float,
-    scale: float,
+    rect: Tuple[int, int, int, int],
     remainder: dict,
     dim_font: ImageFont.ImageFont,
-    theme: _DiagramTheme,
 ) -> None:
     """An offcut's size, on its edges, exactly like a piece's: the height (its
     horizontal extent after the rotation) along the bottom, the width (its
@@ -399,41 +348,30 @@ def _draw_remainder_labels(
     does not fit, which is what keeps the long dimension of a thin strip when the
     short one has no room.
 
-    Drawn AFTER the grain, so the texture never runs through a number.
+    Takes the pixel rect the shape pass already computed. Drawn AFTER the grain,
+    so the texture never runs through a number.
     """
-    rx, ry, rw, rh = _rotated_rect(
-        board_x,
-        board_y,
-        board_height,
-        scale,
-        remainder["x"],
-        remainder["y"],
-        remainder["width"],
-        remainder["height"],
-    )
-    if rw <= 5 or rh <= 5:
-        return
+    rx, ry, rw, rh = rect
     pad = 4
-    alto = _text_image(str(int(remainder["height"])), dim_font, theme.waste_label)
+    alto = _text_image(str(int(remainder["height"])), dim_font, COLOR_INK)
     if alto.width <= rw - 2 * pad and alto.height <= rh - 2 * pad:
         img.paste(
             alto, (rx + (rw - alto.width) // 2, ry + rh - alto.height - pad), alto
         )
-    ancho = _text_image(
-        str(int(remainder["width"])), dim_font, theme.waste_label
-    ).rotate(90, expand=True)
+    ancho = _text_image(str(int(remainder["width"])), dim_font, COLOR_INK).rotate(
+        90, expand=True
+    )
     if ancho.height <= rh - 2 * pad and ancho.width <= rw - 2 * pad:
         img.paste(ancho, (rx + pad, ry + (rh - ancho.height) // 2), ancho)
 
 
 class VisualizationService:
     @staticmethod
-    def generate_layout_image(
+    def render_layout(
         group: dict,
         target_long: int = 2000,
-        mono: bool = False,
         board_name: Optional[str] = None,
-    ) -> Tuple[io.BytesIO, Tuple[int, int]]:
+    ) -> Image.Image:
         """Draws a single cutting pattern filling the whole canvas.
 
         The canvas adopts the board's aspect ratio so that, embedded full-page,
@@ -441,8 +379,13 @@ class VisualizationService:
         left edge (vertical text) and its width along the bottom edge; the label
         is centered. Offcuts are dimensioned the same way (in the muted waste
         color) when they are large enough to hold the text. The wood grain is laid
-        over the finished board. Returns the PNG buffer and its dimensions in px
-        so it can be embedded preserving the aspect ratio.
+        over the finished board.
+
+        Returns the PIL image, not an encoded buffer: its one consumer hands it
+        straight to reportlab, which wants the pixels. Encoding a PNG only for
+        reportlab to decode it again was 60% of the packet's render time — see
+        ``generate_layout_image`` for the buffer, which nothing in the PDF path
+        needs any more.
 
         ``board_name`` is the material's printed name, resolved by the caller off
         the payload's ``materials_summary`` (the render layer never touches the
@@ -457,15 +400,13 @@ class VisualizationService:
         board_width = material.get("width", 1220)
         board_height = material.get("height", 2440)
 
-        margin = 60
-
         # The board is drawn rotated 90° clockwise (landscape): the board's height
         # becomes the canvas's horizontal extent and its width the vertical one.
         scale = target_long / max(board_width, board_height)
         scaled_board_width = int(board_height * scale)
         scaled_board_height = int(board_width * scale)
 
-        canvas_width = scaled_board_width + 2 * margin
+        canvas_width = scaled_board_width + 2 * MARGIN
 
         # The header now carries the board's full name instead of "Tablero 1",
         # so it is set smaller than the index was: a long melamine name has to
@@ -479,8 +420,6 @@ class VisualizationService:
         dim_font = _load_font(21)
         label_font = _load_font(24)
         legend_font = _load_font(16)
-
-        theme = _MONO_THEME if mono else _BRAND_THEME
 
         # Edge-banding types present in the pattern (for the legend). A banded
         # piece with no known type (older snapshots) is treated as solid → "Soft".
@@ -501,41 +440,34 @@ class VisualizationService:
         # trimming the fonts only made the empty space bigger. ``label_top`` is
         # subtracted back out so the two constants are the INKED gaps, the ones
         # the eye sees, not distances to an invisible anchor line.
-        _, legend_bottom = _legend_layout(
-            _legend_entries(theme, mono, band_types),
-            legend_font,
-            margin,
-            LEGEND_TOP,
-            canvas_width - margin,
+        #
+        # Laid out once and handed to the drawing below: the legend's own height
+        # is what sets the band, so measuring it here and letting ``_draw_legend``
+        # measure it again is both wasted work and two places to disagree.
+        legend = _legend_entries(band_types)
+        legend_positions, legend_bottom = _legend_layout(
+            legend, legend_font, MARGIN, LEGEND_TOP, canvas_width - MARGIN
         )
         label_y = legend_bottom + HEADER_GAP_ABOVE - label_top
         info_height = label_y + label_bottom + HEADER_GAP_BELOW
-        canvas_height = info_height + scaled_board_height + 2 * margin
+        canvas_height = info_height + scaled_board_height + 2 * MARGIN
 
         img = Image.new("RGB", (canvas_width, canvas_height), color="white")
         draw = ImageDraw.Draw(img)
 
         VisualizationService._draw_legend(
-            img,
-            draw,
-            margin,
-            LEGEND_TOP,
-            legend_font,
-            theme,
-            mono=mono,
-            band_types=band_types,
-            max_x=canvas_width - margin,
+            img, draw, legend, legend_positions, legend_font
         )
 
-        board_x = margin
+        board_x = MARGIN
         board_y = info_height
 
-        draw.text((board_x, label_y), board_label, fill="black", font=header_font)
+        draw.text((board_x, label_y), board_label, fill=COLOR_INK, font=header_font)
         efficiency = layout.get("statistics", {}).get("efficiency", 0)
         draw.text(
             (board_x + label_w + 30, label_y),
             f"Eficiencia: {efficiency:.1f}%",
-            fill=theme.efficiency,
+            fill=COLOR_INK,
             font=header_font,
         )
 
@@ -546,47 +478,45 @@ class VisualizationService:
                 board_x + scaled_board_width,
                 board_y + scaled_board_height,
             ],
-            outline=theme.board_outline,
+            outline=COLOR_INK,
             width=3,
         )
 
         # Shapes first, then the grain, then every label: the grain belongs to the
         # sheet and has to run over the pieces and the offcuts, but a texture
-        # drawn through a dimension is just a dirty number.
-        pieces = layout.get("placed_pieces", [])
-        remainders = layout.get("remainders", [])
-
-        for piece in pieces:
-            VisualizationService._draw_piece(
-                img,
-                draw,
+        # drawn through a dimension is just a dirty number. Both passes read the
+        # same pixel rects, so they are mapped once here rather than derived twice
+        # from the board frame.
+        def _rect(item: dict) -> Tuple[int, int, int, int]:
+            return _rotated_rect(
                 board_x,
                 board_y,
                 board_height,
                 scale,
-                piece,
-                theme,
-                mono=mono,
+                item["x"],
+                item["y"],
+                item["width"],
+                item["height"],
             )
 
-        for remainder in remainders:
-            rx, ry, rw, rh = _rotated_rect(
-                board_x,
-                board_y,
-                board_height,
-                scale,
-                remainder["x"],
-                remainder["y"],
-                remainder["width"],
-                remainder["height"],
+        pieces = [(p, _rect(p)) for p in layout.get("placed_pieces", [])]
+        # An offcut too small to hold ink is not drawn at all, shape or label.
+        remainders = [
+            (r, rect)
+            for r, rect in ((r, _rect(r)) for r in layout.get("remainders", []))
+            if rect[2] > 5 and rect[3] > 5
+        ]
+
+        for piece, rect in pieces:
+            VisualizationService._draw_piece(img, draw, rect, piece)
+
+        for _, (rx, ry, rw, rh) in remainders:
+            draw.rectangle(
+                [rx, ry, rx + rw, ry + rh],
+                fill=COLOR_WASTE_FILL,
+                outline=COLOR_WASTE_OUTLINE,
+                width=1,
             )
-            if rw > 5 and rh > 5:
-                draw.rectangle(
-                    [rx, ry, rx + rw, ry + rh],
-                    fill=theme.waste_fill,
-                    outline=theme.waste_outline,
-                    width=1,
-                )
 
         # Last, so it runs over pieces, offcuts and bare sheet alike.
         _draw_grain(
@@ -597,54 +527,49 @@ class VisualizationService:
             scaled_board_height,
             board_width,
             scale,
-            theme.grain,
+            COLOR_GRAIN,
         )
 
-        for piece in pieces:
+        for piece, rect in pieces:
             VisualizationService._draw_piece_labels(
-                img,
-                board_x,
-                board_y,
-                board_height,
-                scale,
-                piece,
-                dim_font,
-                label_font,
-                theme,
+                img, rect, piece, dim_font, label_font
             )
 
-        for remainder in remainders:
-            _draw_remainder_labels(
-                img, board_x, board_y, board_height, scale, remainder, dim_font, theme
-            )
+        for remainder, rect in remainders:
+            _draw_remainder_labels(img, rect, remainder, dim_font)
 
+        return img
+
+    @staticmethod
+    def generate_layout_image(
+        group: dict,
+        target_long: int = 2000,
+        board_name: Optional[str] = None,
+    ) -> Tuple[io.BytesIO, Tuple[int, int]]:
+        """``render_layout`` encoded as a PNG, with the image's size in px.
+
+        The PDF path does NOT go through here — reportlab takes the PIL image
+        directly. This is for anything that needs the diagram as a file: an
+        export, a debugging script, a future endpoint.
+        """
+        img = VisualizationService.render_layout(
+            group, target_long=target_long, board_name=board_name
+        )
         buffer = io.BytesIO()
         img.save(buffer, format="PNG")
         buffer.seek(0)
-        return buffer, (canvas_width, canvas_height)
+        return buffer, img.size
 
     @staticmethod
     def _draw_legend(
         img: Image.Image,
         draw: ImageDraw.ImageDraw,
-        x: int,
-        y: int,
+        legend: List[Tuple[str, str, int, str, str]],
+        positions: List[Tuple[int, int]],
         legend_font: ImageFont.ImageFont,
-        theme: _DiagramTheme,
-        mono: bool = False,
-        band_types: Optional[Set[str]] = None,
-        max_x: Optional[int] = None,
     ) -> None:
-        """Draws the legend (piece, offcut, grain and, depending on the pattern, edges).
-
-        In monochrome it breaks down soft edge banding (solid swatch) and hard
-        (hatched swatch) based on the types present; branded mode uses a single
-        "Lado canteado" entry. Wraps to a new row when an entry would overflow ``max_x``.
-        """
-        legend = _legend_entries(theme, mono, band_types or set())
-        positions, _ = _legend_layout(legend, legend_font, x, y, max_x)
-
-        text_color = theme.label if mono else "black"
+        """Draws the legend (piece, offcut, grain and, when present, the two
+        banding types) at the positions ``_legend_layout`` already resolved."""
         box = LEGEND_BOX
         for (fill, outline, width, text, swatch), (x, y) in zip(legend, positions):
             _, th = _text_size(text, legend_font)
@@ -660,16 +585,16 @@ class VisualizationService:
                     # the entry is that the mark is a broken texture.
                     for k, gy in enumerate(range(y + 4, y + box - 2, 5)):
                         cut = x + 8 + (k * 5) % 12
-                        draw.line([(x + 3, gy), (cut, gy)], fill=theme.grain, width=1)
+                        draw.line([(x + 3, gy), (cut, gy)], fill=COLOR_GRAIN, width=1)
                         draw.line(
                             [(cut + 3, gy), (x + box - 3, gy)],
-                            fill=theme.grain,
+                            fill=COLOR_GRAIN,
                             width=1,
                         )
             draw.text(
                 (x + box + LEGEND_TEXT_GAP, y + (box - th) // 2),
                 text,
-                fill=text_color,
+                fill=COLOR_INK,
                 font=legend_font,
             )
 
@@ -677,13 +602,8 @@ class VisualizationService:
     def _draw_piece(
         img: Image.Image,
         draw: ImageDraw.ImageDraw,
-        board_x: int,
-        board_y: int,
-        board_height: float,
-        scale: float,
+        rect: Tuple[int, int, int, int],
         piece: dict,
-        theme: _DiagramTheme,
-        mono: bool = False,
     ) -> None:
         """Draws a piece's SHAPE (board rotated 90 degrees clockwise): its
         rectangle and the strips along its banded sides.
@@ -691,34 +611,25 @@ class VisualizationService:
         Its text is a separate pass (``_draw_piece_labels``) because the grain
         goes between the two -- over the shapes, under the numbers.
         """
-        px, py, pw, ph = _rotated_rect(
-            board_x,
-            board_y,
-            board_height,
-            scale,
-            piece["x"],
-            piece["y"],
-            piece["width"],
-            piece["height"],
-        )
+        px, py, pw, ph = rect
 
         draw.rectangle(
             [px, py, px + pw, py + ph],
-            fill=theme.piece_fill,
-            outline=theme.piece_outline,
+            fill=COLOR_PIECE_FILL,
+            outline=COLOR_INK,
             width=PIECE_OUTLINE_WIDTH,
         )
 
-        # Banded sides: thick strip along the edge, inside the piece. In
-        # monochrome, hard edges are hatched diagonally and soft (or unknown) ones
-        # are solid. After rotating the board 90 degrees clockwise the sides
-        # rotate: left->top, top->right, right->bottom, bottom->left.
+        # Banded sides: thick strip along the edge, inside the piece. Hard edges
+        # are hatched diagonally and soft (or unknown) ones are solid. After
+        # rotating the board 90 degrees clockwise the sides rotate:
+        # left->top, top->right, right->bottom, bottom->left.
         edges = piece.get("edges") or {}
         sides = set(edges.get("sides") or [])
         if sides:
-            hatched = mono and edges.get("band_type") == "Hard"
+            hatched = edges.get("band_type") == "Hard"
             w = EDGE_BANDING_WIDTH
-            color = theme.edge
+            color = COLOR_INK
             if "left" in sides:
                 _draw_edge_strip(img, draw, (px, py, px + pw, py + w), color, hatched)
             if "right" in sides:
@@ -735,14 +646,10 @@ class VisualizationService:
     @staticmethod
     def _draw_piece_labels(
         img: Image.Image,
-        board_x: int,
-        board_y: int,
-        board_height: float,
-        scale: float,
+        rect: Tuple[int, int, int, int],
         piece: dict,
         dim_font: ImageFont.ImageFont,
         label_font: ImageFont.ImageFont,
-        theme: _DiagramTheme,
     ) -> None:
         """A piece's text: one dimension on the left, another on the bottom, the
         label centered. After the rotation the height in mm is the rect's
@@ -750,21 +657,12 @@ class VisualizationService:
 
         Drawn AFTER the grain, so the texture never runs through a number.
         """
-        px, py, pw, ph = _rotated_rect(
-            board_x,
-            board_y,
-            board_height,
-            scale,
-            piece["x"],
-            piece["y"],
-            piece["width"],
-            piece["height"],
-        )
+        px, py, pw, ph = rect
         pad = 4
 
         # After rotation, the height (first dimension) is the horizontal extent:
         # it goes along the bottom edge with horizontal text.
-        alto = _text_image(str(int(piece["height"])), dim_font, theme.dim)
+        alto = _text_image(str(int(piece["height"])), dim_font, COLOR_INK)
         if alto.width <= pw - 2 * pad and alto.height <= ph - 2 * pad:
             img.paste(
                 alto,
@@ -774,7 +672,7 @@ class VisualizationService:
 
         # The width (second dimension) is the vertical extent: it goes along the
         # left edge with vertical text.
-        ancho = _text_image(str(int(piece["width"])), dim_font, theme.dim).rotate(
+        ancho = _text_image(str(int(piece["width"])), dim_font, COLOR_INK).rotate(
             90, expand=True
         )
         if ancho.height <= ph - 2 * pad and ancho.width <= pw - 2 * pad:
@@ -790,13 +688,13 @@ class VisualizationService:
         if piece_id and not piece_id.startswith("piece_"):
             label = _fit_label(piece_id, label_font, pw - 2 * pad, ph - 2 * pad)
             if label:
-                stack.append(_text_image(label, label_font, theme.label))
+                stack.append(_text_image(label, label_font, COLOR_INK))
 
         notation = (piece.get("edges") or {}).get("notation")
         if notation:
             fitted = _fit_label(notation, dim_font, pw - 2 * pad, ph - 2 * pad)
             if fitted:
-                stack.append(_text_image(fitted, dim_font, theme.label))
+                stack.append(_text_image(fitted, dim_font, COLOR_INK))
 
         if stack:
             gap = 2

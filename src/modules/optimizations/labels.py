@@ -5,9 +5,6 @@ from typing import Iterable, Optional
 # Edge-type abbreviation: Soft→CS, Hard→CD (BandType canonical values).
 _BAND_TYPE_ABBR = {"Soft": "CS", "Hard": "CD"}
 
-# Readable edge-type label for tables/legends (BandType canonical values).
-BAND_TYPE_LABEL = {"Soft": "Suave", "Hard": "Duro"}
-
 
 def edge_banding_notation(
     sides: Iterable[str],

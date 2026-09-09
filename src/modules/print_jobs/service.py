@@ -111,7 +111,7 @@ class PrintJobService:
 
         ``None`` when the order's branch has consolidated printing disabled. The
         check comes before the render on purpose: the packet is a PDF merge of the
-        order document, the diagram, the dispatch sheet and every attachment.
+        ORDEN DE PEDIDO, the cut diagram and every attachment.
         """
         order = self._order_scoped(order_id, branch_scope)
         if not _printing_enabled(order.branch, PrintJobType.sheet):

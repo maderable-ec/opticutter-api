@@ -1,9 +1,9 @@
 import base64
 import io
-from dataclasses import dataclass
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
-from typing import Iterable, List, Optional, Tuple, Union
+from typing import Iterable, Iterator, List, Optional, Tuple, Union
 from xml.sax.saxutils import escape
 
 from fastapi.responses import StreamingResponse
@@ -21,7 +21,6 @@ from reportlab.platypus import (
     HRFlowable,
     Image,
     KeepTogether,
-    PageBreak,
     PageTemplate,
     Paragraph,
     Spacer,
@@ -44,29 +43,11 @@ ZEBRA_GREY = colors.HexColor("#F5F5F5")
 TEXT_GREY = colors.HexColor("#424242")
 
 
-@dataclass(frozen=True)
-class Palette:
-    """Themed colors for a PDF: table headers, section rules and the totals box."""
-
-    accent: colors.Color  # table header, section rule, totals border
-    accent_fill: colors.Color  # totals box / TOTAL row background
-    text: colors.Color  # titles and dark rules
-    text_grey: colors.Color  # secondary text in cells
-    zebra: colors.Color  # alternating rows
-    header_text: colors.Color  # text over the table header
-
-
-# The only document the order emits (ORDEN DE PEDIDO) is branded. The monochrome
-# sibling died with the production sheet; the B/W cut diagram gets its greys from
-# ``visualization._MONO_THEME``, not from here.
-BRAND_PALETTE = Palette(
-    accent=BRAND_CORAL,
-    accent_fill=LIGHT_CORAL,
-    text=BRAND_BLACK,
-    text_grey=TEXT_GREY,
-    zebra=ZEBRA_GREY,
-    header_text=colors.whitesmoke,
-)
+# There is no themed palette object any more: the order emits ONE document and it
+# is branded, so the constants above ARE the palette. The indirection existed for
+# the monochrome sibling that died with the production sheet, half its fields had
+# no reader left, and the rest of the file had gone back to naming the constants
+# directly anyway. The B/W cut diagram keeps its own greys in ``visualization``.
 
 PAGE_WIDTH, PAGE_HEIGHT = A4
 LEFT_MARGIN = RIGHT_MARGIN = 0.5 * inch
@@ -133,20 +114,30 @@ DISPATCH_DISCLAIMER = (
 )
 
 
+@lru_cache(maxsize=None)
+def _asset(path: Path) -> ImageReader:
+    """The letterhead assets, decoded once per process.
+
+    They are immutable files shipped with the package, and the watermark alone was
+    being re-read and re-decoded on every page of every document.
+    """
+    return ImageReader(str(path))
+
+
 def _scaled_image(path: Path, width: float) -> Image:
     """Image scaled to ``width`` while preserving its aspect ratio."""
-    img_width, img_height = ImageReader(str(path)).getSize()
+    img_width, img_height = _asset(path).getSize()
     height = width * img_height / img_width
     return Image(str(path), width=width, height=height)
 
 
-def _draw_watermark(canvas, page_width: float, page_height: float) -> None:
+def _draw_watermark(cnv, page_width: float, page_height: float) -> None:
     """Faint centered watermark (drawn underneath the content)."""
-    reader = ImageReader(str(WATERMARK_PATH))
+    reader = _asset(WATERMARK_PATH)
     img_width, img_height = reader.getSize()
     wm_width = 3.8 * inch
     wm_height = wm_width * img_height / img_width
-    canvas.drawImage(
+    cnv.drawImage(
         reader,
         (page_width - wm_width) / 2,
         (page_height - wm_height) / 2,
@@ -156,41 +147,32 @@ def _draw_watermark(canvas, page_width: float, page_height: float) -> None:
     )
 
 
-def _draw_footer_accent(canvas, page_width: float) -> None:
+def _draw_footer_accent(cnv, page_width: float) -> None:
     """Angular orange band with a black notch on the bottom edge (letterhead style)."""
     band_h = 12
     slant = 20
     x0 = page_width * 0.52
 
-    canvas.setFillColor(BRAND_BLACK)
-    notch = canvas.beginPath()
+    cnv.setFillColor(BRAND_BLACK)
+    notch = cnv.beginPath()
     notch.moveTo(x0 - 44, 0)
     notch.lineTo(x0 + 6, 0)
     notch.lineTo(x0 + 6 + slant, band_h)
     notch.lineTo(x0 - 44 + slant, band_h)
     notch.close()
-    canvas.drawPath(notch, fill=1, stroke=0)
+    cnv.drawPath(notch, fill=1, stroke=0)
 
-    canvas.setFillColor(BRAND_ORANGE)
-    band = canvas.beginPath()
+    cnv.setFillColor(BRAND_ORANGE)
+    band = cnv.beginPath()
     band.moveTo(x0, 0)
     band.lineTo(page_width, 0)
     band.lineTo(page_width, band_h)
     band.lineTo(x0 + slant, band_h)
     band.close()
-    canvas.drawPath(band, fill=1, stroke=0)
+    cnv.drawPath(band, fill=1, stroke=0)
 
 
-def _page_size(doc) -> tuple:
-    """Size of the page being drawn, not of the document default.
-
-    A document mixes orientations (portrait lists, landscape diagrams), so every
-    footer/watermark position has to come from the *active* page template.
-    """
-    return getattr(doc.pageTemplate, "pagesize", None) or doc.pagesize
-
-
-def _draw_page_decoration(canvas, doc) -> None:
+def _draw_page_decoration(cnv, doc) -> None:
     """Watermark and footer accent on every sheet of the ORDEN DE PEDIDO.
 
     The footer *text* is not drawn here: it is stamped on the merged packet by
@@ -198,76 +180,50 @@ def _draw_page_decoration(canvas, doc) -> None:
     count. A document that numbered its own pages restarted at 1 halfway through
     the printout, once for the order and again for the diagram.
     """
-    page_width, page_height = _page_size(doc)
-    canvas.saveState()
-    _draw_watermark(canvas, page_width, page_height)
-    _draw_footer_accent(canvas, page_width)
-    canvas.restoreState()
-
-
-def _no_decoration(canvas, doc) -> None:
-    """The diagram pages carry nothing of their own: a diagram claims the whole
-    sheet, and the footer arrives with the packet's stamp."""
+    cnv.saveState()
+    _draw_watermark(cnv, PAGE_WIDTH, PAGE_HEIGHT)
+    _draw_footer_accent(cnv, PAGE_WIDTH)
+    cnv.restoreState()
 
 
 class _CutterDoc(BaseDocTemplate):
-    """A4 document with two page templates: ``portrait`` for the lists and
-    ``landscape`` for the cut diagrams.
+    """A4 portrait document for the ORDEN DE PEDIDO's lists, with compact margins
+    to save paper.
 
-    Compact margins to save paper; the horizontal margin stays fixed so table
-    widths don't need recalculating. A story switches orientation by emitting
-    ``NextPageTemplate("landscape")`` before a ``PageBreak`` — the switch sticks
-    for every following page (``BaseDocTemplate`` only changes template when one
-    is explicitly queued), which is why the diagram section never reverts.
+    One page template, on purpose. It used to register a landscape sibling too,
+    but no story ever queued it (that takes a ``NextPageTemplate``, which this
+    module does not even import): the cut diagrams travel as their own pages,
+    drawn straight onto a canvas by ``generate_diagram_pdf``. A document that
+    genuinely mixed orientations would need the pair back — and every footer
+    position read off the *active* template rather than the page size.
     """
 
-    def __init__(
-        self,
-        buffer: io.BytesIO,
-        on_page,
-        top: float = TOP_MARGIN,
-        bottom: float = BOTTOM_MARGIN,
-        start_landscape: bool = False,
-    ):
+    def __init__(self, buffer: io.BytesIO, on_page):
         super().__init__(
             buffer,
-            pagesize=LANDSCAPE_SIZE if start_landscape else A4,
-            topMargin=top,
-            bottomMargin=bottom,
+            pagesize=A4,
+            topMargin=TOP_MARGIN,
+            bottomMargin=BOTTOM_MARGIN,
             leftMargin=LEFT_MARGIN,
             rightMargin=RIGHT_MARGIN,
         )
-        portrait = PageTemplate(
-            id="portrait",
-            pagesize=A4,
-            onPage=on_page,
-            frames=[
-                Frame(
-                    LEFT_MARGIN,
-                    bottom,
-                    CONTENT_WIDTH,
-                    PAGE_HEIGHT - top - bottom,
-                    id="portrait_frame",
-                )
-            ],
-        )
-        landscape_tpl = PageTemplate(
-            id="landscape",
-            pagesize=LANDSCAPE_SIZE,
-            onPage=on_page,
-            frames=[
-                Frame(
-                    LEFT_MARGIN,
-                    bottom,
-                    LAND_CONTENT_WIDTH,
-                    LAND_HEIGHT - top - bottom,
-                    id="landscape_frame",
-                )
-            ],
-        )
-        # The build starts on ``pageTemplates[0]``.
         self.addPageTemplates(
-            [landscape_tpl, portrait] if start_landscape else [portrait, landscape_tpl]
+            [
+                PageTemplate(
+                    id="portrait",
+                    pagesize=A4,
+                    onPage=on_page,
+                    frames=[
+                        Frame(
+                            LEFT_MARGIN,
+                            BOTTOM_MARGIN,
+                            CONTENT_WIDTH,
+                            PAGE_HEIGHT - TOP_MARGIN - BOTTOM_MARGIN,
+                            id="portrait_frame",
+                        )
+                    ],
+                )
+            ]
         )
 
 
@@ -305,11 +261,17 @@ class DocumentService:
 
         # Omitted outright when nothing is billed — a job cut entirely on the
         # client's material would otherwise print a "RESUMEN DE MATERIALES"
-        # heading over a single "Sin datos de materiales" row, immediately above
-        # the block that does list what was cut.
-        if _billable_material_rows(carrier) or carrier.edge_bandings_summary:
+        # heading over an empty table, immediately above the block that does list
+        # what was cut.
+        billable = _billable_material_rows(carrier)
+        edge_bandings = carrier.edge_bandings_summary or []
+        if billable or edge_bandings:
             story.extend(_section("RESUMEN DE MATERIALES", heading_style))
-            story.append(DocumentService._build_materials_table(carrier, cell_style))
+            story.append(
+                DocumentService._build_materials_table(
+                    billable, edge_bandings, cell_style
+                )
+            )
             story.append(Spacer(1, BLOCK_SPACER))
 
         # The client's own retazos: listed so the document says what was cut, but
@@ -422,15 +384,39 @@ class DocumentService:
 
         Used by the order packet: the cut list, boards and edge banding already
         appear in the ORDEN DE PEDIDO, so here we print just the visual layout.
+        One pattern per landscape sheet, and nothing else on the sheet — no
+        header, no section title, not even a footer (the packet stamps the running
+        one later, being the only layer that knows the page count).
+
+        Drawn straight onto a ``canvas``: with one image per page and no flowing
+        content, the platypus document/frame/page-break machinery bought nothing
+        and forced every diagram through a PNG round trip. Going to the canvas
+        also means one board is rendered, drawn and released at a time, instead of
+        holding every ~12 MB image alive until the build.
         """
         buffer = io.BytesIO()
-        # Every page of this document is a diagram, so it is landscape throughout
-        # and carries no header at all: it only ever travels inside the order
-        # packet, where the ORDEN DE PEDIDO already identifies the job, and a
-        # header would shrink the first diagram for nothing.
-        doc = _CutterDoc(buffer, _no_decoration, start_landscape=True)
-
-        doc.build(DocumentService._build_layout_pages(carrier))
+        pdf = canvas.Canvas(buffer, pagesize=LANDSCAPE_SIZE)
+        for group, board_name in _diagram_pages(carrier):
+            image = VisualizationService.render_layout(group, board_name=board_name)
+            img_w, img_h = image.size
+            # The landscape frame is wider (770pt vs 523pt) but *shorter* (522pt
+            # vs 769pt) than a portrait one, so both bounds are applied or a tall
+            # board overflows.
+            draw_width = LAND_CONTENT_WIDTH
+            draw_height = draw_width * (img_h / img_w)
+            if draw_height > LAND_FRAME_HEIGHT:
+                draw_height = LAND_FRAME_HEIGHT
+                draw_width = draw_height * (img_w / img_h)
+            pdf.drawImage(
+                ImageReader(image),
+                LEFT_MARGIN + (LAND_CONTENT_WIDTH - draw_width) / 2,
+                LAND_HEIGHT - TOP_MARGIN - FRAME_PADDING - draw_height,
+                width=draw_width,
+                height=draw_height,
+                mask="auto",
+            )
+            pdf.showPage()
+        pdf.save()
         buffer.seek(0)
         return buffer
 
@@ -696,10 +682,17 @@ class DocumentService:
         return req_table
 
     @staticmethod
-    def _build_materials_table(carrier: DocumentCarrier, cell_style) -> Table:
+    def _build_materials_table(
+        boards: List[dict], edge_bandings: List[dict], cell_style
+    ) -> Table:
         """Single materials summary: boards (quantity in units) and edge banding
         (quantity in meters) in one table with code, description, quantity, unit
         price and subtotal. Spans the full content width.
+
+        Takes the rows rather than the carrier — like
+        ``_build_client_material_table`` — because the caller has to select them
+        anyway to decide whether the section is printed at all, and it is the
+        caller's guard that makes an empty table unreachable here.
 
         Everything here is billed. The client's own retazos are rendered apart by
         ``_build_client_material_table``; they have no price by definition, and a
@@ -707,9 +700,7 @@ class DocumentService:
         the seller does not want to answer."""
         mat_data = [["Código", "Descripción", "Cantidad", "P. Unit.", "Subtotal"]]
 
-        has_rows = False
-        for entry in _billable_material_rows(carrier):
-            has_rows = True
+        for entry in boards:
             mat_data.append(
                 [
                     entry.get("product_code") or "N/A",
@@ -722,8 +713,7 @@ class DocumentService:
                     f"${entry.get('total_cost', 0):.2f}",
                 ]
             )
-        for entry in carrier.edge_bandings_summary or []:
-            has_rows = True
+        for entry in edge_bandings:
             mat_data.append(
                 [
                     entry.get("product_code") or "N/A",
@@ -736,8 +726,6 @@ class DocumentService:
                     f"${entry.get('total_cost', 0):.2f}",
                 ]
             )
-        if not has_rows:
-            mat_data.append(["Sin datos de materiales", "", "", "", ""])
 
         mat_table = Table(
             mat_data,
@@ -894,55 +882,26 @@ class DocumentService:
         rows.append(["Total:", f"${cash + transfer + credit:.2f}"])
         return [*_section("FORMA DE PAGO", heading_style), _totals_table(rows)]
 
-    @staticmethod
-    def _build_layout_pages(carrier: DocumentCarrier) -> List:
-        """One image per pattern, each alone on a full landscape page.
 
-        The diagrams print on landscape sheets, where the frame is wider (770pt
-        vs 523pt) but *shorter* (522pt vs 769pt) than a portrait one — so both
-        bounds are applied or a tall board overflows. Nothing else shares a
-        diagram sheet (no heading, no header), so every pattern is drawn at the
-        same, maximum size.
-        """
-        layouts = carrier.layouts
-        if not (isinstance(layouts, list) and layouts):
-            return []
+def _diagram_pages(carrier: DocumentCarrier) -> Iterator[Tuple[dict, Optional[str]]]:
+    """Every cutting pattern to print, each with the name of the board it is cut on.
 
-        # Uses the persisted groups; recomputes them for old optimizations saved
-        # before the ``layout_groups`` field existed.
-        groups = carrier.layout_groups
-        if not (isinstance(groups, list) and groups):
-            groups = group_layouts(layouts)
+    Uses the persisted groups; recomputes them for old optimizations saved before
+    the ``layout_groups`` field existed.
+    """
+    layouts = carrier.layouts
+    if not (isinstance(layouts, list) and layouts):
+        return
 
-        names = _board_names(carrier)
+    groups = carrier.layout_groups
+    if not (isinstance(groups, list) and groups):
+        groups = group_layouts(layouts)
 
-        flowables: List = []
-        for idx, group in enumerate(groups):
-            if idx > 0:
-                flowables.append(PageBreak())
-
-            material = (group.get("layout") or group).get("material") or {}
-            img_buffer, (img_w, img_h) = VisualizationService.generate_layout_image(
-                group,
-                mono=True,
-                board_name=names.get(
-                    (
-                        material.get("material_key"),
-                        bool(material.get("half_board", False)),
-                    )
-                ),
-            )
-            draw_width = LAND_CONTENT_WIDTH
-            draw_height = draw_width * (img_h / img_w)
-            if draw_height > LAND_FRAME_HEIGHT:
-                draw_height = LAND_FRAME_HEIGHT
-                draw_width = draw_height * (img_w / img_h)
-
-            image = Image(img_buffer, width=draw_width, height=draw_height)
-            image.hAlign = "CENTER"
-            flowables.append(image)
-
-        return flowables
+    names = _board_names(carrier)
+    for group in groups:
+        material = (group.get("layout") or group).get("material") or {}
+        key = (material.get("material_key"), bool(material.get("half_board", False)))
+        yield group, names.get(key)
 
 
 def stamp_packet_footer(merged: io.BytesIO, reference: str) -> io.BytesIO:
@@ -999,6 +958,8 @@ def build_order_packet(
     """
     parts = [
         DocumentService.generate_order_document_pdf(carrier),
+        # A quote with no patterns contributes nothing: a canvas saved without a
+        # single ``showPage`` is a zero-page pdf, so the merge simply skips it.
         DocumentService.generate_diagram_pdf(carrier),
     ]
     for data, content_type in annexes:
@@ -1218,7 +1179,7 @@ def _section(title: str, heading_style) -> List:
         HRFlowable(
             width="100%",
             thickness=1.2,
-            color=BRAND_PALETTE.accent,
+            color=BRAND_CORAL,
             spaceBefore=1,
             spaceAfter=3,
         ),
@@ -1231,12 +1192,12 @@ def _totals_table(rows: List[List[str]]) -> Table:
     table.setStyle(
         TableStyle(
             [
-                ("BACKGROUND", (0, 0), (-1, -1), BRAND_PALETTE.accent_fill),
-                ("BOX", (0, 0), (-1, -1), 1, BRAND_PALETTE.accent),
+                ("BACKGROUND", (0, 0), (-1, -1), LIGHT_CORAL),
+                ("BOX", (0, 0), (-1, -1), 1, BRAND_CORAL),
                 ("LINEBELOW", (0, 0), (-1, 0), 0.5, colors.HexColor("#F5C9C3")),
                 ("FONTNAME", (0, 0), (-1, -1), "Helvetica-Bold"),
                 ("FONTSIZE", (0, 0), (-1, -1), TOTALS_SIZE),
-                ("TEXTCOLOR", (0, 0), (-1, -1), BRAND_PALETTE.text),
+                ("TEXTCOLOR", (0, 0), (-1, -1), BRAND_BLACK),
                 ("ALIGN", (0, 0), (0, -1), "LEFT"),
                 ("ALIGN", (1, 0), (1, -1), "RIGHT"),
                 ("TOPPADDING", (0, 0), (-1, -1), TOTALS_PAD),
@@ -1253,8 +1214,8 @@ def _data_table_style() -> TableStyle:
     """Common style for data tables: accent header + zebra rows."""
     return TableStyle(
         [
-            ("BACKGROUND", (0, 0), (-1, 0), BRAND_PALETTE.accent),
-            ("TEXTCOLOR", (0, 0), (-1, 0), BRAND_PALETTE.header_text),
+            ("BACKGROUND", (0, 0), (-1, 0), BRAND_CORAL),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
             ("ALIGN", (0, 0), (-1, -1), "CENTER"),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
             ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
@@ -1264,6 +1225,6 @@ def _data_table_style() -> TableStyle:
             ("TOPPADDING", (0, 0), (-1, -1), ROW_PAD),
             ("BOTTOMPADDING", (0, 0), (-1, -1), ROW_PAD),
             ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
-            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, BRAND_PALETTE.zebra]),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, ZEBRA_GREY]),
         ]
     )
