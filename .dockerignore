@@ -22,6 +22,9 @@ rust/target
 # Cost-regression baselines (scripts/bench_battery.py).
 benchmarks
 
+# Local DB backups (scripts/reset_data.py): they carry bcrypt hashes.
+backups
+
 # Local data and secrets
 *.db
 .env

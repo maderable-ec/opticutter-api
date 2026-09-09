@@ -40,6 +40,10 @@ pruebas/
 # maturin and installed into the venv; nothing here belongs in the repo.
 rust/target/
 
+# JSON backups written by scripts/reset_data.py before a wipe. They carry the
+# users' bcrypt hashes, so they stay local — never in the repo.
+backups/
+
 # Cost-regression baselines produced by scripts/bench_battery.py. Machine- and
 # commit-specific, and large; regenerate with --out rather than sharing.
 benchmarks/

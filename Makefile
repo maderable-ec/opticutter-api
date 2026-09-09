@@ -1,5 +1,5 @@
 # Makefile for Cutter API
-.PHONY: help build start dev down tests tests-local benchmark create-test-db lint-fix lint-check install clean logs redis-cli redis-flush rust rust-parity
+.PHONY: help build start dev down tests tests-local benchmark create-test-db lint-fix lint-check install clean logs redis-cli redis-flush rust rust-parity db-reset db-backup db-restore
 
 # Tests ALWAYS run against a dedicated database (cutter_test_db), never
 # against the development database (cutter_db): the conftest TRUNCATEs per test.
@@ -101,6 +101,24 @@ seed-settings: ## Seeds branches and company/cutting settings into local Postgre
 
 seed-demo: ## Seeds demo data (branches/users/clients/pre-orders/orders by status) into local PostgreSQL (5433). Use reset=1 to regenerate.
 	DATABASE_URL=postgresql://cutter:cutter@localhost:5433/cutter_db REDIS_URL=redis://localhost:6379/0 .venv/bin/python scripts/seed_demo.py $(if $(reset),--reset)
+
+# LOCAL DEVELOPMENT ONLY, like every other target here: it runs `docker compose`
+# against THIS repo's docker-compose.yml. On the VPS the equivalent lives in
+# opticutter-infra (backup.sh -> stop api -> run the one-shot -> up); see the
+# docstring of scripts/reset_data.py. The same warning the infra runbook gives
+# about `make clean` applies: these targets assume the development stack.
+#
+# Runs INSIDE the api container so it uses the container's DATABASE_URL and sees
+# the uploads volume (the attachments live there, not in the repo tree).
+db-reset: ## Empties orders/quotes/catalog and resets sequences, preserving users. Use dry=1 to preview.
+	docker compose run --rm api python scripts/reset_data.py $(if $(dry),--dry-run) $(if $(yes),--yes)
+
+db-backup: ## Writes a JSON backup of users/branches/settings/services without deleting anything
+	docker compose run --rm api python scripts/reset_data.py --backup-only
+
+db-restore: ## Restores users from a backup written by db-reset (file=backups/reset-....json)
+	@test -n "$(file)" || (echo "Uso: make db-restore file=backups/reset-....json" && exit 1)
+	docker compose run --rm api python scripts/reset_data.py --restore $(file)
 
 setup: ## Initial project setup
 	cp .env.example .env || true
