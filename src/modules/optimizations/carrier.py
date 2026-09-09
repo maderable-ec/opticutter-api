@@ -28,14 +28,15 @@ class DocumentCarrier:
     total_boards_used: int = 0
     total_boards_cost: float = 0.0
     total_edge_banding_cost: float = 0.0
-    total_cut_linear_m: float = 0.0
-    total_edge_banding_linear_m: float = 0.0
+    # No linear-metre totals and no price-level name: this carrier holds what a
+    # document renders, and the table that printed them died with the production
+    # sheet. Both still travel in the payload and in ``OptimizeResponse``.
+    #
     # The money, computed once by ``pricing.build_pricing`` and carried here
     # rather than recomputed: there used to be a second implementation of the
     # same arithmetic on this class, which is exactly the kind of duplication
     # that drifts. ``subtotal`` is net (boards + edge banding + services),
     # ``total`` is what the client pays.
-    price_level_name: Optional[str] = None
     subtotal: float = 0.0
     services_total: float = 0.0
     tax_rate: float = 0.0
@@ -95,9 +96,6 @@ class DocumentCarrier:
             total_boards_used=payload.get("total_boards_used", 0),
             total_boards_cost=payload.get("total_boards_cost", 0.0),
             total_edge_banding_cost=payload.get("total_edge_banding_cost", 0.0),
-            total_cut_linear_m=payload.get("total_cut_linear_m", 0.0),
-            total_edge_banding_linear_m=payload.get("total_edge_banding_linear_m", 0.0),
-            price_level_name=pricing.get("price_level_name"),
             subtotal=pricing.get("subtotal", 0.0),
             services_total=pricing.get("services_total", 0.0),
             tax_rate=pricing.get("tax_rate", 0.0),
@@ -128,8 +126,7 @@ class DocumentCarrier:
         )
         # The order freezes the board count when confirmed.
         carrier.total_boards_used = order.total_boards_used
-        # The frozen money lives in the order's columns (source of truth); the
-        # level's name comes from the snapshot (already read by from_payload).
+        # The frozen money lives in the order's columns (source of truth).
         carrier.subtotal = order.subtotal
         carrier.services_total = order.additional_services_total or 0.0
         carrier.tax_rate = order.tax_rate

@@ -12,8 +12,6 @@ No DB and no PDF: ``generate_layout_image`` is a pure function of a layout dict.
 
 import math
 
-from PIL import Image
-
 from src.modules.optimizations import visualization as viz
 
 BOARD_WIDTH = 2070  # ancho
@@ -48,18 +46,26 @@ def _is_grain(pixel):
     return pixel != (255, 255, 255)
 
 
-def _board_pixels(group, mono=False):
-    """Renders and returns a fast pixel accessor plus the board's pixel box."""
-    buffer, _ = viz.VisualizationService.generate_layout_image(group, mono=mono)
-    img = Image.open(buffer).convert("RGB")
+def _board_pixels(group):
+    """Renders and returns a fast pixel accessor plus the board's pixel box.
+
+    The top of the board is DERIVED from the canvas, never hardcoded: the header
+    band above it is measured off the legend and the board's name, so any change
+    to those fonts moves it. It was pinned at 150 while the real value had become
+    99, which slid this whole window 51px down — reading a strip of white margin
+    below the board and missing the top of it.
+    """
+    img = viz.VisualizationService.render_layout(group).convert("RGB")
     material = group["layout"]["material"]
     scale = viz_scale(material)
+    board_w_px = int(material["height"] * scale)
+    board_h_px = int(material["width"] * scale)
     return (
         img.load(),
-        60,  # margin
-        150,  # info_height
-        int(material["height"] * scale),
-        int(material["width"] * scale),
+        viz.MARGIN,
+        img.height - board_h_px - 2 * viz.MARGIN,  # the measured header band
+        board_w_px,
+        board_h_px,
     )
 
 
@@ -174,11 +180,19 @@ def test_grain_covers_pieces_and_offcuts_alike():
         assert len(colors) > 1, f"the grain does not run over the {name}"
 
 
-def test_grain_is_drawn_in_both_themes():
-    """The production sheet is monochrome and prints on the shop's own printer;
-    an overlay that only exists in the branded theme would miss the reader who
-    needs it most."""
-    for mono in (False, True):
-        px, bx, by, board_w_px, board_h_px = _board_pixels(_bare_board(), mono=mono)
-        inside = [px[bx + board_w_px // 2, by + dy] for dy in range(2, board_h_px - 2)]
-        assert any(_is_grain(p) for p in inside), f"no grain with mono={mono}"
+def test_the_board_box_is_read_off_the_canvas_not_off_a_constant():
+    """What the helper above depends on, asserted once.
+
+    The header band is measured (legend + gap + name + gap), so the board's top
+    only follows from the canvas's own height. If this ever comes out negative or
+    absurd, every pixel assertion in this file is reading the wrong rectangle.
+    """
+    _, bx, by, board_w_px, board_h_px = _board_pixels(_bare_board())
+    img = viz.VisualizationService.render_layout(_bare_board())
+
+    assert bx == viz.MARGIN
+    assert viz.HEADER_GAP_BELOW < by < viz.MARGIN + 200
+    # The header band replaces what would have been the top margin, so the white
+    # space below the board is the full 2 * MARGIN.
+    assert by + board_h_px + 2 * viz.MARGIN == img.height
+    assert bx + board_w_px + viz.MARGIN == img.width

@@ -198,12 +198,12 @@ def test_the_name_reaches_the_drawing(monkeypatch):
 
     seen = []
 
-    def _spy(group, mono=False, board_name=None, **kwargs):
+    def _spy(group, board_name=None, **kwargs):
         seen.append(board_name)
-        return real(group, mono=mono, board_name=board_name, **kwargs)
+        return real(group, board_name=board_name, **kwargs)
 
-    real = documents.VisualizationService.generate_layout_image
-    monkeypatch.setattr(documents.VisualizationService, "generate_layout_image", _spy)
+    real = documents.VisualizationService.render_layout
+    monkeypatch.setattr(documents.VisualizationService, "render_layout", _spy)
 
     carrier = _carrier(
         [_layout("b1"), _layout("b1", half=True, sheet=2)],

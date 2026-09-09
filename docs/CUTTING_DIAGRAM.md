@@ -17,23 +17,27 @@ no longer exist.
 
 If you need a diagram outside of those documents (e.g. for a new export or a
 debugging script), call `VisualizationService` directly rather than adding a
-new public image endpoint — see `documents.py` for the call pattern.
+new public image endpoint. Two entry points: `render_layout` returns the PIL
+image (what the PDF path uses — see below) and `generate_layout_image` wraps it
+into a PNG buffer for anything that wants a file.
 
-## Themes
+## Colors
 
-Two color themes share the same drawing code:
+One palette, monochrome: outlines, dimensions and labels in black, pieces white,
+offcuts a neutral grey, grain a lighter one. There used to be a branded (coral)
+theme selected by a `mono` flag, but it died with the documents that carried it —
+the packet's diagram pages were the only caller left and they always asked for
+`mono=True`. Colour was never what carried the distinction that matters anyway: a
+banded edge is told apart by its **fill** (solid for soft, hatched for hard),
+which is exactly what survives a black-and-white print.
 
-| Theme | Used in | Notes |
-|-------|---------|-------|
-| `brand` | Available to any caller of `generate_layout_image` | Branded palette (coral pieces, dark outlines), matches the MADERABLE letterhead. |
-| `mono` | The diagram pages of the order packet | Black & white, optimized for workshop printing. |
-
-Font sizes live at the top of `generate_layout_image` (`header_font`,
+Font sizes live at the top of `render_layout` (`header_font`,
 `legend_font`, `dim_font`, `label_font`); the header and the legend were cut
 back when the header started carrying a full melamine name instead of an index.
 
 The header band above the board — legend, gap, board name, gap — is **measured,
-not reserved**: `_legend_layout` reports where the legend ends (it wraps to a
+not reserved**: `_legend_layout` reports where the legend ends (laid out once and
+handed to the drawing, so the measure and the drawing cannot disagree) (it wraps to a
 second row on a narrow board) and `_text_bounds` reports where the name's glyphs
 actually ink, so `HEADER_GAP_ABOVE`/`HEADER_GAP_BELOW` are the gaps the eye sees.
 It used to be a flat `info_height = 150` sized for a 36px face, so every later
@@ -41,17 +45,11 @@ trim to the fonts left the name floating in an empty band. Note `_text_bounds`
 and not `_text_size`: `draw.text` anchors on the font's ascent, not on the
 glyphs, so the glyph box alone under-measures the line by roughly a third.
 
-In both themes, a banded edge is drawn as a colored strip along that side of
-the piece: solid fill for soft (`Suave`) banding, diagonal hatching for hard
-(`Duro`) banding — so the distinction survives in the monochrome pages, where
-color alone can't carry it.
-
 ## Visual elements
 
 - **Boards** — rectangles with a dark outline.
-- **Pieces** — filled rectangles with a colored outline; a thicker band along
-  any edge-banded side highlights the canto (see Themes above for soft vs.
-  hard rendering).
+- **Pieces** — white rectangles with a black outline; a thicker band along any
+  edge-banded side highlights the canto (solid for soft, hatched for hard).
 - **Remainders (waste)** — neutral gray rectangles.
 - **Annotations** — per-board title, dimensions, and a yield/efficiency
   percentage.
@@ -59,12 +57,18 @@ color alone can't carry it.
 ## Layout
 
 - **One cutting pattern per page, on a landscape sheet.** The board is drawn
-  rotated 90° (`_rotated_rect`), so the PNG is always wider than it is tall; on
-  a portrait A4 that left ~60% of the paper blank. `documents._CutterDoc`
-  registers a portrait and a landscape `PageTemplate`; the ORDEN DE PEDIDO uses
-  the first from end to end and `generate_diagram_pdf` starts on the second
-  (`start_landscape=True`). `merge_pdfs` copies each page's own mediabox, so the
-  packet is simply mixed-orientation: portrait lists, then landscape diagrams.
+  rotated 90° (`_rotated_rect`), so the image is always wider than it is tall; on
+  a portrait A4 that left ~60% of the paper blank. `generate_diagram_pdf` draws
+  straight onto a landscape `canvas.Canvas` — one image per page and no flowing
+  content, so platypus bought nothing; `documents._CutterDoc` is now the ORDEN DE
+  PEDIDO's portrait template and nothing else. `merge_pdfs` copies each page's own
+  mediabox, so the packet is simply mixed-orientation: portrait lists, then
+  landscape diagrams.
+- **The image never becomes a PNG on the way to the PDF.** `render_layout` hands
+  reportlab the PIL image; encoding a PNG for reportlab to decode straight back
+  was 60% of the packet's render time (measured: 0.254s → 0.064s per sheet, same
+  bytes out). It also means one board is rendered, drawn and released at a time,
+  instead of every ~12 MB image staying alive until the document builds.
 - **The diagram pages carry no footer of their own.** The packet is printed as
   one body, so `stamp_packet_footer` draws the running footer (`Generado el … ·
   N° <orden>` / `Página i de N`) over every page *after* the merge, annexes
@@ -80,14 +84,15 @@ color alone can't carry it.
 - **Nothing shares a diagram sheet** — no document header, no section title, not
   even `DISPOSICIÓN DE CORTES`. Anything above the image would shrink that one
   pattern and make it inconsistent with the rest, so every diagram is drawn at
-  the same maximum size. The diagram-only document therefore starts landscape at
-  page 1 (`start_landscape=True`) and is images plus a footer, nothing else.
+  the same maximum size. The diagram-only document is landscape from page 1 and
+  is images and nothing else — not even a footer.
 - Identical patterns are deduplicated by `patterns.group_layouts` and printed
   once with a `×N` badge, so pages count patterns, not physical boards.
-- `_build_layout_pages` takes the frame it draws into (`frame_width` /
-  `max_height`). A landscape frame is **wider but shorter** than a portrait
-  one, so both bounds must travel together: a proportionally tall board is
-  scaled down to fit rather than overflowing, which reportlab would reject.
+- `_diagram_pages` resolves which patterns to print and what to call each one;
+  `generate_diagram_pdf` sizes them against `LAND_CONTENT_WIDTH` /
+  `LAND_FRAME_HEIGHT`. A landscape frame is **wider but shorter** than a portrait
+  one, so both bounds must be applied together: a proportionally tall board is
+  scaled down to fit rather than overflowing off the sheet.
 - Scale and minimum dimensions are computed automatically to keep small
   pieces legible.
 - Dimension and label text is sized against the *printed* result, not the PNG:
