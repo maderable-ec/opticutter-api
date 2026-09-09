@@ -165,8 +165,8 @@ No cycles, enforced by convention:
   affects both the geometry and the result's cache key. Results are
   deterministic and cached in Redis by a hash of the canonical request — nothing
   is persisted to the database here. This module also owns the rendering
-  pipeline shared by every PDF document (order document, production sheet,
-  dispatch sheet): `documents.py` (document layout via ReportLab) and
+  pipeline behind the order's one PDF (`build_order_packet`): `documents.py`
+  (document layout via ReportLab) and
   `visualization.py` (the cutting diagram via Pillow — see
   [`CUTTING_DIAGRAM.md`](CUTTING_DIAGRAM.md)).
 - **`optimization_drafts`** — lets a seller save a named, editable optimizer
@@ -197,8 +197,8 @@ No cycles, enforced by convention:
     keeps the two running in parallel. An order with edge banding can't reach
     `completed` until banding is `done`.
 
-  Orders render their own commercial document, production sheet and dispatch
-  sheet from the frozen snapshot.
+  An order renders ONE document from its frozen snapshot: the ORDEN DE PEDIDO,
+  its cut diagram and its annexes, merged into a single PDF.
 - **`settings`** — a singleton row holding runtime-editable configuration
   (cutting parameters, sales tax rate, company info, pre-order policy) that is
   only seeded from environment variables on first read; `PATCH` endpoints are

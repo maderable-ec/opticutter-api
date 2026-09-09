@@ -7,7 +7,7 @@ the order is not in a terminal state (completed/dispatched/cancelled).
 
 import io
 from pathlib import PurePosixPath, PureWindowsPath
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from fastapi import Depends, UploadFile
 from PIL import Image, UnidentifiedImageError
@@ -79,6 +79,24 @@ class AttachmentService(BranchScopedMixin):
             .order_by(OrderAttachmentModel.id)
             .all()
         )
+
+    def iter_annex_bytes(
+        self, order_id: int, branch_scope: Optional[int] = None
+    ) -> List[Tuple[bytes, str]]:
+        """Every attachment's bytes + content type, for the order packet.
+
+        An attachment whose file is missing from disk is skipped: the metadata
+        row outliving its bytes must not stop the shop from printing the order.
+        Kept here rather than at the two call sites (the endpoint and the print
+        queue) that used to carry the same loop.
+        """
+        annexes: List[Tuple[bytes, str]] = []
+        for att in self.list_attachments(order_id, branch_scope=branch_scope):
+            try:
+                annexes.append((storage.read(att.stored_key), att.content_type))
+            except OSError:
+                continue
+        return annexes
 
     def get_attachment(
         self, order_id: int, attachment_id: int, branch_scope: Optional[int] = None

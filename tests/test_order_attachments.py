@@ -335,9 +335,9 @@ def _all_text(pdf_bytes):
     return "\n".join(page.extract_text() or "" for page in reader.pages)
 
 
-def test_consolidated_has_diagram_only_no_repeated_lists(client, db_session):
-    """The despiece section is the gráfico only: the order carries the piece/board
-    lists, so the production-sheet lists must NOT reappear in the packet.
+def test_the_packet_is_the_order_plus_bare_diagram_pages(client, db_session):
+    """One document, then the gráfico: the ORDEN DE PEDIDO already carries the
+    piece and board lists, so nothing repeats them.
 
     The diagram pages carry no heading of their own either — they are bare
     landscape sheets, one pattern each — so they are identified here by their
@@ -346,13 +346,14 @@ def test_consolidated_has_diagram_only_no_repeated_lists(client, db_session):
     from pypdf import PdfReader
 
     order = _mint_order(client, db_session, identifier="0100000207", code="MELDIAG")
-    content = client.get(f"/api/v1/orders/{order['id']}/consolidated").content
+    content = client.get(f"/api/v1/orders/{order['id']}/document").content
     text = _all_text(content)
 
-    # The two documents that do carry a title are present.
     assert "ORDEN DE PEDIDO" in text
-    assert "HOJA DE DESPACHO" in text
-    # The production sheet's repeated lists are gone (they live in the order).
+    # The delivery block travels inside it, not as a sheet of its own.
+    assert "HOJA DE DESPACHO" not in text
+    assert "DESCARGO DE RESPONSABILIDAD" in text
+    # The production sheet's lists are gone for good (they live in the order).
     assert "LISTA DE CORTE" not in text
     assert "TABLEROS A UTILIZAR" not in text
 
@@ -367,49 +368,49 @@ def test_consolidated_has_diagram_only_no_repeated_lists(client, db_session):
     assert all(len(page.images) for page in diagram_pages)
 
 
-def test_consolidated_pdf_includes_attachments(client, db_session):
+def test_the_packet_includes_attachments(client, db_session):
     order = _mint_order(client, db_session, identifier="0100000173", code="MELCON")
     oid = order["id"]
 
-    # Baseline: the three base documents (order + production + dispatch), no annexes.
-    base = client.get(f"/api/v1/orders/{oid}/consolidated")
+    # Baseline: the document + its diagram pages, no annexes.
+    base = client.get(f"/api/v1/orders/{oid}/document")
     assert base.status_code == 200
     assert base.headers["content-type"] == "application/pdf"
     base_pages = _page_count(base.content)
-    assert base_pages >= 3  # at least one page per base document
+    assert base_pages >= 2  # the order, plus one page per cutting pattern
 
     # Add a real PDF (1 page) and a PNG screenshot (wrapped to 1 page).
     _upload(client, oid, "cotiz.pdf", _real_pdf_bytes(), "application/pdf")
     _upload(client, oid, "captura.png", _png_bytes(), "image/png")
 
-    full = client.get(f"/api/v1/orders/{oid}/consolidated")
+    full = client.get(f"/api/v1/orders/{oid}/document")
     assert full.status_code == 200
     # Exactly two more pages: the PDF annex (1) + the image annex (1).
     assert _page_count(full.content) == base_pages + 2
 
 
-def test_consolidated_pdf_base64(client, db_session):
+def test_the_packet_renders_as_base64(client, db_session):
     order = _mint_order(client, db_session, identifier="0100000181", code="MELB64")
     resp = client.get(
-        f"/api/v1/orders/{order['id']}/consolidated", params={"format": "base64"}
+        f"/api/v1/orders/{order['id']}/document", params={"format": "base64"}
     )
     assert resp.status_code == 200
     body = resp.json()
     assert body["format"] == "base64"
     assert body["mimeType"] == "application/pdf"
-    assert "consolidado" in body["filename"]
+    assert "orden_pedido" in body["filename"]
 
 
-def test_consolidated_skips_corrupt_pdf_annex(client, db_session):
+def test_the_packet_skips_a_corrupt_pdf_annex(client, db_session):
     """A corrupt PDF annex is skipped, not fatal: the packet still renders."""
     order = _mint_order(client, db_session, identifier="0100000199", code="MELCOR")
     oid = order["id"]
-    base_pages = _page_count(client.get(f"/api/v1/orders/{oid}/consolidated").content)
+    base_pages = _page_count(client.get(f"/api/v1/orders/{oid}/document").content)
 
     # _PDF_BYTES is a structurally invalid PDF (no page tree): upload succeeds
-    # (type/size only), but the consolidated merge must skip it gracefully.
+    # (type/size only), but the merge must skip it gracefully.
     _upload(client, oid, "roto.pdf", _PDF_BYTES, "application/pdf")
 
-    resp = client.get(f"/api/v1/orders/{oid}/consolidated")
+    resp = client.get(f"/api/v1/orders/{oid}/document")
     assert resp.status_code == 200
     assert _page_count(resp.content) == base_pages  # annex skipped, no extra page

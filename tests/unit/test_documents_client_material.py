@@ -172,28 +172,3 @@ def test_a_quote_with_boards_but_no_banding_keeps_the_board_count():
         row[0] for row in DocumentService._build_totals_table(carrier)._cellvalues
     ]
     assert labels[0] == "Total de tableros utilizados:"
-
-
-def test_the_workshop_sheet_counts_every_sheet_it_has_to_cut():
-    """Not ``total_boards_used``: that one answers what the CLIENT buys.
-
-    On a job made only of the client's material it is 0, which read as "nothing to
-    cut" right next to a table listing two retazos.
-    """
-    carrier = _carrier(
-        _material("r1", "clientOffcut", count=2),
-        _material("r2", "clientOffcut", count=1),
-        total_boards_used=0,
-    )
-    rows = DocumentService._build_boards_total_table(carrier)._cellvalues
-    assert rows == [["Total de hojas a cortar:", "3"]]
-
-
-def test_the_workshop_sheet_counts_the_retazo_next_to_the_board():
-    carrier = _carrier(
-        _material("b1", "catalog", count=2),
-        _material("r1", "clientOffcut", count=1),
-        total_boards_used=2,
-    )
-    rows = DocumentService._build_boards_total_table(carrier)._cellvalues
-    assert rows == [["Total de hojas a cortar:", "3"]]

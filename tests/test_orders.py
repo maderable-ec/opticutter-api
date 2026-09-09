@@ -294,8 +294,12 @@ def test_queued_payment_by_transfer_only(client, db_session):
     assert data["paymentCreditAmount"] is None
 
 
-def test_payment_reflected_in_documents(client, db_session):
-    """After registering the payment, the document and dispatch sheet render."""
+def test_payment_reflected_in_the_document(client, db_session):
+    """The registered payment prints as its own block on the order's document."""
+    import io
+
+    from pypdf import PdfReader
+
     c = _create_client(client)
     b = _create_board(client)
     order = _create_order(client, db_session, _order_payload(c["id"], b["id"]))
@@ -312,12 +316,11 @@ def test_payment_reflected_in_documents(client, db_session):
     doc = client.get(f"/api/v1/orders/{oid}/document")
     assert doc.status_code == 200
     assert doc.headers["content-type"] == "application/pdf"
-    assert len(doc.content) > 1000
-
-    dispatch = client.get(f"/api/v1/orders/{oid}/dispatch-sheet")
-    assert dispatch.status_code == 200
-    assert dispatch.headers["content-type"] == "application/pdf"
-    assert len(dispatch.content) > 1000
+    text = "\n".join(
+        page.extract_text() or "" for page in PdfReader(io.BytesIO(doc.content)).pages
+    )
+    assert "FORMA DE PAGO" in text
+    assert "$50.00" in text and "$25.00" in text
 
 
 def test_list_orders_filter_by_status(client, db_session):
@@ -571,20 +574,9 @@ def test_order_document_shows_all_configured_branches(client, db_session):
     assert "Sucursal Macas" in text
 
 
-def test_order_production_sheet_pdf(client, db_session):
-    c = _create_client(client)
-    b = _create_board(client)
-    order = _create_order(client, db_session, _order_payload(c["id"], b["id"]))
-
-    sheet = client.get(f"/api/v1/orders/{order['id']}/production-sheet")
-    assert sheet.status_code == 200
-    assert sheet.headers["content-type"] == "application/pdf"
-    assert len(sheet.content) > 1000
-
-
-def test_reference_is_printed_on_every_document(client, db_session):
+def test_reference_is_printed_on_the_document(client, db_session):
     """``notes`` is the commercial reference (project/site): it must show up on
-    the four printable documents, escaped (``Paragraph`` parses mini-HTML)."""
+    the order's one document, escaped (``Paragraph`` parses mini-HTML)."""
     import io
 
     from pypdf import PdfReader
@@ -596,14 +588,12 @@ def test_reference_is_printed_on_every_document(client, db_session):
     order = _create_order(client, db_session, payload)
     assert order["notes"] == "Proyecto Casa Pérez & Cía <cocina>"
 
-    for path in ("document", "production-sheet", "dispatch-sheet", "consolidated"):
-        resp = client.get(f"/api/v1/orders/{order['id']}/{path}")
-        assert resp.status_code == 200, path
-        text = "\n".join(
-            page.extract_text() or ""
-            for page in PdfReader(io.BytesIO(resp.content)).pages
-        )
-        assert "Ref: Proyecto Casa Pérez & Cía <cocina>" in text, path
+    resp = client.get(f"/api/v1/orders/{order['id']}/document")
+    assert resp.status_code == 200
+    text = "\n".join(
+        page.extract_text() or "" for page in PdfReader(io.BytesIO(resp.content)).pages
+    )
+    assert "Ref: Proyecto Casa Pérez & Cía <cocina>" in text
 
 
 def test_order_listing_exposes_notes(client, db_session):
@@ -618,7 +608,6 @@ def test_order_listing_exposes_notes(client, db_session):
 
 def test_order_documents_404(client):
     assert client.get("/api/v1/orders/999999/document").status_code == 404
-    assert client.get("/api/v1/orders/999999/production-sheet").status_code == 404
 
 
 def test_order_export_document(client, db_session):
@@ -810,8 +799,8 @@ def test_create_mixed_catalog_and_offcut_order(client, db_session):
     assert piece_product_ids == {b["id"], None}
 
 
-def test_non_catalog_order_renders_document_and_production_sheet(client, db_session):
-    """The order document and production sheet render from the snapshot, without the catalog."""
+def test_non_catalog_order_renders_its_document(client, db_session):
+    """The document renders from the snapshot alone, without the catalog."""
     c = _create_client(client)
     order = _create_order(client, db_session, _manual_material_payload(c["id"]))
 
@@ -819,11 +808,6 @@ def test_non_catalog_order_renders_document_and_production_sheet(client, db_sess
     assert document.status_code == 200
     assert document.headers["content-type"] == "application/pdf"
     assert len(document.content) > 1000
-
-    sheet = client.get(f"/api/v1/orders/{order['id']}/production-sheet")
-    assert sheet.status_code == 200
-    assert sheet.headers["content-type"] == "application/pdf"
-    assert len(sheet.content) > 1000
 
 
 def test_order_freezes_chosen_packing_strategy(client, db_session):
@@ -1057,11 +1041,10 @@ def test_create_order_on_client_offcuts_only(client, db_session):
     # The service is registered tax-included and folded into the net subtotal.
     assert data["subtotal"] == round(20.0 / (1 + data["taxRate"]), 2)
 
-    # Every document renders from this snapshot.
-    for path in ("document", "dispatch-sheet", "production-sheet"):
-        resp = client.get(f"/api/v1/orders/{data['id']}/{path}")
-        assert resp.status_code == 200, path
-        assert resp.headers["content-type"] == "application/pdf"
+    # The document renders from this snapshot.
+    resp = client.get(f"/api/v1/orders/{data['id']}/document")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "application/pdf"
 
 
 # --- The status clock in the listing -------------------------------------------

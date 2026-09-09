@@ -83,13 +83,6 @@ def test_the_priced_table_carries_the_mark():
     assert rows[1][3] == "$45.50"
 
 
-def test_the_production_sheet_carries_the_mark():
-    """The one the operator actually holds at the saw."""
-    carrier = _carrier(_material("b1", "catalog", skip_trim=True))
-    rows = DocumentService._build_materials_plain_table(carrier, _CELL)._cellvalues
-    assert "sin refilar" in rows[1][1].text
-
-
 def test_the_client_material_table_carries_the_mark():
     """Where it matters most: a retazo the client brought already squared."""
     entry = _material(
@@ -101,7 +94,9 @@ def test_the_client_material_table_carries_the_mark():
 
 def test_a_trimmed_job_prints_no_mark_anywhere():
     carrier = _carrier(_material("b1", "catalog"), _material("r1", "clientOffcut"))
-    plain = DocumentService._build_materials_plain_table(carrier, _CELL)._cellvalues
     priced = DocumentService._build_materials_table(carrier, _CELL)._cellvalues
-    printed = [str(getattr(c, "text", c)) for row in plain + priced for c in row]
+    client = DocumentService._build_client_material_table(
+        [_material("r1", "clientOffcut")], _CELL
+    )._cellvalues
+    printed = [str(getattr(c, "text", c)) for row in priced + client for c in row]
     assert not any("sin refilar" in cell for cell in printed)

@@ -87,10 +87,10 @@ route is protected with `Depends(require_permission("<key>"))`.
 | `clients:manage`     | ✅ | ✅ | ❌ | ❌ | `/clients/*` |
 | `optimizer`          | ✅ | ✅ | ❌ | ❌ | `/optimize/*`, `/optimization-drafts/*` |
 | `preorders`          | ✅ | ✅ | ❌ | ❌ | `/preorders/*` (internal; the client-facing flow is public, see below) |
-| `orders:read`        | ✅ | ✅ | ✅ | ❌ | `GET /orders`, `GET /orders/{id}`, `GET /orders/{id}/document`, `GET /orders/{id}/dispatch-sheet` |
+| `orders:read`        | ✅ | ✅ | ✅ | ❌ | `GET /orders`, `GET /orders/{id}`, `GET /orders/{id}/document` (the order's ONLY pdf: document + diagram + annexes) |
 | `orders:write`       | ✅ | ✅ | ❌ | ❌ | `POST /orders/{id}/invoice`, `GET /orders/{id}/export`, `PATCH /orders/{id}/branch`, `PATCH /orders/{id}/priority`, `POST/DELETE /orders/{id}/attachments[/{aid}]` |
 | `orders:transition`  | ✅ | ✅ | ✅* | ✅* | `PATCH /orders/{id}/status` (narrowed per-transition by `TRANSITION_ROLES`) |
-| `cutting_plan`       | ✅ | ✅ | ✅ | ❌ | `GET /orders/{id}/cutting-plan`, `GET /orders/{id}/production-sheet` |
+| `cutting_plan`       | ✅ | ✅ | ✅ | ❌ | `GET /orders/{id}/cutting-plan` |
 | `orders:cut`         | ✅ | ❌ | ✅ | ❌ | `PATCH /orders/{id}/cutting-plan/pieces/{id}` |
 | `orders:band`        | ✅ | ❌ | ❌ | ✅ | `PATCH /orders/{id}/banding` (start needs the first banded piece cut; finish needs them all) |
 | `orders:workshop`    | ✅ | ❌ | ✅ | ✅ | `GET /orders/workshop-queue` (shared shop-floor board) |

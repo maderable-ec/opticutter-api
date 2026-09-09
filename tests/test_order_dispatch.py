@@ -1,10 +1,16 @@
-"""Tests for the 'despachado' (delivered to client) status and the dispatch sheet.
+"""Tests for the 'despachado' (delivered to client) status and its paperwork.
 
 Dispatch is the real close of the cycle: ``completed → despachado`` (terminal). It is
 a commercial act restricted to admin/seller by ``TRANSITION_ROLES`` — the shop floor
-(operador/canteador) cannot register it. The dispatch sheet is a PDF with the pieces
-(no prices), the liability disclaimer, and the signature lines.
+(operador/canteador) cannot register it. There is no dispatch sheet any more: the
+delivery line, the liability disclaimer and the signature lines are part of the
+order's one document.
 """
+
+import io
+from datetime import datetime
+
+from pypdf import PdfReader
 
 from src.modules.orders.schemas import OrderCreate
 from src.modules.orders.service import OrderService
@@ -186,37 +192,34 @@ def test_cannot_dispatch_before_completed(client, db_session):
 
 
 # --------------------------------------------------------------------------- #
-# Dispatch sheet (PDF)
+# The delivery block on the order's document
 # --------------------------------------------------------------------------- #
-def test_dispatch_sheet_pdf_and_base64(client, db_session):
+def test_the_document_prints_the_frozen_dispatch_data(client, db_session):
+    """The dispatch sheet is gone; its delivery line lives on the ORDEN DE PEDIDO.
+
+    Before dispatch it prints rules to fill in by hand (the shop prints the
+    document when the cutting is done, which is before anyone delivers); once
+    dispatched it carries what the transition froze.
+    """
     order = _mint_order(client, db_session)
-    _to_completed(client, order["id"])
-    _patch_status(client, order["id"], "despachado")
     oid = order["id"]
 
-    pdf = client.get(f"/api/v1/orders/{oid}/dispatch-sheet")
-    assert pdf.status_code == 200
-    assert pdf.headers["content-type"] == "application/pdf"
-    assert len(pdf.content) > 1000
+    before = _document_text(client, oid)
+    assert "Fecha de despacho" in before
+    assert "____" in before
 
-    b64 = client.get(
-        f"/api/v1/orders/{oid}/dispatch-sheet", params={"format": "base64"}
+    _to_completed(client, oid)
+    _patch_status(client, oid, "despachado")
+
+    after = _document_text(client, oid)
+    assert datetime.utcnow().strftime("%d/%m/%Y") in after
+    assert "____" not in after.split("DESCARGO")[0]
+
+
+def _document_text(client, order_id: int) -> str:
+    resp = client.get(f"/api/v1/orders/{order_id}/document")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "application/pdf"
+    return "\n".join(
+        page.extract_text() or "" for page in PdfReader(io.BytesIO(resp.content)).pages
     )
-    assert b64.status_code == 200
-    body = b64.json()
-    assert body["format"] == "base64"
-    assert body["mimeType"] == "application/pdf"
-    assert order["code"] in body["filename"]
-
-
-def test_dispatch_sheet_renders_before_dispatch(client, db_session):
-    """The sheet can be issued even before dispatch (date falls back to 'today')."""
-    order = _mint_order(client, db_session)
-    sheet = client.get(f"/api/v1/orders/{order['id']}/dispatch-sheet")
-    assert sheet.status_code == 200
-    assert sheet.headers["content-type"] == "application/pdf"
-    assert len(sheet.content) > 1000
-
-
-def test_dispatch_sheet_404(client):
-    assert client.get("/api/v1/orders/999999/dispatch-sheet").status_code == 404
