@@ -98,9 +98,15 @@ from src.cutting.parameters import CuttingParameters
 # ``finite_plan_objective`` picks (see ``fill_finite_bins_max_yield``). Catalog
 # geometry is untouched again, this time by construction: the new code is only
 # reachable through ``optimize_offcut_pool``, and an infinite bin set strands
-# nothing to begin with. Also bump this when the pinned ortools version moves,
-# since a solver upgrade can return a different solution.
-ENGINE_VERSION = 11
+# nothing to begin with; 12 = a catalog board that anchors a pool of retazos gets
+# the half board as a bin of its search (``pool._fill_catalog``), where it used
+# to be a per-sheet rewrite applied afterwards and could therefore never move a
+# piece across sheets to make the half fit. Only pools WITH attached offcuts
+# move -- ``optimize_pool`` is the sole caller and the pool-less route already
+# passed both bins -- which is why ``bench_battery`` digests stay byte-identical
+# through it. Also bump this when the pinned ortools version moves, since a
+# solver upgrade can return a different solution.
+ENGINE_VERSION = 12
 
 # A half bin is only worth opening near the end of a job: gate it by remaining
 # area so early states don't waste decodes on fills the cost objective would

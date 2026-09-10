@@ -120,6 +120,18 @@ def _fill_offcuts(
     return layouts, remaining
 
 
+def _plan_bill(plan: Tuple[List[CuttingLayout], List[Piece]]) -> Tuple[int, float]:
+    """Ranks a catalog fill: pieces left over first, then what the sheets cost.
+
+    The count leads because ``max_sheets`` is a hard cap during the
+    ``catalog_first`` probing: under it the two candidates below can place a
+    different number of pieces, and a plan that bills less by cutting less is
+    not cheaper, it is unfinished.
+    """
+    layouts, unplaced = plan
+    return len(unplaced), sum(layout.material.cost_per_unit for layout in layouts)
+
+
 def _fill_catalog(
     primary: ResolvedMaterial,
     pieces: List[Piece],
@@ -130,12 +142,27 @@ def _fill_catalog(
     budget: Optional[SearchBudget] = None,
     seed: int = 0,
     exact_config: Optional[ExactConfig] = None,
+    half_spec: Optional[BinSpec] = None,
 ) -> Tuple[List[CuttingLayout], List[Piece]]:
     """Packs the remainder onto catalog boards via the board-count search.
 
-    Full boards only: the half-board downgrade happens once, on the final
-    selection (see ``optimize_pool``), so the ``catalog_first`` probing keeps
-    counting whole catalog sheets.
+    The half board is handed to the search as a cheaper sibling bin, exactly as
+    the pool-less route does (``parallel._optimize_job``). It used to be full
+    boards only, which left the post-hoc downgrade in ``optimize_pool`` as the
+    only way a sheet could ever be billed as a half — and that pass can only
+    rewrite a sheet whose content ALREADY fits the half, never move a piece
+    across sheets so that it does. On pre-order 2 (a board + one client offcut)
+    that was the whole defect: two full boards where one full + one half cuts
+    the same list.
+
+    Two searches, cheapest plan wins, because a cheaper bin is not a free
+    addition: the beam keeps a bounded number of states, so the half can crowd
+    out the partition that was right (measured: 9 full boards at $522.00 became
+    8 full + 2 halves at $527.80). Comparing against the half-less plan is what
+    makes this strictly additive — the same device ``optimize_bins`` uses to
+    keep the CP-SAT seeding from losing a board the heuristics had found. The
+    second search is skipped when the winner used no half at all, since then
+    there is nothing the comparison could overturn.
     """
     if not pieces or max_sheets <= 0:
         return [], pieces
@@ -146,9 +173,7 @@ def _fill_catalog(
         thickness=primary.thickness,
         cost_per_unit=primary.cost_per_unit,
     )
-    return optimize_bins(
-        pieces,
-        [spec],
+    kwargs = dict(
         cutting_params=cutting_params,
         strategy=strategy,
         budget=budget,
@@ -157,6 +182,21 @@ def _fill_catalog(
         max_sheets=max_sheets,
         exact_config=exact_config,
     )
+    if half_spec is None:
+        return optimize_bins(pieces, [spec], **kwargs)
+
+    with_half = optimize_bins(pieces, [spec, half_spec], **kwargs)
+    if not any(layout.material.half_board for layout in with_half[0]):
+        return with_half
+
+    layouts, unplaced = optimize_bins(pieces, [spec], **kwargs)
+    full_only = (
+        _apply_half_downgrade(
+            layouts, half_spec, cutting_params, seed, min_rect_size, exact_config
+        ),
+        unplaced,
+    )
+    return min(full_only, with_half, key=_plan_bill)
 
 
 def _offcuts_first(
@@ -170,6 +210,7 @@ def _offcuts_first(
     budget: Optional[SearchBudget] = None,
     seed: int = 0,
     exact_config: Optional[ExactConfig] = None,
+    half_spec: Optional[BinSpec] = None,
 ) -> Tuple[List[CuttingLayout], List[Piece]]:
     offcut_layouts, remaining = _fill_offcuts(
         offcuts, pieces, cutting_params, strategy, min_rect_size
@@ -184,6 +225,7 @@ def _offcuts_first(
         budget,
         seed,
         exact_config,
+        half_spec,
     )
     return offcut_layouts + catalog_layouts, unplaced
 
@@ -199,6 +241,7 @@ def _catalog_first(
     budget: Optional[SearchBudget] = None,
     seed: int = 0,
     exact_config: Optional[ExactConfig] = None,
+    half_spec: Optional[BinSpec] = None,
 ) -> Tuple[List[CuttingLayout], List[Piece]]:
     """Fewest catalog boards such that the offcuts absorb the residual.
 
@@ -218,6 +261,7 @@ def _catalog_first(
         budget,
         seed,
         exact_config,
+        half_spec,
     )
     nc = len(catalog_only)
 
@@ -232,6 +276,7 @@ def _catalog_first(
             budget,
             seed,
             exact_config,
+            half_spec,
         )
         offcut_layouts, remaining = _fill_offcuts(
             offcuts, remaining, cutting_params, strategy, min_rect_size
@@ -304,8 +349,11 @@ def optimize_pool(
 
     The fill order comes from ``primary.fill_order``; ``auto`` keeps whichever of
     ``offcuts_first``/``catalog_first`` wastes least catalog area (deterministic).
-    ``half_spec`` (catalog materials only) enables the final half-board
-    downgrade on the purchased sheets.
+    ``half_spec`` (catalog materials only) is a bin of the catalog search itself
+    (see ``_fill_catalog``); the pass below is what remains of its old post-hoc
+    role — a last sweep over sheets the search did not downgrade, which the
+    relaxed-kerf repair can still produce after ``optimize_bins`` has run its
+    own. Cheap, idempotent, and it can only ever lower the bill.
     """
     if not pieces:
         return [], []
@@ -320,6 +368,7 @@ def optimize_pool(
             budget,
             seed,
             exact_config,
+            half_spec,
         )
         return (
             _apply_half_downgrade(
@@ -340,6 +389,7 @@ def optimize_pool(
         budget,
         seed,
         exact_config,
+        half_spec,
     )
 
     if order == PoolFillOrder.offcuts_first:
