@@ -515,3 +515,143 @@ def test_skipping_the_trims_rescues_an_offcut_they_made_unusable():
     )
     assert none_stranded == []
     assert _all_placed_ids(layouts) == ["p1"]
+
+
+# --- the half board inside a pool -------------------------------------------
+
+P2_PARAMS = CuttingParameters(
+    kerf=4, top_trim=10, bottom_trim=10, left_trim=10, right_trim=10
+)
+
+
+def _bill(layouts):
+    return round(sum(layout.material.cost_per_unit for layout in layouts), 2)
+
+
+def _half_of(primary, markup=0.1):
+    """The half-board sibling bin, built the way ``service._half_spec`` builds it."""
+    return BinSpec(
+        key=primary.key,
+        width=primary.width / 2.0,
+        height=primary.height,
+        thickness=primary.thickness,
+        cost_per_unit=round(primary.cost_per_unit / 2.0 * (1 + markup), 2),
+        half_board=True,
+    )
+
+
+def _full_only_bill(pieces, primary, offcuts, half, params):
+    """What the engine billed before: search whole boards, rebate afterwards.
+
+    Reproduces the old contract exactly — ``optimize_pool`` with no half bin,
+    then the per-sheet downgrade that used to be the half board's only role.
+    """
+    from src.modules.optimizations.pool import _apply_half_downgrade
+
+    layouts, _ = optimize_pool(list(pieces), primary, list(offcuts), params)
+    return _bill(_apply_half_downgrade(layouts, half, params, 0, 0.1, None))
+
+
+def _preorder_2():
+    """The board + one client offcut Denis reported (pre-order 2, 20 pieces).
+
+    2.80x2.07 melamine at $88.478261 plus a 600x1440 retazo of the client's.
+    The commercial program cuts it on the retazo and one board and a half; the
+    engine used to answer two whole boards.
+    """
+    primary = _mat(
+        "board",
+        2070,
+        2800,
+        cost=88.478261,
+        product_id=142,
+        fill_order=PoolFillOrder.offcuts_first,
+    )
+    offcuts = [_offcut("retazo", 600, 1440)]
+    spec = [
+        (1, 400, 1240),
+        (1, 350, 1200),
+        (1, 75, 1200),
+        (2, 160, 590),
+        (4, 500, 735),
+        (1, 500, 1800),
+        (1, 520, 1800),
+        (2, 500, 570),
+        (1, 500, 600),
+        (1, 95, 1800),
+        (2, 590, 720),
+        (1, 180, 610),
+        (2, 355, 1805),
+    ]
+    pieces = []
+    for quantity, width, height in spec:
+        for _ in range(quantity):
+            pieces.append(
+                Piece(
+                    id=f"p{len(pieces)}", width=width, height=height, can_rotate=False
+                )
+            )
+    return pieces, primary, offcuts
+
+
+def test_preorder_2_bills_a_board_and_a_half_not_two_boards():
+    """The reported bug: the half board has to be a bin of the pool's search.
+
+    The post-hoc downgrade can only rewrite a sheet whose content already fits
+    the half — it can never move a piece to the other sheet so that it does. So
+    the assertion is on the BILL: one full sheet plus one half, which is what
+    the commercial program quotes, and $39.82 less than two whole boards.
+    """
+    pieces, primary, offcuts = _preorder_2()
+    half = _half_of(primary)
+
+    layouts = _pool(
+        list(pieces), primary, list(offcuts), P2_PARAMS, half_spec=half, seed=4
+    )
+
+    catalog = [layout for layout in layouts if layout.material.id == "board"]
+    assert [layout.material.half_board for layout in catalog] == [False, True]
+    assert _bill(layouts) == 137.14
+    assert _bill(layouts) < _full_only_bill(pieces, primary, offcuts, half, P2_PARAMS)
+    assert_valid_layouts(layouts, [], P2_PARAMS, len(pieces))
+
+
+def test_the_half_board_never_costs_more_than_the_whole_board_plan():
+    """Strictly additive: a cheaper bin is not a free addition.
+
+    The beam keeps a bounded number of states, so letting the half compete can
+    crowd out the partition that was right — measured on a 77-piece pool, nine
+    whole boards at $522.00 came back as eight boards and two halves at
+    $527.80. ``_fill_catalog`` therefore runs both searches and bills the
+    cheaper, which is the property pinned here over a seeded population.
+    """
+    import random
+
+    rng = random.Random(20260909)
+    halved = 0
+    for _ in range(12):
+        primary = _mat(
+            "board", 1220, 2440, cost=rng.choice([48.0, 62.0, 88.0]), product_id=1
+        )
+        offcuts = [_offcut("retazo", rng.choice([600, 800]), rng.choice([900, 1200]))]
+        pieces = [
+            Piece(
+                id=f"p{i}",
+                width=rng.randrange(200, 600, 10),
+                height=rng.randrange(300, 900, 10),
+                can_rotate=False,
+            )
+            for i in range(rng.randint(10, 16))
+        ]
+        half = _half_of(primary)
+
+        layouts = _pool(list(pieces), primary, list(offcuts), P2_PARAMS, half_spec=half)
+
+        assert _bill(layouts) <= _full_only_bill(
+            pieces, primary, offcuts, half, P2_PARAMS
+        ), [(p.width, p.height) for p in pieces]
+        halved += any(layout.material.half_board for layout in layouts)
+
+    # Guards against the population drifting into cases with no half board at
+    # all, where the assertion above would hold vacuously.
+    assert halved
