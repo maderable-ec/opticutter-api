@@ -47,7 +47,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from src.cutting import constructors as _py_constructors
-from src.cutting import exact, rust_backend
+from src.cutting import exact, exact3, rust_backend
 from src.cutting.constructors import (
     GREEDY_PORTFOLIO,
     BinFill,
@@ -104,9 +104,19 @@ from src.cutting.parameters import CuttingParameters
 # piece across sheets to make the half fit. Only pools WITH attached offcuts
 # move -- ``optimize_pool`` is the sole caller and the pool-less route already
 # passed both bins -- which is why ``bench_battery`` digests stay byte-identical
-# through it. Also bump this when the pinned ortools version moves, since a
-# solver upgrade can return a different solution.
-ENGINE_VERSION = 12
+# through it; 13 = a plan that closes on a sheet under half full gets the whole
+# pool re-partitioned onto one fewer full board plus a half, decided by a
+# 3-STAGE model (``exact3.py``). The half downgrade could only ever re-pack a
+# sheet whose content already fitted the half; this decides which pieces land on
+# the full boards instead, and it needs three stages because the plans that win
+# pack the full board to ~93% with strips carrying pieces of different heights
+# side by side -- which ``exact.py``'s 2-stage model cannot express at all.
+# The reference case is ``BARROCO_DORADO_POOL`` in
+# ``tests/unit/test_cutting_search.py``: 29 grain-locked pieces we billed as 2
+# full boards where the commercial program cuts them on 1 + 1/2. Also bump
+# this when the pinned ortools version moves, since a solver upgrade can return
+# a different solution.
+ENGINE_VERSION = 13
 
 # A half bin is only worth opening near the end of a job: gate it by remaining
 # area so early states don't waste decodes on fills the cost objective would
@@ -166,6 +176,20 @@ _RESTART_FLAVORS = (True,)
 # four wins are lost; the delta of 1mm is what the four winning pools needed
 # (three at -1mm, one at -2mm), and -2mm alone finds fewer.
 _REPAIR_FILL_GATE = 0.30
+
+# When the half-board re-partition below is even worth asking about: the
+# emptiest sheet of the plan must be under this share of its board.
+#
+# It needs its OWN gate, distinctly looser than ``_REPAIR_FILL_GATE``, because
+# it reacts to a different symptom. The relaxed-kerf repair fires on a plan that
+# closes on a nearly EMPTY sheet; this one fires on a sheet that is merely less
+# than half used, which is the exact condition under which a half board could
+# have carried it. ``BARROCO_DORADO_POOL`` (see ``exact3.py``) closes its second
+# sheet at 45% and the 0.30 gate never sees it. The margin above 0.5 is there
+# because the re-partition may move pieces off the full boards too, so the
+# incumbent's last sheet does not have to already fit the half -- and on that cut
+# list it provably does not.
+_HALF_REPARTITION_GATE = 0.55
 _REPAIR_KERF_DELTAS = (1.0, 2.0)
 
 _LEGACY_CONFIG = {
@@ -1286,6 +1310,76 @@ def _recut(
     ]
 
 
+def _half_repartition_repair(
+    pieces: List[Piece],
+    bins: List[BinSpec],
+    params: CuttingParameters,
+    incumbent: Sequence[CuttingLayout],
+    *,
+    seed: int,
+    min_rect_size: float,
+) -> Optional[List[CuttingLayout]]:
+    """Re-partition the whole pool onto one fewer full board, plus a half.
+
+    The question the rest of the engine cannot ask. Swapping a full board for a
+    half is not a rewrite of one sheet — the half downgrade already tries that,
+    and it can only ever re-pack content that ALREADY fits — it is a different
+    partition of the whole pool, and deciding it means deciding which pieces
+    land on the full boards. That is exactly what ``exact3.fits_bins`` answers.
+
+    It also needs three stages to answer it. On the reference cut list
+    (``BARROCO_DORADO_POOL``, embedded in ``tests/unit/test_cutting_search.py``)
+    the plan that bills 1 board + 1 half packs the full board to 93.4% with
+    strips carrying pieces of different heights side by side, and ``exact.py``'s
+    2-stage model returns INFEASIBLE for it in every orientation while the greedy
+    portfolio places 16 of its 18 pieces.
+
+    **Strictly additive by construction**: the candidate is adopted only when it
+    costs less AND places every piece, so a refusal (or a budget that runs out —
+    ``None`` from a capped model is never a proof) leaves the incumbent exactly
+    as it was. Gated by ``_HALF_REPARTITION_GATE`` and by a free area check, so
+    the solver is not consulted on the plans that obviously cannot improve.
+    """
+    if not exact3.is_available() or len(pieces) > exact3.MAX_PIECES:
+        return None
+    full = next((s for s in bins if not s.half_board and s.count is None), None)
+    half = next((s for s in bins if s.half_board and s.count is None), None)
+    if full is None or half is None or half.cost_per_unit >= full.cost_per_unit:
+        return None
+
+    def usable(spec: BinSpec) -> float:
+        width = spec.width - params.left_trim - params.right_trim
+        height = spec.height - params.top_trim - params.bottom_trim
+        return max(0.0, width) * max(0.0, height)
+
+    need = sum(p.area for p in pieces)
+    plan = list(incumbent)
+    # Each success makes the plan cheaper, so repeating can only keep helping —
+    # but each ATTEMPT costs solver work whether or not it succeeds, and the
+    # area check below only stops the runaway cases for free. Two rounds is what
+    # the battery supports: the second is what turns a won half board into a
+    # second one, and a third never fired on 80 jobs.
+    for _ in range(min(2, len(incumbent))):
+        if _emptiest_sheet(plan) >= _HALF_REPARTITION_GATE:
+            return None if plan is incumbent else plan
+        n_full = sum(1 for layout in plan if not layout.material.half_board)
+        if n_full == 0:
+            break
+        specs = [full] * (n_full - 1) + [half] * (len(plan) - n_full + 1)
+        if sum(usable(s) for s in specs) < need - 1e-6:
+            break
+        if sum(s.cost_per_unit for s in specs) >= _plan_cost(plan) - 1e-6:
+            break
+        fills = exact3.fits_bins(
+            pieces, specs, params, seed=seed, min_rect_size=min_rect_size
+        )
+        if fills is None or sum(len(f.placed) for f in fills) != len(pieces):
+            break
+        # A bin the answer left empty is simply not bought.
+        plan = _to_layouts([f for f in fills if f.placed])
+    return None if plan is incumbent else plan
+
+
 def _relaxed_kerf_repair(
     pieces: List[Piece],
     bins: List[BinSpec],
@@ -1515,6 +1609,18 @@ def optimize_bins(
         )
         if repaired is not None:
             layouts = repaired
+        # After the kerf repair, not before: that pass can change which sheet is
+        # the emptiest, and this one's gate reads exactly that.
+        rebalanced = _half_repartition_repair(
+            placeable,
+            bins,
+            params,
+            layouts,
+            seed=seed,
+            min_rect_size=min_rect_size,
+        )
+        if rebalanced is not None and _plan_cost(rebalanced) < _plan_cost(layouts):
+            layouts = rebalanced
 
     return layouts, unplaced + solution.unplaced
 

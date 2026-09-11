@@ -883,3 +883,178 @@ def test_max_yield_pass_reports_pieces_that_fit_no_bin():
 
     assert_valid_layouts(layouts, unplaced, PARAMS_KERF4, len(pieces) + 1)
     assert "huge" in {p.id for p in unplaced}
+
+
+# ---------------------------------------------------------------------------
+# BARROCO DORADO: the half board the engine could not cut
+# ---------------------------------------------------------------------------
+#
+# A real shop cut list, embedded here the way the audit fixtures above are, so
+# it stays runnable after the quote it came from is gone: 29 pieces of
+# `MDP RH ROBLE BARROCO DORADO (2.80X2.07)`, 7.679 m2, which the commercial
+# program bills as **1 board + 1 half** and we billed as 2 full boards. The
+# same file's BLANCO pool we already tie (6 boards + a half, sheets at 94-99%).
+#
+# Every piece is grain-locked, and so is the reference: the commercial export
+# carries `allow_rotation=0` on every row. This is NOT a rotation difference —
+# granting rotation does reach 1 + 1/2, but it would be answering another
+# question, and it would cross the grain of a roble the shop sells for its
+# figure.
+#
+# A 1 + 1/2 plan exists without rotating anything (``BARROCO_PLAN_*`` below,
+# validated by ``test_barroco_dorado_half_board_plan_is_physically_valid``), and
+# until ``exact3.py`` nothing in the engine could produce it. The reason was
+# structural rather than a matter of budget, and it is why that module exists:
+#
+#   * it needs the full board packed to 93.4% with a **3-stage** pattern -
+#     strips carrying 3-4 pieces of DIFFERENT heights side by side;
+#   * ``exact.py`` is a 2-stage model (column -> stacked rows, one piece per
+#     row plus a trim), so it cannot express that - asked for these 29 pieces
+#     in 1 full + 1 half it answers INFEASIBLE in all four orientations;
+#   * the greedy portfolio places 16 of the full board's 18 pieces.
+#
+# The post-hoc half downgrade could not save it either: the content of the
+# second sheet the search settles on (12 pieces, 91.1% of the half) is *proven*
+# infeasible on the half even under a 3-stage model. The PARTITION has to
+# change, which is why this was never a re-pack of one sheet.
+
+# (width, height, quantity, can_rotate)
+BARROCO_DORADO_POOL = [
+    (430, 850, 4, False),
+    (565, 340, 4, False),
+    (575, 340, 4, False),
+    (460, 710, 2, False),
+    (333, 710, 3, False),
+    (435, 550, 4, False),
+    (535, 110, 1, False),
+    (80, 2780, 4, False),
+    (300, 830, 1, False),
+    (930, 790, 1, False),
+    (525, 790, 1, False),
+]
+# MDP RH ROBLE BARROCO DORADO (2.80X2.07): 2070x2800, half at price/2 + markup.
+BARROCO_FULL = BinSpec(
+    key="board", width=2070, height=2800, thickness=15, cost_per_unit=88.478261
+)
+BARROCO_HALF = BinSpec(
+    key="board",
+    width=1035,
+    height=2800,
+    thickness=15,
+    cost_per_unit=48.66,
+    half_board=True,
+)
+BARROCO_COMMERCIAL_COST = 137.14  # 1 full + 1 half, what the reference bills
+BARROCO_TWO_BOARD_COST = 176.96  # 2 full boards, what the engine used to bill
+
+# The two cut trees that realize it, as ``(column, row) -> [(across, along)]``
+# in each bin's LOCAL frame: the first stage rips along ``across``, the second
+# crosscuts each column into rows, the third puts the row's pieces side by side.
+# ``across``/``along`` are the piece's own width/height, swapped when the bin is
+# transposed (its first-stage cut runs across the sheet instead of along it).
+BARROCO_PLAN_FULL = {  # 2050x2780 usable, 18 pieces, 93.4%
+    (0, 0): [(80, 2780)] * 4,
+    (1, 0): [(460, 710)] * 2 + [(333, 710)] * 2,
+    (1, 1): [(430, 850), (333, 710), (930, 790)],
+    (1, 2): [(430, 850)] * 2 + [(300, 830), (525, 790)],
+    (1, 3): [(565, 340)] * 3,
+}
+BARROCO_PLAN_HALF = {  # 1015x2780 usable, transposed, 11 pieces, 83.5%
+    (0, 0): [(110, 535)],
+    (1, 0): [(340, 575)],
+    (2, 0): [(850, 430), (340, 565)] + [(340, 575)] * 3,
+    (2, 1): [(550, 435)] * 4,
+}
+
+
+def _lay_out_tree(plan, spec, params, pool, transposed=False):
+    """Turns one ``BARROCO_PLAN_*`` cut tree into a real ``CuttingLayout``.
+
+    Consumes instances out of ``pool`` (a ``{(width, height): [Piece]}`` map) so
+    the two sheets together account for every piece exactly once, which is what
+    lets ``assert_valid_layouts`` check conservation.
+    """
+    from src.cutting import CuttingLayout
+    from src.cutting.models import PlacedPiece
+
+    kerf = params.kerf
+    placed = []
+    x = params.left_trim
+    for column in sorted({k for k, _ in plan}):
+        column_across = 0.0
+        y = params.bottom_trim
+        for row in sorted({r for k, r in plan if k == column}):
+            items = plan[column, row]
+            across = sum(a for a, _ in items) + kerf * (len(items) - 1)
+            column_across = max(column_across, across)
+            cursor = x
+            for a, b in items:
+                # In the transposed frame the local axes are the sheet's swapped
+                # ones, so the piece keeps its own width/height either way.
+                px, py, pw, ph = (
+                    (cursor, y, a, b) if not transposed else (y, cursor, b, a)
+                )
+                placed.append(
+                    PlacedPiece(
+                        piece=pool[(pw, ph)].pop(),
+                        x=px,
+                        y=py,
+                        width=pw,
+                        height=ph,
+                        rotated=False,
+                    )
+                )
+                cursor += a + kerf
+            y += max(b for _, b in items) + kerf
+        x += column_across + kerf
+    return CuttingLayout(material=spec.to_material(), placed_pieces=placed)
+
+
+def test_barroco_dorado_half_board_plan_is_physically_valid():
+    """The 1 + 1/2 plan is real: it survives the same checks as the engine's own.
+
+    The target, pinned constructively so it cannot be argued away by a search
+    that fails to find it — the same device the white pool used when the
+    corpus's plausibility cutoff turned out to be wrong. Note the full board
+    here sits at 93.4%, which is the MEDIAN the corpus reports for the pools we
+    lose to a billing floor: this gap and that population are the same shape.
+    """
+    from src.cutting.packer import expand_pieces
+
+    instances = expand_pieces(_pieces(BARROCO_DORADO_POOL))
+    pool = {}
+    for piece in instances:
+        pool.setdefault((piece.width, piece.height), []).append(piece)
+
+    layouts = [
+        _lay_out_tree(BARROCO_PLAN_FULL, BARROCO_FULL, PARAMS_KERF4, pool),
+        _lay_out_tree(
+            BARROCO_PLAN_HALF, BARROCO_HALF, PARAMS_KERF4, pool, transposed=True
+        ),
+    ]
+
+    assert_valid_layouts(
+        layouts, [], PARAMS_KERF4, _total_instances(BARROCO_DORADO_POOL)
+    )
+    assert not any(v for v in pool.values()), "every instance is placed"
+    assert sum(lay.material.cost_per_unit for lay in layouts) == pytest.approx(
+        BARROCO_COMMERCIAL_COST, abs=0.01
+    )
+    # And nothing is rotated: the roble has a grain and the shop honours it.
+    assert not any(pp.rotated for lay in layouts for pp in lay.placed_pieces)
+
+
+@pytest.mark.slow
+def test_barroco_dorado_reaches_commercial_parity_at_kerf_4():
+    """1 board + 1 half, the commercial reference, without rotating a piece."""
+    layouts, unplaced = optimize_bins(
+        _pieces(BARROCO_DORADO_POOL),
+        [BARROCO_FULL, BARROCO_HALF],
+        cutting_params=PARAMS_KERF4,
+    )
+    assert unplaced == []
+    assert_valid_layouts(
+        layouts, unplaced, PARAMS_KERF4, _total_instances(BARROCO_DORADO_POOL)
+    )
+    cost = sum(layout.material.cost_per_unit for layout in layouts)
+    assert cost == pytest.approx(BARROCO_COMMERCIAL_COST, abs=0.01)
