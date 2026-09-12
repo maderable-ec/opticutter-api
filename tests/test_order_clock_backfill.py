@@ -1,12 +1,16 @@
-"""The migration's backfills, run against real rows.
+"""The status-clock backfill of ``000000000002``, run against real rows.
 
-``000000000002`` adds ``status_changed_at``/``banding_ready_at`` and dates the
-orders that already exist. Both statements hinge on a condition that is silent
-when wrong -- one skips the ``from == to`` audit rows, the other tells JSON
-``null`` from SQL NULL -- and on an empty database (the only place a migration is
-normally exercised) both are no-ops. So the suite builds the exact shapes through
-the API, blanks the columns, replays the SQL, and checks it lands back where the
-service had put it.
+The statement hinges on a condition that is silent when wrong -- it has to skip
+the ``from == to`` audit rows -- and on an empty database (the only place a
+migration is normally exercised) it is a no-op. So the suite builds the exact
+shapes through the API, blanks the column, replays the SQL, and checks it lands
+back where the service had put it.
+
+Its sibling ``banding_ready_at`` is gone: ``000000000003`` moved that clock into
+``order_activities.ready_at``, so the column the old statement writes no longer
+exists. The equivalent coverage for the activity backfills lives in
+``test_order_activities_backfill.py``, which is also where the JSON-null trap
+(``edges IS NOT NULL`` matching every row) is now pinned.
 """
 
 import importlib.util
@@ -14,14 +18,7 @@ import pathlib
 
 from sqlalchemy import text
 
-from tests.test_order_banding import (
-    _banded_pieces,
-    _cut_piece,
-    _order_mixed_pieces,
-    _order_with_banding,
-    _patch_status,
-    _to_cutting,
-)
+from tests.order_helpers import _order_with_banding, _patch_status, _to_in_process
 
 _MIGRATION = (
     pathlib.Path(__file__).resolve().parents[1]
@@ -44,10 +41,7 @@ def _replay(db_session, *columns):
     db_session.execute(
         text(f"UPDATE orders SET {', '.join(f'{c} = NULL' for c in columns)}")
     )
-    if "status_changed_at" in columns:
-        db_session.execute(text(mig.BACKFILL_STATUS_CHANGED_AT))
-    if "banding_ready_at" in columns:
-        db_session.execute(text(mig.BACKFILL_BANDING_READY_AT))
+    db_session.execute(text(mig.BACKFILL_STATUS_CHANGED_AT))
     db_session.commit()
 
 
@@ -59,7 +53,7 @@ def _column(db_session, order_id, column):
 
 def test_backfill_recovers_the_status_clock(client, db_session):
     order = _order_with_banding(client, db_session, identifier="0100000397")
-    _to_cutting(client, order["id"])  # queued, then cutting
+    _to_in_process(client, order["id"])  # paid, then the shop starts the cut
     live = _column(db_session, order["id"], "status_changed_at")
 
     _replay(db_session, "status_changed_at")
@@ -98,38 +92,6 @@ def test_backfill_falls_back_to_created_at_without_history(client, db_session):
     assert _column(db_session, order["id"], "status_changed_at") == _column(
         db_session, order["id"], "created_at"
     )
-
-
-def test_backfill_dates_the_banding_clock_from_the_first_banded_piece(
-    client, db_session
-):
-    order = _order_mixed_pieces(client, db_session, identifier="0100000421")
-    _to_cutting(client, order["id"])
-    banded = _banded_pieces(client, order["id"])
-    assert _cut_piece(client, order["id"], banded[0]).status_code == 200
-    assert _cut_piece(client, order["id"], banded[1]).status_code == 200
-    live = _column(db_session, order["id"], "banding_ready_at")
-    assert live is not None
-
-    _replay(db_session, "banding_ready_at")
-    assert _column(db_session, order["id"], "banding_ready_at") == live
-
-
-def test_backfill_does_not_date_the_clock_off_a_plain_piece(client, db_session):
-    """The JSON-null trap: `edges IS NOT NULL` would match every row here.
-
-    This order has no edge banding at all, so however many pieces get cut the
-    banding clock must stay NULL.
-    """
-    order = _order_mixed_pieces(client, db_session, identifier="0100000439")
-    _to_cutting(client, order["id"])
-    plan = client.get(f"/api/v1/orders/{order['id']}/cutting-plan").json()["data"]
-    plain = [p for b in plan["boards"] for p in b["pieces"] if not p["edges"]]
-    assert plain, "fixture must carry pieces without banding"
-    assert _cut_piece(client, order["id"], plain[0]).status_code == 200
-
-    _replay(db_session, "banding_ready_at")
-    assert _column(db_session, order["id"], "banding_ready_at") is None
 
 
 def test_backfill_recovers_the_clock_of_a_never_moved_order(client, db_session):

@@ -23,19 +23,21 @@ route is protected with ``require_role(*RESOURCE_ROLES[key])`` (see ``dependenci
 | orders:workshop (shop board)  | yes           | no       | yes      | yes       |
 | cutting_plan (view plan)      | yes           | yes      | yes      | no        |
 | orders:cut (mark pieces)      | yes           | no       | yes      | no        |
-| orders:band (edge banding)    | yes           | no       | no       | yes       |
+| orders:activities (work)      | yes           | no       | yes*     | yes*      |
 | analytics                     | yes           | no       | no       | no        |
 | notifications:read            | yes           | yes      | yes      | yes       |
 | print:agents (register/token) | yes           | no       | no       | no        |
 
-* Per-transition validation lives in TRANSITION_ROLES (orders/model.py). The operator
-  and bander enter ``orders:transition`` to complete orders (``cut -> completed``) from
-  the shop-floor board; dispatch (``completed -> despachado``) is a commercial act
-  restricted to admin/seller. Every other transition stays off-limits to them.
+* Two layers, in both rows. The area opens the endpoint; a table in
+  ``orders/model.py`` decides the specific move: TRANSITION_ROLES per (from, to)
+  transition, ACTIVITY_ROLES per activity (the operator cuts, the bander bands and
+  does the additional work). The shop floor holds ``orders:transition`` only for
+  the order's derived closing; dispatch (``finished -> dispatched``) is a commercial
+  act restricted to admin/seller, and every other transition stays off-limits.
 
-The bander doesn't see order detail (no ``orders:read``): only their banding queue
-and start/finish endpoints (``orders:band``) plus the self-sufficient shop-floor
-board (``orders:workshop``), from which they also complete orders (``orders:transition``).
+The bander doesn't see order detail (no ``orders:read``): only the activity
+endpoint (``orders:activities``) and the self-sufficient shop-floor board
+(``orders:workshop``), which is where they work from.
 """
 
 from src.modules.users.enums import UserRole
@@ -76,7 +78,11 @@ RESOURCE_ROLES: dict[str, tuple[UserRole, ...]] = {
     "orders:workshop": (_ADMIN, _OPERATOR, _BANDER),
     "cutting_plan": (_ADMIN, _SELLER, _OPERATOR),
     "orders:cut": (_ADMIN, _OPERATOR),
-    "orders:band": (_ADMIN, _BANDER),
+    # The shop floor's work endpoint (start/finish an activity). Deliberately one
+    # area for the three activities: ACTIVITY_ROLES is what says the operator cuts
+    # and the bander bands, and splitting it per activity would duplicate that
+    # decision in two places.
+    "orders:activities": (_ADMIN, _OPERATOR, _BANDER),
     "analytics": (_ADMIN,),
     # Any authenticated role reads/acks its own notifications; the service scopes
     # every query to the current user's id.

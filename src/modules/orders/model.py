@@ -12,6 +12,7 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
+    UniqueConstraint,
     text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -22,71 +23,150 @@ from src.shared.mixins import AuditMixin, TimestampMixin
 
 
 class OrderStatus(str, Enum):
-    """States of an order's CUTTING process.
+    """States of an order's production process.
 
-    The client's pre-purchase review (mutable quote) lives in the pre-order; an
-    order is born ``confirmed`` and from there only advances through production.
-    ``queued`` is the workshop queue: the order is ready but cutting hasn't started
-    yet (entering ``cutting`` marks the start of the cut; ``cut`` marks its end).
+    An order is born ``confirmed`` and from there only advances: ``queued`` is
+    the workshop queue (the order is paid and waiting for the shop),
+    ``in_process`` is the shop floor working on it, ``finished`` means every
+    activity is closed, ``dispatched`` that the goods reached the client.
 
-    EDGE BANDING runs on a parallel, independent track (``BandingStatus``): the
-    bander can band pieces the operator releases without waiting for the whole
-    cut to finish.
+    ``in_process`` is an UMBRELLA, not a task: the work itself runs as up to
+    three parallel ACTIVITIES (cut / banding / additional -- see
+    ``OrderActivityModel``), each with its own status, clocks and actor. The
+    order's status is DERIVED from them: starting the first activity moves the
+    order here, closing the last applicable one moves it to ``finished``.
+
+    ``cutting`` and ``cut`` are LEGACY and read-only -- the two states
+    ``in_process`` absorbed. They have no entry in ``TRANSITIONS``, so nothing
+    can reach them; they survive because ``order_status_history`` still says
+    them for every order cut before the change, and
+    ``OrderStatusHistoryResponse`` validates those rows against this enum.
     """
 
     confirmed = "confirmed"
     queued = "queued"
-    cutting = "cutting"
-    cut = "cut"
-    completed = "completed"
-    dispatched = "despachado"
+    in_process = "in_process"
+    finished = "finished"
+    dispatched = "dispatched"
     cancelled = "cancelled"
 
+    # Legacy, history only (see the docstring): never a target of a transition.
+    cutting = "cutting"
+    cut = "cut"
 
-class BandingStatus(str, Enum):
-    """Status of the parallel EDGE BANDING track.
 
-    Orthogonal dimension to ``OrderStatus``: it advances on its own while
-    cutting follows its course. ``not_applicable`` = the order has no edge
-    banding (nothing to band). The bander moves it ``pending → in_progress →
-    done``.
+# Statuses that only exist to keep old history rows readable: excluded from the
+# listing's filter options and from the analytics breakdown, which would
+# otherwise always carry two rows at zero.
+LEGACY_STATUSES = {OrderStatus.cutting, OrderStatus.cut}
+
+LIVE_STATUSES = [s for s in OrderStatus if s not in LEGACY_STATUSES]
+
+
+class ActivityType(str, Enum):
+    """The parallel activities of an order in process.
+
+    ``cutting`` is on every order; ``banding`` only when it carries edge
+    banding; ``additional`` only when it registers additional services
+    (perforación, armado, bisagras...). The operator cuts; the bander does
+    banding AND additional.
     """
 
-    not_applicable = "not_applicable"
+    cutting = "cutting"
+    banding = "banding"
+    additional = "additional"
+
+
+# User-facing name of each activity, for the error messages the shop floor reads.
+ACTIVITY_LABELS: dict["ActivityType", str] = {
+    ActivityType.cutting: "corte",
+    ActivityType.banding: "canteado",
+    ActivityType.additional: "adicionales",
+}
+
+
+class ActivityStatus(str, Enum):
+    """Status of one activity. Forward-only; re-applying the current one is a no-op."""
+
     pending = "pending"
     in_progress = "in_progress"
     done = "done"
 
 
-# Banding statuses that still block closing the order (banding work remains).
-BANDING_PENDING_STATUSES = {BandingStatus.pending, BandingStatus.in_progress}
+# Valid moves of an activity (forward-only). ``not_applicable`` has no value
+# here on purpose: an activity that does not apply has NO ROW.
+ACTIVITY_TRANSITIONS: dict[ActivityStatus, set[ActivityStatus]] = {
+    ActivityStatus.pending: {ActivityStatus.in_progress},
+    ActivityStatus.in_progress: {ActivityStatus.done},
+    ActivityStatus.done: set(),
+}
 
-# Cutting statuses in which banding can be registered (pieces are already released).
-BANDING_MUTABLE_ORDER_STATUSES = {OrderStatus.cutting, OrderStatus.cut}
+# Who registers each activity: the operator cuts, the bander bands and does the
+# additional work. Same two-layer scheme as the order's own machine -- the
+# ``orders:activities`` permission opens the endpoint, this filters the activity.
+ACTIVITY_ROLES: dict[ActivityType, tuple[UserRole, ...]] = {
+    ActivityType.cutting: (UserRole.ADMIN, UserRole.OPERATOR),
+    ActivityType.banding: (UserRole.ADMIN, UserRole.BANDER),
+    ActivityType.additional: (UserRole.ADMIN, UserRole.BANDER),
+}
 
-# Statuses shown on the shared workshop board (operator + bander): from the queue
-# up to "cut" (ready to complete). Excludes ``confirmed`` (not yet in the shop) and
-# the closed states (``completed``/``despachado``/``cancelled``).
-WORKSHOP_QUEUE_STATUSES = {OrderStatus.queued, OrderStatus.cutting, OrderStatus.cut}
+# Which placed pieces each activity works on: every piece, or only the banded
+# ones. It is the set the two floors below are measured against, and it is what
+# keeps the tracks PARALLEL: banding closes once every BANDED piece is cut, even
+# with plain pieces still on the saw.
+ACTIVITY_PIECES: dict[ActivityType, str] = {
+    ActivityType.cutting: "all",
+    ActivityType.banding: "banded",
+    ActivityType.additional: "all",
+}
+
+# Starting needs at least ONE piece of that set cut: there has to be something
+# to work on. Cutting is exempt -- it IS the cut.
+ACTIVITY_START_NEEDS_A_CUT_PIECE: dict[ActivityType, bool] = {
+    ActivityType.cutting: False,
+    ActivityType.banding: True,
+    ActivityType.additional: True,
+}
+
+# Finishing needs EVERY piece of that set cut. ``additional`` is deliberately
+# free: the bander closes it when their own work is done, and the order still
+# waits for the cut to reach ``finished`` anyway.
+ACTIVITY_FINISH_NEEDS_EVERY_PIECE: dict[ActivityType, bool] = {
+    ActivityType.cutting: True,
+    ActivityType.banding: True,
+    ActivityType.additional: False,
+}
+
+# Order statuses in which an activity can be registered -- just one, now that
+# ``cutting``/``cut`` are a single state. Starting the CUT is the exception: it
+# is what moves the order here from the queue.
+ACTIVITY_MUTABLE_ORDER_STATUSES = {OrderStatus.in_process}
+
+# Statuses shown on the shared workshop board (operator + bander): the queue and
+# the work. Excludes ``confirmed`` (not yet in the shop) and the closed states.
+WORKSHOP_QUEUE_STATUSES = {OrderStatus.queued, OrderStatus.in_process}
 
 # Statuses with no outgoing transition: the order no longer changes.
 # ``dispatched`` (goods handed to the client) is the real end of the cycle;
-# ``completed`` is no longer terminal in the graph (it advances to
+# ``finished`` is no longer terminal in the graph (it advances to
 # ``dispatched``) but still counts as "not active" for duplicate
 # detection/pending-order cap purposes.
 TERMINAL_STATUSES = {
-    OrderStatus.completed,
+    OrderStatus.finished,
     OrderStatus.dispatched,
     OrderStatus.cancelled,
 }
 
-# Map of valid state-machine transitions.
+# Map of valid state-machine transitions. The two moves the shop floor makes
+# (into ``in_process``, into ``finished``) are normally DERIVED from an
+# activity rather than requested here; they stay in the table because the
+# derivation goes through the same choke point, and because an admin can still
+# drive them by hand once the gates pass.
 TRANSITIONS: dict[OrderStatus, set[OrderStatus]] = {
     OrderStatus.confirmed: {OrderStatus.queued, OrderStatus.cancelled},
-    OrderStatus.queued: {OrderStatus.cutting},
-    OrderStatus.cutting: {OrderStatus.cut, OrderStatus.queued},
-    OrderStatus.cut: {OrderStatus.completed},
-    OrderStatus.completed: {OrderStatus.dispatched},
+    OrderStatus.queued: {OrderStatus.in_process},
+    OrderStatus.in_process: {OrderStatus.finished, OrderStatus.queued},
+    OrderStatus.finished: {OrderStatus.dispatched},
     OrderStatus.dispatched: set(),
     OrderStatus.cancelled: set(),
 }
@@ -98,17 +178,16 @@ TRANSITION_ROLES: dict[tuple[OrderStatus, OrderStatus], tuple[UserRole, ...]] = 
         UserRole.SELLER,
     ),
     (OrderStatus.confirmed, OrderStatus.cancelled): (UserRole.ADMIN, UserRole.SELLER),
-    (OrderStatus.queued, OrderStatus.cutting): (
+    # Normally derived from starting the cut (the operator taking the order).
+    (OrderStatus.queued, OrderStatus.in_process): (
         UserRole.ADMIN,
         UserRole.OPERATOR,
     ),
-    (OrderStatus.cutting, OrderStatus.queued): (UserRole.ADMIN,),
-    (OrderStatus.cutting, OrderStatus.cut): (UserRole.ADMIN, UserRole.OPERATOR),
-    # Completing the order can be done by the shop floor too: the operator (own
-    # cutting) or the bander (after finishing the banding). Gate B still blocks
-    # completion while banding is pending/in_progress, so an operator can't close
-    # an order the bander is still working on.
-    (OrderStatus.cut, OrderStatus.completed): (
+    (OrderStatus.in_process, OrderStatus.queued): (UserRole.ADMIN,),
+    # Normally derived from closing the LAST applicable activity, which any of
+    # the shop-floor roles may do; the gate (every activity ``done``) is what
+    # makes the manual path safe.
+    (OrderStatus.in_process, OrderStatus.finished): (
         UserRole.ADMIN,
         UserRole.SELLER,
         UserRole.OPERATOR,
@@ -116,21 +195,11 @@ TRANSITION_ROLES: dict[tuple[OrderStatus, OrderStatus], tuple[UserRole, ...]] = 
     ),
     # Dispatch (physical handover to the client) is a commercial act: only
     # admin/seller register it, never the shop floor (operator/bander).
-    (OrderStatus.completed, OrderStatus.dispatched): (
+    (OrderStatus.finished, OrderStatus.dispatched): (
         UserRole.ADMIN,
         UserRole.SELLER,
     ),
 }
-
-# Valid transitions of the banding track (forward-only; re-applying is idempotent).
-BANDING_TRANSITIONS: dict[BandingStatus, set[BandingStatus]] = {
-    BandingStatus.pending: {BandingStatus.in_progress},
-    BandingStatus.in_progress: {BandingStatus.done},
-    BandingStatus.done: set(),
-}
-
-# Which roles can move the banding track.
-BANDING_TRANSITION_ROLES: tuple[UserRole, ...] = (UserRole.ADMIN, UserRole.BANDER)
 
 
 class OrderModel(TimestampMixin, AuditMixin, Base):
@@ -264,42 +333,6 @@ class OrderModel(TimestampMixin, AuditMixin, Base):
     )
     payment_credit_amount: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
-    # EDGE BANDING track (parallel to cutting): the bander marks start/finish. Set
-    # to ``pending`` on creation if the order has edge banding, else ``not_applicable``.
-    banding_status: Mapped[str] = mapped_column(
-        String(16),
-        default=BandingStatus.not_applicable.value,
-        server_default=BandingStatus.not_applicable.value,
-    )
-    # When the banding track stopped being BLOCKED: the moment the first banded
-    # piece was cut, which is exactly the gate ``transition_banding`` checks before
-    # letting the bander start. It is the honest origin for "pending for how long":
-    # counting from the order's creation would run the clock while the bander could
-    # not have worked, and would light up in red somebody who was not late. Sealed
-    # once, in ``mark_piece_cut``; unmarking the piece does not undo it, for the
-    # same reason ``queued_at`` survives the rollback.
-    banding_ready_at: Mapped[Optional[datetime]] = mapped_column(
-        DateTime, nullable=True
-    )
-    banding_started_at: Mapped[Optional[datetime]] = mapped_column(
-        DateTime, nullable=True
-    )
-    banding_started_by: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
-    )
-    banding_started_by_label: Mapped[Optional[str]] = mapped_column(
-        String(128), nullable=True
-    )
-    banding_finished_at: Mapped[Optional[datetime]] = mapped_column(
-        DateTime, nullable=True
-    )
-    banding_finished_by: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
-    )
-    banding_finished_by_label: Mapped[Optional[str]] = mapped_column(
-        String(128), nullable=True
-    )
-
     client: Mapped["ClientModel"] = relationship("ClientModel")  # noqa: F821
     branch: Mapped["BranchModel"] = relationship("BranchModel")  # noqa: F821
     lines: Mapped[list["OrderLineModel"]] = relationship(
@@ -320,6 +353,15 @@ class OrderModel(TimestampMixin, AuditMixin, Base):
         cascade="all, delete-orphan",
         order_by="OrderBoardModel.id",
     )
+    # The parallel work of ``in_process``: one row per APPLICABLE activity, so a
+    # missing row is the old ``not_applicable``. Ordered by type for a stable
+    # response (the shop-floor card and the order detail both render the list).
+    activities: Mapped[list["OrderActivityModel"]] = relationship(
+        "OrderActivityModel",
+        back_populates="order",
+        cascade="all, delete-orphan",
+        order_by="OrderActivityModel.type",
+    )
     attachments: Mapped[list["OrderAttachmentModel"]] = relationship(
         "OrderAttachmentModel",
         back_populates="order",
@@ -335,6 +377,69 @@ class OrderModel(TimestampMixin, AuditMixin, Base):
         ``additional_services_total`` is a column. Empty for pre-feature orders.
         """
         return (self.optimization_snapshot or {}).get("additional_services") or []
+
+
+class OrderActivityModel(TimestampMixin, AuditMixin, Base):
+    """One unit of shop-floor work on an order in process, with its own clocks.
+
+    There is a row per APPLICABLE activity and only per applicable activity:
+    ``cutting`` always, ``banding`` when the order carries edge banding,
+    ``additional`` when it registers additional services. A missing row is what
+    the old ``BandingStatus.not_applicable`` used to say, which is why nothing
+    here has such a value -- an activity that does not apply cannot be started,
+    cannot be finished and does not hold the order back.
+
+    The three run in PARALLEL: the bander works on the pieces the operator
+    releases instead of waiting for the whole board. Parallel is not
+    independent, though -- see ``ACTIVITY_START_NEEDS_A_CUT_PIECE`` /
+    ``ACTIVITY_FINISH_NEEDS_EVERY_PIECE`` for the floors, which are measured
+    against the activity's own piece set so plain pieces never hold the banding
+    back.
+    """
+
+    __tablename__ = "order_activities"
+    __table_args__ = (
+        # One row per activity per order, and the lookup the service does on
+        # every registration ("this order's <type> row").
+        UniqueConstraint("order_id", "type", name="uq_order_activities_order_type"),
+        # The workshop board and the listing's activity filter read by type +
+        # status across orders; the analytics stage durations group by type.
+        Index("ix_order_activities_type_status", "type", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    order_id: Mapped[int] = mapped_column(ForeignKey("orders.id", ondelete="CASCADE"))
+    type: Mapped[str] = mapped_column(String(16))
+    status: Mapped[str] = mapped_column(
+        String(16),
+        default=ActivityStatus.pending.value,
+        server_default=ActivityStatus.pending.value,
+    )
+
+    # When the activity stopped being BLOCKED, which is the honest origin for
+    # "pending for how long": counting from the order's creation would run the
+    # clock while nobody was allowed to work, and would light up in red somebody
+    # who was not late. ``cutting`` is ready when the order reaches the queue
+    # (it is paid); ``banding``/``additional`` when the first piece of their set
+    # is cut. Sealed ONCE: unmarking that piece does not give the bander back the
+    # time they already waited, for the same reason ``queued_at`` survives the
+    # rollback.
+    ready_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    started_by: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    started_by_label: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    finished_by: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    finished_by_label: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+
+    order: Mapped["OrderModel"] = relationship(
+        "OrderModel", back_populates="activities"
+    )
 
 
 class OrderLineModel(TimestampMixin, AuditMixin, Base):

@@ -92,7 +92,7 @@ what each method queries:
 
 ```python
 def test_queued_requires_payment(mock_session):
-    order = OrderModel(status="confirmed", banding_status="not_applicable")
+    order = OrderModel(status="confirmed")
     svc = OrderService(mock_session)
     svc.get_scoped_or_404 = lambda *a, **k: order   # load by id -> object in hand
     with pytest.raises(ValidationError):

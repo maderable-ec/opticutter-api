@@ -183,19 +183,26 @@ No cycles, enforced by convention:
   (`order_lines → product_id`, nullable for non-catalog materials) rather
   than by raw cut piece. Order creation also materializes the snapshot into
   `order_boards` / `order_placed_pieces` (one row per physical board/piece)
-  for workshop tracking. Two independent status tracks:
-  - **Cutting**: `confirmed → queued → cutting → cut → completed →
-    dispatched` (plus a `confirmed → cancelled` escape and an admin
-    `cutting → queued` rollback). The `confirmed → queued` transition
+  for workshop tracking. One status machine, with the work underneath it:
+  - **Status**: `confirmed → queued → in_process → finished → dispatched`
+    (plus a `confirmed → cancelled` escape and an admin
+    `in_process → queued` rollback). The `confirmed → queued` transition
     requires recording a payment method (cash / bank transfer / credit,
     informational only).
-  - **Banding** (edge banding, `banding_status`): `pending → in_progress →
-    done`, advanced by the `canteador` role while cutting is still in
-    progress — on the pieces the operator releases, not on the whole order:
-    starting requires the FIRST banded piece to be cut and finishing the
-    LAST one. Pieces without banding never hold the track back, which is what
-    keeps the two running in parallel. An order with edge banding can't reach
-    `completed` until banding is `done`.
+  - **Activities** (`order_activities`): `in_process` is an umbrella over up
+    to three PARALLEL activities, one row each with its own status
+    (`pending → in_progress → done`), clocks and actor — `cutting` on every
+    order, `banding` when it carries edge banding, `additional` when it
+    registers additional services. The operator cuts; the `canteador` does
+    the banding and the additional work. A missing row means the activity
+    does not apply.
+  - The order's status is **derived**: starting the cut takes the order out of
+    the queue, and closing the last applicable activity finishes it. Each
+    activity's floors are measured against its own piece set, which is what
+    keeps the tracks parallel — the banding closes once every BANDED piece is
+    cut, with plain pieces still on the saw. The additional work has no finish
+    floor (there is no per-service piece data to check) and the order waits
+    for the cut regardless.
 
   An order renders ONE document from its frozen snapshot: the ORDEN DE PEDIDO,
   its cut diagram and its annexes, merged into a single PDF.

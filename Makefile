@@ -1,5 +1,5 @@
 # Makefile for Cutter API
-.PHONY: help build start dev down tests tests-local benchmark create-test-db lint-fix lint-check install clean logs redis-cli redis-flush rust rust-parity db-reset db-backup db-restore
+.PHONY: help build start dev down tests tests-local benchmark create-test-db lint-fix lint-check install clean logs redis-cli redis-flush rust rust-parity db-reset db-backup db-restore db-restore-dump
 
 # Tests ALWAYS run against a dedicated database (cutter_test_db), never
 # against the development database (cutter_db): the conftest TRUNCATEs per test.
@@ -99,8 +99,6 @@ seed-admin: ## Creates the first administrator from ADMIN_EMAIL in .env; prompts
 seed-settings: ## Seeds branches and company/cutting settings into local PostgreSQL (5433)
 	DATABASE_URL=postgresql://cutter:cutter@localhost:5433/cutter_db .venv/bin/python scripts/seed_settings.py
 
-seed-demo: ## Seeds demo data (branches/users/clients/pre-orders/orders by status) into local PostgreSQL (5433). Use reset=1 to regenerate.
-	DATABASE_URL=postgresql://cutter:cutter@localhost:5433/cutter_db REDIS_URL=redis://localhost:6379/0 .venv/bin/python scripts/seed_demo.py $(if $(reset),--reset)
 
 # LOCAL DEVELOPMENT ONLY, like every other target here: it runs `docker compose`
 # against THIS repo's docker-compose.yml. On the VPS the equivalent lives in
@@ -119,6 +117,15 @@ db-backup: ## Writes a JSON backup of users/branches/settings/services without d
 db-restore: ## Restores users from a backup written by db-reset (file=backups/reset-....json)
 	@test -n "$(file)" || (echo "Uso: make db-restore file=backups/reset-....json" && exit 1)
 	docker compose run --rm api python scripts/reset_data.py --restore $(file)
+
+# Not to be confused with db-restore above, which reads back the JSON of staff
+# accounts that db-reset preserves. This one replaces the WHOLE local database
+# with a pg_dump file, which is how you bring production's data down to develop
+# against it. See the script's header for why it drops the database instead of
+# restoring over it like opticutter-infra's restore.sh does.
+db-restore-dump: ## Replaces the local DB with a pg_dump file (file=db_....dump [uploads=uploads_....tar.gz])
+	@test -n "$(file)" || (echo "Uso: make db-restore-dump file=db_....dump [uploads=uploads_....tar.gz]" && exit 1)
+	./scripts/restore_dump.sh $(file) $(if $(uploads),--uploads $(uploads)) $(if $(yes),--yes)
 
 setup: ## Initial project setup
 	cp .env.example .env || true

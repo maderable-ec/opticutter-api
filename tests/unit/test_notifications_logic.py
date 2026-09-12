@@ -15,8 +15,10 @@ from src.shared.exceptions import EntityNotFoundError
 
 
 # --- resolve_plan: which transitions notify, and whom ----------------------------
-def test_completed_notifies_global_admins_sellers():
-    plan = resolve_plan(OrderStatus.cut, OrderStatus.completed)
+def test_finished_notifies_global_admins_sellers():
+    """Normally derived from the last activity closing, so this is what tells
+    the office the work is done without anybody pressing a button."""
+    plan = resolve_plan(OrderStatus.in_process, OrderStatus.finished)
     assert plan is not None
     assert plan.type is NotificationType.order_completed
     assert plan.audience is _Audience.GLOBAL_ADMINS_SELLERS
@@ -29,17 +31,16 @@ def test_confirmed_to_queued_notifies_branch_operators():
     assert plan.audience is _Audience.BRANCH_OPERATORS
 
 
-def test_cutting_to_queued_rollback_notifies_nobody():
-    # Admin rollback ``cutting -> queued`` is not a real enqueue: no notification.
-    assert resolve_plan(OrderStatus.cutting, OrderStatus.queued) is None
+def test_rollback_to_queued_notifies_nobody():
+    # Admin rollback ``in_process -> queued`` is not a real enqueue.
+    assert resolve_plan(OrderStatus.in_process, OrderStatus.queued) is None
 
 
 @pytest.mark.parametrize(
     "from_status,to_status",
     [
-        (OrderStatus.queued, OrderStatus.cutting),
-        (OrderStatus.cutting, OrderStatus.cut),
-        (OrderStatus.completed, OrderStatus.dispatched),
+        (OrderStatus.queued, OrderStatus.in_process),
+        (OrderStatus.finished, OrderStatus.dispatched),
         (OrderStatus.confirmed, OrderStatus.cancelled),
     ],
 )

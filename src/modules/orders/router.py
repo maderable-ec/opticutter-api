@@ -12,11 +12,11 @@ from src.modules.orders.attachment_service import (
     AttachmentService,
     attachment_service,
 )
-from src.modules.orders.model import BandingStatus, OrderStatus
+from src.modules.orders.model import ActivityStatus, ActivityType, OrderStatus
 from src.modules.orders.schemas import (
+    ActivityResult,
+    ActivityUpdate,
     AttachmentResponse,
-    BandingStatusResponse,
-    BandingUpdate,
     CuttingPlanResponse,
     OrderBranchUpdate,
     OrderExportResponse,
@@ -49,6 +49,7 @@ router = APIRouter(prefix="/orders", tags=["orders"], responses=ERROR_RESPONSES)
 # when a client confirms a pre-order's review. State transition: admin + seller +
 # operator (TRANSITION_ROLES filters by specific transition in the service).
 # Cutting plan: admin + seller + operator. Marking pieces: admin + operator.
+# Activities: the whole shop floor (ACTIVITY_ROLES filters by activity).
 _READ = Depends(require_permission("orders:read"))
 _WRITE = Depends(require_permission("orders:write"))
 _CUTTING = Depends(require_permission("cutting_plan"))
@@ -105,11 +106,17 @@ def list_orders(
         "omit for both. Filters, never reorders: floating them to the top is the "
         "shop-floor board's rule",
     ),
-    banding_status: Optional[BandingStatus] = Query(
+    activity: Optional[ActivityType] = Query(
         default=None,
-        alias="bandingStatus",
-        description="Narrows to one stage of the parallel edge-banding track "
-        "(e.g. everything still to band)",
+        alias="activity",
+        description="Narrows to the orders that carry this parallel activity "
+        "(cutting | banding | additional)",
+    ),
+    activity_status: Optional[ActivityStatus] = Query(
+        default=None,
+        alias="activityStatus",
+        description="Narrows to one stage of that activity (e.g. everything "
+        "still to band). Works with or without ``activity``",
     ),
     paging: PageParams = Depends(),
     svc: OrderService = Depends(order_service),
@@ -132,7 +139,8 @@ def list_orders(
         created_to=created_to,
         sort=sort,
         is_priority=is_priority,
-        banding_status=banding_status,
+        activity=activity,
+        activity_status=activity_status,
     )
     return page(items, total, paging.limit, paging.offset)
 
@@ -191,26 +199,35 @@ def update_order_status(
 
 
 @router.patch(
-    "/{order_id}/banding",
-    response_model=DataResponse[BandingStatusResponse],
+    "/{order_id}/activities/{activity_type}",
+    response_model=DataResponse[ActivityResult],
 )
-def update_order_banding(
+def update_order_activity(
     order_id: int,
-    data: BandingUpdate,
+    activity_type: ActivityType,
+    data: ActivityUpdate,
     svc: OrderService = Depends(order_service),
-    current_user: UserModel = Depends(require_permission("orders:band")),
+    current_user: UserModel = Depends(require_permission("orders:activities")),
     branch_scope: Optional[int] = Depends(get_branch_scope),
 ):
-    """Registers the start/finish of banding (track parallel to cutting).
+    """Registers the start/finish of one activity: the shop floor's endpoint.
 
-    The bander advances ``in_progress`` (start) → ``done`` (finish) without
-    touching the cutting status; runs while the order is in ``cutting``/``cut``.
+    ``in_progress`` (start) → ``done`` (finish), forward-only and idempotent.
+    The permission opens the endpoint for the whole shop floor;
+    ``ACTIVITY_ROLES`` decides who may move THIS activity (the operator cuts,
+    the bander bands and does the additional work).
+
+    The order's own status is derived from here: starting the cut takes the
+    order out of the queue, and closing the last applicable activity finishes
+    it. The response carries ``orderStatus`` so the caller sees that.
     """
     return ok(
-        svc.transition_banding(
+        svc.transition_activity(
             order_id,
+            activity_type,
             data.status,
             actor=staff_actor(current_user),
+            note=data.note,
             branch_scope=branch_scope,
         )
     )

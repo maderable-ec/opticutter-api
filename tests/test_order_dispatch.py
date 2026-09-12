@@ -1,6 +1,6 @@
 """Tests for the 'despachado' (delivered to client) status and its paperwork.
 
-Dispatch is the real close of the cycle: ``completed → despachado`` (terminal). It is
+Dispatch is the real close of the cycle: ``finished → dispatched`` (terminal). It is
 a commercial act restricted to admin/seller by ``TRANSITION_ROLES`` — the shop floor
 (operador/canteador) cannot register it. There is no dispatch sheet any more: the
 delivery line, the liability disclaimer and the signature lines are part of the
@@ -14,11 +14,7 @@ from pypdf import PdfReader
 
 from src.modules.orders.schemas import OrderCreate
 from src.modules.orders.service import OrderService
-from src.modules.users.schemas import UserCreate
-from src.modules.users.service import UserService
-
-_PWD = "pw-supersecret"
-_BRANCH = 1  # default branch seeded by conftest
+from tests.order_helpers import _BRANCH, _patch_status, _to_finished, _token_for
 
 
 def _create_client(client, identifier="0100000397"):
@@ -75,66 +71,23 @@ def _mint_order(client, db_session, identifier="0100000397", code="MEL18", width
     return client.get(f"/api/v1/orders/{order.id}").json()["data"]
 
 
-def _patch_status(client, oid, status, **kw):
-    body = {"status": status}
-    if status == "queued":
-        # Moving to the queue requires recording the (informational) payment method.
-        body["payment"] = {"cashAmount": 100.0}
-    return client.patch(f"/api/v1/orders/{oid}/status", json=body, **kw)
-
-
-def _to_completed(client, oid):
-    """Drives the order (no edge banding) up to 'completed' as admin."""
-    assert _patch_status(client, oid, "queued").status_code == 200
-    assert _patch_status(client, oid, "cutting").status_code == 200
-    plan = client.get(f"/api/v1/orders/{oid}/cutting-plan").json()["data"]
-    for board in plan["boards"]:
-        for piece in board["pieces"]:
-            client.patch(
-                f"/api/v1/orders/{oid}/cutting-plan/pieces/{piece['id']}",
-                json={"cut": True},
-            )
-    assert _patch_status(client, oid, "cut").status_code == 200
-    assert _patch_status(client, oid, "completed").status_code == 200
-
-
-def _token_for(client, db_session, role, branch_id=_BRANCH, email=None):
-    """Seeds a user with the given role and returns a Bearer header (real login)."""
-    email = email or f"{role}@empresa.com"
-    svc = UserService(db_session)
-    if svc.get_by_email(email) is None:
-        svc.create(
-            UserCreate(
-                email=email,
-                password=_PWD,
-                role=role,
-                full_name=role.title(),
-                branch_id=None if role == "administrador" else branch_id,
-            )
-        )
-    token = client.post(
-        "/api/v1/auth/login", json={"email": email, "password": _PWD}
-    ).json()["data"]["accessToken"]
-    return {"Authorization": f"Bearer {token}"}
-
-
 # --------------------------------------------------------------------------- #
 # Transition to 'despachado'
 # --------------------------------------------------------------------------- #
 def test_dispatch_from_completed_freezes_metadata(client, db_session):
     order = _mint_order(client, db_session)
-    _to_completed(client, order["id"])
+    _to_finished(client, order["id"])
 
-    resp = _patch_status(client, order["id"], "despachado")
+    resp = _patch_status(client, order["id"], "dispatched")
     assert resp.status_code == 200
     data = resp.json()["data"]
-    assert data["status"] == "despachado"
+    assert data["status"] == "dispatched"
     # Dispatch freezes date and the responsible user (shown on the dispatch sheet).
     assert data["dispatchedAt"] is not None
     assert data["dispatchedByLabel"] == "Conftest Admin"
-    # History: the last entry records completed → despachado.
-    assert data["history"][-1]["fromStatus"] == "completed"
-    assert data["history"][-1]["toStatus"] == "despachado"
+    # History: the last entry records finished → dispatched.
+    assert data["history"][-1]["fromStatus"] == "finished"
+    assert data["history"][-1]["toStatus"] == "dispatched"
 
 
 def test_shop_floor_cannot_dispatch(client, db_session):
@@ -149,14 +102,14 @@ def test_shop_floor_cannot_dispatch(client, db_session):
             code=f"MELR{idx}",
             width=600 - idx * 50,
         )
-        _to_completed(client, order["id"])
+        _to_finished(client, order["id"])
         headers = _token_for(client, db_session, role)
-        resp = _patch_status(client, order["id"], "despachado", headers=headers)
+        resp = _patch_status(client, order["id"], "dispatched", headers=headers)
         assert resp.status_code == 403, role
-        # The order stays completed: the rejected transition doesn't advance it.
+        # The order stays finished: the rejected transition doesn't advance it.
         assert (
             client.get(f"/api/v1/orders/{order['id']}").json()["data"]["status"]
-            == "completed"
+            == "finished"
         )
 
 
@@ -165,17 +118,17 @@ def test_seller_can_dispatch(client, db_session):
     order = _mint_order(
         client, db_session, identifier="0100000363", code="MELS0", width=550
     )
-    _to_completed(client, order["id"])
+    _to_finished(client, order["id"])
     headers = _token_for(client, db_session, "vendedor")
-    resp = _patch_status(client, order["id"], "despachado", headers=headers)
+    resp = _patch_status(client, order["id"], "dispatched", headers=headers)
     assert resp.status_code == 200
-    assert resp.json()["data"]["status"] == "despachado"
+    assert resp.json()["data"]["status"] == "dispatched"
 
 
 def test_dispatched_is_terminal(client, db_session):
     order = _mint_order(client, db_session)
-    _to_completed(client, order["id"])
-    assert _patch_status(client, order["id"], "despachado").status_code == 200
+    _to_finished(client, order["id"])
+    assert _patch_status(client, order["id"], "dispatched").status_code == 200
 
     # No outgoing transitions: anything after this is invalid.
     bad = _patch_status(client, order["id"], "cancelled")
@@ -183,10 +136,10 @@ def test_dispatched_is_terminal(client, db_session):
     assert "inválida" in bad.json()["errors"][0]["message"]
 
 
-def test_cannot_dispatch_before_completed(client, db_session):
-    """Only completed orders can be dispatched: from 'confirmed' the transition is invalid."""
+def test_cannot_dispatch_before_finished(client, db_session):
+    """Only finished orders can be dispatched: from 'confirmed' the transition is invalid."""
     order = _mint_order(client, db_session)
-    bad = _patch_status(client, order["id"], "despachado")
+    bad = _patch_status(client, order["id"], "dispatched")
     assert bad.status_code == 422
     assert "inválida" in bad.json()["errors"][0]["message"]
 
@@ -208,8 +161,8 @@ def test_the_document_prints_the_frozen_dispatch_data(client, db_session):
     assert "Fecha de despacho" in before
     assert "____" in before
 
-    _to_completed(client, oid)
-    _patch_status(client, oid, "despachado")
+    _to_finished(client, oid)
+    _patch_status(client, oid, "dispatched")
 
     after = _document_text(client, oid)
     assert datetime.utcnow().strftime("%d/%m/%Y") in after

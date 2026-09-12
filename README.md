@@ -21,8 +21,9 @@ dispatch.
   an order.
 - **Quote → order lifecycle** — mutable pre-orders (quotes) become immutable
   order snapshots with frozen prices; orders carry a production status machine
-  (`confirmed → queued → cutting → cut → completed → dispatched`) plus an
-  independent edge-banding track for the `canteador` role.
+  (`confirmed → queued → in_process → finished → dispatched`) whose middle state
+  is an umbrella over three parallel activities — cut, banding and additional
+  work — each with its own clocks and actor.
 - **Commercial & production documents** — PDF order documents,
   production sheets and dispatch sheets, all rendered from the same snapshot
   and including a cutting diagram.

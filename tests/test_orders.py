@@ -178,14 +178,18 @@ def test_status_transitions_valid_and_invalid(client, db_session):
     assert ok.status_code == 200
     assert ok.json()["data"]["status"] == "queued"
 
-    ok2 = client.patch(f"/api/v1/orders/{oid}/status", json={"status": "cutting"})
+    # The shop floor's move: starting the cut is what takes the order out of the queue.
+    ok2 = client.patch(
+        f"/api/v1/orders/{oid}/activities/cutting", json={"status": "in_progress"}
+    )
     assert ok2.status_code == 200
-    assert ok2.json()["data"]["status"] == "cutting"
+    assert ok2.json()["data"]["orderStatus"] == "in_process"
     # Accumulated history: creation + 2 transitions.
-    assert len(ok2.json()["data"]["history"]) == 3
+    detail = client.get(f"/api/v1/orders/{oid}").json()["data"]
+    assert len(detail["history"]) == 3
 
-    # cutting → completed is not a valid transition.
-    bad = client.patch(f"/api/v1/orders/{oid}/status", json={"status": "completed"})
+    # in_process → dispatched skips a state: not a valid transition.
+    bad = client.patch(f"/api/v1/orders/{oid}/status", json={"status": "dispatched"})
     assert bad.status_code == 422
     assert "inválida" in bad.json()["errors"][0]["message"]
 
@@ -194,9 +198,9 @@ def test_invalid_transition_from_confirmed(client, db_session):
     c = _create_client(client)
     b = _create_board(client)
     order = _create_order(client, db_session, _order_payload(c["id"], b["id"]))
-    # confirmed → completed (skips states) is not valid.
+    # confirmed → finished (skips states) is not valid.
     bad = client.patch(
-        f"/api/v1/orders/{order['id']}/status", json={"status": "completed"}
+        f"/api/v1/orders/{order['id']}/status", json={"status": "finished"}
     )
     assert bad.status_code == 422
 
@@ -351,15 +355,17 @@ def test_list_orders_filter_by_multiple_statuses(client, db_session):
     o2 = _create_order(client, db_session, _order_payload(c["id"], b["id"], width=500))
     o3 = _create_order(client, db_session, _order_payload(c["id"], b["id"], width=400))
 
-    # o1: confirmed → queued → cutting; o2: stays confirmed; o3: queued.
+    # o1: confirmed → queued → in_process; o2: stays confirmed; o3: queued.
     _pay = {"payment": {"cashAmount": 100.0}}
     client.patch(f"/api/v1/orders/{o1['id']}/status", json={"status": "queued", **_pay})
-    client.patch(f"/api/v1/orders/{o1['id']}/status", json={"status": "cutting"})
+    client.patch(
+        f"/api/v1/orders/{o1['id']}/activities/cutting", json={"status": "in_progress"}
+    )
     client.patch(f"/api/v1/orders/{o3['id']}/status", json={"status": "queued", **_pay})
 
     # Repeating the parameter filters by several statuses at once.
     resp = client.get(
-        "/api/v1/orders/", params={"status": ["confirmed", "cutting"]}
+        "/api/v1/orders/", params={"status": ["confirmed", "in_process"]}
     ).json()
     ids = {o["id"] for o in resp["data"]}
     assert ids == {o1["id"], o2["id"]}
@@ -1060,8 +1066,8 @@ def test_listing_exposes_the_status_clock(client, db_session):
     row = client.get("/api/v1/orders/").json()["data"][0]
     born = row["statusChangedAt"]
     assert born is not None
-    # No banding on this order, so the parallel track's clock never starts.
-    assert row["bandingReadyAt"] is None
+    # No banding on this order, so it carries the cut activity and nothing else.
+    assert [a["type"] for a in row["activities"]] == ["cutting"]
 
     client.patch(
         f"/api/v1/orders/{order['id']}/status", json={"status": "queued", **_pay()}
@@ -1113,20 +1119,21 @@ def test_list_orders_sort_stalest_puts_closed_orders_last(client, db_session):
     assert [o["id"] for o in resp["data"]] == [o2["id"], o1["id"], o3["id"]]
 
 
-def test_list_orders_filter_by_banding_status(client, db_session):
-    """An order with no canto is `not_applicable`, never `pending`."""
+def test_list_orders_filter_by_activity(client, db_session):
+    """An order with no canto has no banding row at all, so it matches neither filter."""
     c = _create_client(client)
     b = _create_board(client)
     order = _create_order(client, db_session, _order_payload(c["id"], b["id"]))
 
-    na = client.get(
-        "/api/v1/orders/", params={"bandingStatus": "not_applicable"}
+    cutting = client.get(
+        "/api/v1/orders/", params={"activity": "cutting", "activityStatus": "pending"}
     ).json()
-    assert [o["id"] for o in na["data"]] == [order["id"]]
+    assert [o["id"] for o in cutting["data"]] == [order["id"]]
 
-    pending = client.get("/api/v1/orders/", params={"bandingStatus": "pending"}).json()
-    assert pending["data"] == []
-    assert pending["meta"]["pagination"]["total"] == 0
+    # The type alone: "orders that carry this activity at all".
+    banding = client.get("/api/v1/orders/", params={"activity": "banding"}).json()
+    assert banding["data"] == []
+    assert banding["meta"]["pagination"]["total"] == 0
 
 
 def test_timestamps_are_serialized_as_utc(client, db_session):

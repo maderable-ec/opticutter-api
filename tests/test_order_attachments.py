@@ -1,7 +1,7 @@
 """Integration tests for order attachments (anexos).
 
 PDFs/screenshots attached to an order while it is still open (not
-completed/dispatched/cancelled). Upload/delete = admin+seller (orders:write);
+finished/dispatched/cancelled). Upload/delete = admin+seller (orders:write);
 list/download = anyone who reads the order (orders:read). Bytes live on local
 disk under ``config.ATTACHMENTS_DIR`` (pointed at a tmp dir here); only metadata
 lives in Postgres.
@@ -17,6 +17,7 @@ from src.modules.orders.service import OrderService
 from src.modules.users.schemas import UserCreate
 from src.modules.users.service import UserService
 from src.shared.config import config
+from tests.order_helpers import _to_finished
 
 _PWD = "pw-supersecret"
 _BRANCH = 1  # default branch seeded by conftest
@@ -100,24 +101,6 @@ def _token_for(client, db_session, role, email=None):
         "/api/v1/auth/login", json={"email": email, "password": _PWD}
     ).json()["data"]["accessToken"]
     return {"Authorization": f"Bearer {token}"}
-
-
-def _to_completed(client, oid):
-    """Drives the order (no edge banding) up to 'completed' as admin."""
-    client.patch(
-        f"/api/v1/orders/{oid}/status",
-        json={"status": "queued", "payment": {"cashAmount": 100.0}},
-    )
-    client.patch(f"/api/v1/orders/{oid}/status", json={"status": "cutting"})
-    plan = client.get(f"/api/v1/orders/{oid}/cutting-plan").json()["data"]
-    for board in plan["boards"]:
-        for piece in board["pieces"]:
-            client.patch(
-                f"/api/v1/orders/{oid}/cutting-plan/pieces/{piece['id']}",
-                json={"cut": True},
-            )
-    client.patch(f"/api/v1/orders/{oid}/status", json={"status": "cut"})
-    client.patch(f"/api/v1/orders/{oid}/status", json={"status": "completed"})
 
 
 # --- file helpers ---------------------------------------------------------------
@@ -221,20 +204,20 @@ def test_reject_empty_file(client, db_session):
 # --------------------------------------------------------------------------- #
 # Terminal-state gate: no attach/delete once the order is closed
 # --------------------------------------------------------------------------- #
-def test_cannot_attach_when_completed(client, db_session):
+def test_cannot_attach_when_finished(client, db_session):
     order = _mint_order(client, db_session, identifier="0100000082", code="MELX")
-    _to_completed(client, order["id"])
+    _to_finished(client, order["id"])
     resp = _upload(client, order["id"], "tarde.pdf", _PDF_BYTES, "application/pdf")
     assert resp.status_code == 422
 
 
-def test_cannot_delete_when_completed(client, db_session):
+def test_cannot_delete_when_finished(client, db_session):
     order = _mint_order(client, db_session, identifier="0100000090", code="MELY")
     oid = order["id"]
     att_id = _upload(client, oid, "a.pdf", _PDF_BYTES, "application/pdf").json()[
         "data"
     ]["id"]
-    _to_completed(client, oid)
+    _to_finished(client, oid)
     resp = client.delete(f"/api/v1/orders/{oid}/attachments/{att_id}")
     assert resp.status_code == 422
     # It's still listed (the delete was rejected).

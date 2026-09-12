@@ -8,59 +8,79 @@ defined in the orders module instead of repeating strings.
 from enum import Enum
 from typing import Iterable
 
-from src.modules.orders.model import OrderStatus
+from src.modules.orders.model import LIVE_STATUSES, ActivityType, OrderStatus
 
-# Realized revenue: the order reached its productive end (completed or already dispatched).
-REALIZED_STATUSES = {OrderStatus.completed, OrderStatus.dispatched}
+# Realized revenue: the order reached its productive end (finished or already dispatched).
+REALIZED_STATUSES = {OrderStatus.finished, OrderStatus.dispatched}
 
 # Lost revenue: will never be charged.
 LOST_STATUSES = {OrderStatus.cancelled}
 
-# Booked pipeline: committed but not yet completed.
+# Booked pipeline: committed but not yet finished.
 BOOKED_STATUSES = {
     OrderStatus.confirmed,
     OrderStatus.queued,
-    OrderStatus.cutting,
-    OrderStatus.cut,
+    OrderStatus.in_process,
 }
 
 # Pending (open, pre-production): committed but not yet in the workshop.
 PENDING_STATUSES = {OrderStatus.confirmed}
 
 # Readable label per status for breakdowns (funnel axis). User-facing copy.
+# The two legacy statuses are here because the ORDER HISTORY of anything cut
+# before the activities still says them; they never appear in the breakdown.
 STATUS_LABELS = {
     OrderStatus.confirmed: "Confirmada",
     OrderStatus.queued: "En cola",
-    OrderStatus.cutting: "En corte",
-    OrderStatus.cut: "Cortada",
-    OrderStatus.completed: "Completada",
+    OrderStatus.in_process: "En proceso",
+    OrderStatus.finished: "Terminada",
     OrderStatus.dispatched: "Despachada",
     OrderStatus.cancelled: "Cancelada",
+    OrderStatus.cutting: "En corte",
+    OrderStatus.cut: "Cortada",
 }
 
+# The funnel axis: the statuses an order can actually be in today. Densifying
+# over the whole enum instead would add two legacy rows that are always zero.
+STATUS_BREAKDOWN_ORDER = LIVE_STATUSES
+
 # --- Process stages (bottlenecks) ----------------------------------------------
-# Five stages are derived from consecutive pairs in the status history; the sixth
-# (``banding``) comes from the banding columns (parallel track, outside the history).
+# Four stages come from consecutive pairs in the status history; the three work
+# stages come from ``order_activities`` (started_at → finished_at), which is
+# what makes them measurable at all -- as columns, only the banding ever was.
 # User-facing labels below.
 STAGE_LABELS = {
     "confirm": "Confirmación → Cola",
     "queue_wait": "Espera en cola (taller)",
+    "process": "En proceso",
     "cutting": "Corte",
-    "finishing": "Cortada → Completada",
-    "dispatch_wait": "Espera de despacho",
     "banding": "Canteado",
+    "additional": "Adicionales",
+    "dispatch_wait": "Espera de despacho",
 }
 
 # Display order (process flow); the report then sorts by duration.
 STAGE_ORDER = list(STAGE_LABELS.keys())
 
-# (from_status, to_status) pair from the history → named stage.
+# Which stage each activity's own duration feeds.
+ACTIVITY_STAGE = {
+    ActivityType.cutting: "cutting",
+    ActivityType.banding: "banding",
+    ActivityType.additional: "additional",
+}
+
+# (from_status, to_status) pair from the history → named stage. The legacy pairs
+# are kept so the report still measures the orders cut before the activities
+# existed: back then the cut WAS a pair of statuses.
 STATUS_PAIR_TO_STAGE = {
     (OrderStatus.confirmed.value, OrderStatus.queued.value): "confirm",
+    (OrderStatus.queued.value, OrderStatus.in_process.value): "queue_wait",
+    (OrderStatus.in_process.value, OrderStatus.finished.value): "process",
+    (OrderStatus.finished.value, OrderStatus.dispatched.value): "dispatch_wait",
+    # Legacy history (pre-activities).
     (OrderStatus.queued.value, OrderStatus.cutting.value): "queue_wait",
     (OrderStatus.cutting.value, OrderStatus.cut.value): "cutting",
-    (OrderStatus.cut.value, OrderStatus.completed.value): "finishing",
-    (OrderStatus.completed.value, OrderStatus.dispatched.value): "dispatch_wait",
+    (OrderStatus.cut.value, OrderStatus.finished.value): "process",
 }
 
 

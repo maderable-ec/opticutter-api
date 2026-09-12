@@ -1,9 +1,9 @@
 """Integration tests for the notifications module.
 
-Order status transitions fan out notifications: ``-> completed`` notifies the
+Order status transitions fan out notifications: ``-> finished`` notifies the
 global admins/sellers; the real enqueue ``confirmed -> queued`` notifies the
 operators of the order's branch. The acting user is excluded, the admin rollback
-``cutting -> queued`` notifies nobody, and every recipient reads/acks only their
+``in_process -> queued`` notifies nobody, and every recipient reads/acks only their
 own notifications (scoped by ``current_user.id``).
 """
 
@@ -13,6 +13,7 @@ from src.modules.orders.service import OrderService
 from src.modules.users.schemas import UserCreate
 from src.modules.users.service import UserService
 from src.shared.security import create_access_token
+from tests.order_helpers import _patch_activity, _to_finished
 
 _PWD = "pw-supersecret"
 _BRANCH = 1  # default branch seeded by conftest
@@ -106,21 +107,6 @@ def _patch_status(client, oid, status, **kw):
     return client.patch(f"/api/v1/orders/{oid}/status", json=body, **kw)
 
 
-def _to_completed(client, oid):
-    """Drives the order (no edge banding) up to 'completed' as the admin client."""
-    assert _patch_status(client, oid, "queued").status_code == 200
-    assert _patch_status(client, oid, "cutting").status_code == 200
-    plan = client.get(f"/api/v1/orders/{oid}/cutting-plan").json()["data"]
-    for board in plan["boards"]:
-        for piece in board["pieces"]:
-            client.patch(
-                f"/api/v1/orders/{oid}/cutting-plan/pieces/{piece['id']}",
-                json={"cut": True},
-            )
-    assert _patch_status(client, oid, "cut").status_code == 200
-    assert _patch_status(client, oid, "completed").status_code == 200
-
-
 def _unread_count(client, headers):
     return client.get("/api/v1/notifications/unread-count", headers=headers).json()[
         "data"
@@ -162,13 +148,13 @@ def test_queued_notifies_only_the_order_branch_operators(client, db_session):
 # --------------------------------------------------------------------------- #
 # -> completed: admins/sellers, excluding the actor
 # --------------------------------------------------------------------------- #
-def test_completed_notifies_admins_sellers_excluding_actor(client, db_session):
+def test_finished_notifies_admins_sellers_excluding_actor(client, db_session):
     order = _mint_order(client, db_session)
     seller = _seed_user(db_session, "vendedor", "sell@empresa.com")
     other_admin = _seed_user(db_session, "administrador", "admin2@empresa.com")
     operator = _seed_user(db_session, "operador", "op1@empresa.com", branch_id=_BRANCH)
 
-    _to_completed(client, order["id"])  # actor = Conftest Admin (the client fixture)
+    _to_finished(client, order["id"])  # actor = Conftest Admin (the client fixture)
 
     # The seller and a second admin receive the completed notification.
     for recipient in (seller, other_admin):
@@ -185,14 +171,17 @@ def test_completed_notifies_admins_sellers_excluding_actor(client, db_session):
 
 
 # --------------------------------------------------------------------------- #
-# cutting -> queued rollback: nobody is notified
+# in_process -> queued rollback: nobody is notified
 # --------------------------------------------------------------------------- #
-def test_cutting_to_queued_rollback_does_not_notify(client, db_session):
+def test_rollback_to_queued_does_not_notify(client, db_session):
     order = _mint_order(client, db_session)
     op1 = _seed_user(db_session, "operador", "op1@empresa.com", branch_id=_BRANCH)
 
     assert _patch_status(client, order["id"], "queued").status_code == 200  # notifies
-    assert _patch_status(client, order["id"], "cutting").status_code == 200
+    assert (
+        _patch_activity(client, order["id"], "cutting", "in_progress").status_code
+        == 200
+    )
     assert _patch_status(client, order["id"], "queued").status_code == 200  # rollback
 
     # Still only the single notification from the real enqueue.

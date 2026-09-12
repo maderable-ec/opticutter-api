@@ -66,14 +66,20 @@ def _create_order(client, db_session, quantity=3, width=700):
 
 
 def _to_cutting(client, order_id):
-    """Advances a freshly created order (confirmed) up to cutting."""
-    for status in ("queued", "cutting"):
-        body = {"status": status}
-        if status == "queued":
-            # Moving to the queue requires recording the (informational) payment method.
-            body["payment"] = {"cashAmount": 100.0}
-        resp = client.patch(f"/api/v1/orders/{order_id}/status", json=body)
-        assert resp.status_code == 200
+    """Pays a freshly created order and has the shop start the cut.
+
+    Starting the cut is what takes the order out of the queue: the order's status is
+    derived from the activity, so there is no separate transition call.
+    """
+    paid = client.patch(
+        f"/api/v1/orders/{order_id}/status",
+        json={"status": "queued", "payment": {"cashAmount": 100.0}},
+    )
+    assert paid.status_code == 200
+    resp = client.patch(
+        f"/api/v1/orders/{order_id}/activities/cutting", json={"status": "in_progress"}
+    )
+    assert resp.status_code == 200
     return resp.json()["data"]
 
 
@@ -156,7 +162,7 @@ def test_cutting_plan_unknown_order_returns_404(client):
 
 
 def test_mark_piece_requires_cutting_state(client, db_session):
-    """Pieces can only be marked while in 'cutting' state: before that it returns 422."""
+    """Pieces can only be marked while the CUT is in progress: before that it returns 422."""
     order = _create_order(client, db_session)
     piece_id = _get_plan(client, order["id"])["boards"][0]["pieces"][0]["id"]
 
@@ -198,6 +204,7 @@ def test_mark_piece_of_another_order_returns_404(client, db_session):
     first = _mint(client, db_session, _order_payload(c["id"], b["id"], width=600))
     second = _mint(client, db_session, _order_payload(c["id"], b["id"], width=500))
     _to_cutting(client, first["id"])
+    # The other order stays in the queue: its plan is readable, its pieces are not markable.
     foreign_piece = _get_plan(client, second["id"])["boards"][0]["pieces"][0]["id"]
 
     resp = client.patch(
@@ -207,8 +214,8 @@ def test_mark_piece_of_another_order_returns_404(client, db_session):
     assert resp.status_code == 404
 
 
-def test_transition_to_cut_blocked_until_all_pieces_marked(client, db_session):
-    """Cutting gate: cutting → cut requires the full cutting plan to be marked."""
+def test_closing_the_cut_blocked_until_all_pieces_marked(client, db_session):
+    """Cutting gate: closing the cut activity requires the full plan to be marked."""
     order = _create_order(client, db_session, quantity=3)
     _to_cutting(client, order["id"])
     pieces = _get_plan(client, order["id"])["boards"][0]["pieces"]
@@ -219,7 +226,7 @@ def test_transition_to_cut_blocked_until_all_pieces_marked(client, db_session):
         json={"cut": True},
     )
     blocked = client.patch(
-        f"/api/v1/orders/{order['id']}/status", json={"status": "cut"}
+        f"/api/v1/orders/{order['id']}/activities/cutting", json={"status": "done"}
     )
     assert blocked.status_code == 422
     assert "Faltan 2 pieza(s) por cortar" in blocked.json()["errors"][0]["message"]
@@ -230,9 +237,12 @@ def test_transition_to_cut_blocked_until_all_pieces_marked(client, db_session):
             f"/api/v1/orders/{order['id']}/cutting-plan/pieces/{piece['id']}",
             json={"cut": True},
         )
-    done = client.patch(f"/api/v1/orders/{order['id']}/status", json={"status": "cut"})
+    done = client.patch(
+        f"/api/v1/orders/{order['id']}/activities/cutting", json={"status": "done"}
+    )
     assert done.status_code == 200
-    assert done.json()["data"]["status"] == "cut"
+    # It was the only activity, so the order finished itself.
+    assert done.json()["data"]["orderStatus"] == "finished"
 
 
 def test_lazy_materialization_for_legacy_orders(client, db_session):

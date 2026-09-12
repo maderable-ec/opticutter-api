@@ -8,6 +8,8 @@ from datetime import datetime
 
 from src.modules.clients.model import ClientModel
 from src.modules.orders.model import (
+    ActivityType,
+    OrderActivityModel,
     OrderBoardModel,
     OrderLineModel,
     OrderModel,
@@ -44,11 +46,36 @@ def _edge_line(linear_m, *, price=1.5):
     )
 
 
+def _seed_activity(
+    order_id,
+    activity_type,
+    *,
+    status="done",
+    started_at=None,
+    finished_at=None,
+    finished_by=None,
+):
+    """One activity row: where the work's own duration and actor live now.
+
+    Before the activities only the banding had columns, so the cut had to be
+    reconstructed from a pair of history rows -- which is also why the legacy
+    pairs are still mapped in ``STATUS_PAIR_TO_STAGE``.
+    """
+    return OrderActivityModel(
+        order_id=order_id,
+        type=activity_type.value,
+        status=status,
+        started_at=started_at,
+        finished_at=finished_at,
+        finished_by=finished_by,
+    )
+
+
 def _seed_order(
     db,
     *,
     client_id=1,
-    status="completed",
+    status="finished",
     total=100.0,
     boards=2,
     created_at=_BASE,
@@ -188,15 +215,15 @@ def test_summary_empty_range_returns_zeros_not_nulls(client):
 
 def test_summary_revenue_and_rates_isolated_by_status(client, db_session):
     _seed_clients(db_session, 2)
-    _seed_order(db_session, client_id=1, status="completed", total=100.0)
+    _seed_order(db_session, client_id=1, status="finished", total=100.0)
     _seed_order(db_session, client_id=2, status="confirmed", total=200.0)
     _seed_order(db_session, client_id=1, status="cancelled", total=50.0)
 
     data = client.get("/api/v1/analytics/summary", params=_RANGE).json()["data"]
 
     assert data["orderCount"] == 3
-    assert data["realizedRevenue"] == 100.0  # completed only
-    assert data["averageTicket"] == 100.0  # 100 / 1 completed order
+    assert data["realizedRevenue"] == 100.0  # finished only
+    assert data["averageTicket"] == 100.0  # 100 / 1 finished order
     assert data["pendingOrdersCount"] == 1  # confirmed
     assert data["cancellationRate"] == round(1 / 3, 4)  # 1 / 3
     assert data["activeClientsCount"] == 2  # clients 1 and 2 are distinct
@@ -208,12 +235,12 @@ def test_summary_efficiency_is_area_weighted_and_ignores_edge_banding(
     _seed_clients(db_session)
     _seed_order(
         db_session,
-        status="completed",
+        status="finished",
         boards=2,
         lines=[_board_line(90.0, 10.0), _edge_line(5.0)],
     )
     _seed_order(
-        db_session, status="completed", boards=5, lines=[_board_line(70.0, 30.0)]
+        db_session, status="finished", boards=5, lines=[_board_line(70.0, 30.0)]
     )
 
     data = client.get("/api/v1/analytics/summary", params=_RANGE).json()["data"]
@@ -336,8 +363,8 @@ def test_timeseries_new_clients_counts_first_order_only(client, db_session):
 # ------------------------------------------------------------- breakdown/status
 def test_breakdown_status_densifies_all_states(client, db_session):
     _seed_clients(db_session)
-    _seed_order(db_session, status="completed", total=100.0)
-    _seed_order(db_session, status="completed", total=200.0)
+    _seed_order(db_session, status="finished", total=100.0)
+    _seed_order(db_session, status="finished", total=200.0)
     _seed_order(db_session, status="cancelled", total=50.0)
 
     data = client.get("/api/v1/analytics/breakdown/status", params=_RANGE).json()[
@@ -345,11 +372,11 @@ def test_breakdown_status_densifies_all_states(client, db_session):
     ]
 
     assert data["dimension"] == "status"
-    assert len(data["items"]) == 7  # every OrderStatus
+    assert len(data["items"]) == 6  # every LIVE status (the two legacy ones are out)
     by_key = {it["key"]: it for it in data["items"]}
-    assert by_key["completed"]["orderCount"] == 2
-    assert by_key["completed"]["revenue"] == 300.0
-    assert by_key["completed"]["label"] == "Completada"
+    assert by_key["finished"]["orderCount"] == 2
+    assert by_key["finished"]["revenue"] == 300.0
+    assert by_key["finished"]["label"] == "Terminada"
     assert by_key["cancelled"]["orderCount"] == 1
     assert by_key["cancelled"]["revenue"] == 50.0
     assert by_key["confirmed"]["orderCount"] == 0  # densified to zero
@@ -359,15 +386,15 @@ def test_breakdown_status_empty_range(client):
     data = client.get("/api/v1/analytics/breakdown/status", params=_RANGE).json()[
         "data"
     ]
-    assert len(data["items"]) == 7
+    assert len(data["items"]) == 6
     assert all(it["orderCount"] == 0 and it["revenue"] == 0 for it in data["items"])
 
 
 # ------------------------------------------------------------------ operations
 def test_operations_efficiency_mirrors_summary(client, db_session):
     _seed_clients(db_session)
-    _seed_order(db_session, status="completed", lines=[_board_line(90.0, 10.0)])
-    _seed_order(db_session, status="completed", lines=[_board_line(70.0, 30.0)])
+    _seed_order(db_session, status="finished", lines=[_board_line(90.0, 10.0)])
+    _seed_order(db_session, status="finished", lines=[_board_line(70.0, 30.0)])
 
     data = client.get("/api/v1/analytics/operations", params=_RANGE).json()["data"]
     assert data["averageEfficiency"] == 75.0
@@ -386,18 +413,26 @@ def test_operations_empty_range(client):
 # ------------------------------------------------------------------ bottlenecks
 def test_bottlenecks_stage_durations_and_slowest_first(client, db_session):
     _seed_clients(db_session)
-    # Queue wait = 1h; cutting = 6h (the bottleneck).
+    # Queue wait = 1h; the cut = 6h (the bottleneck), from its activity row.
     history = [
         _hist("confirmed", datetime(2026, 6, 15, 0, 0)),
         _hist("queued", datetime(2026, 6, 15, 1, 0), from_status="confirmed"),
-        _hist("cutting", datetime(2026, 6, 15, 2, 0), from_status="queued"),
-        _hist("cut", datetime(2026, 6, 15, 8, 0), from_status="cutting"),
+        _hist("in_process", datetime(2026, 6, 15, 2, 0), from_status="queued"),
     ]
-    _seed_order(db_session, status="cut", history=history)
+    order = _seed_order(db_session, status="in_process", history=history)
+    db_session.add(
+        _seed_activity(
+            order.id,
+            ActivityType.cutting,
+            started_at=datetime(2026, 6, 15, 2, 0),
+            finished_at=datetime(2026, 6, 15, 8, 0),
+        )
+    )
+    db_session.commit()
 
     data = client.get("/api/v1/analytics/bottlenecks", params=_RANGE).json()["data"]
     stages = {s["key"]: s for s in data["stages"]}
-    assert len(data["stages"]) == 6  # the 6 densified stages
+    assert len(data["stages"]) == 7  # the 7 densified stages
     assert stages["queue_wait"]["avgHours"] == 1.0
     assert stages["queue_wait"]["sampleCount"] == 1
     assert stages["cutting"]["avgHours"] == 6.0
@@ -412,11 +447,17 @@ def test_bottlenecks_stage_durations_and_slowest_first(client, db_session):
     assert stages["dispatch_wait"]["avgHours"] == 0.0
 
 
-def test_bottlenecks_banding_stage_from_columns(client, db_session):
+def test_bottlenecks_banding_stage_from_its_activity(client, db_session):
     _seed_clients(db_session)
-    order = _seed_order(db_session, status="cut")
-    order.banding_started_at = datetime(2026, 6, 15, 10, 0)
-    order.banding_finished_at = datetime(2026, 6, 15, 13, 0)  # 3h of edge banding
+    order = _seed_order(db_session, status="in_process")
+    db_session.add(
+        _seed_activity(
+            order.id,
+            ActivityType.banding,
+            started_at=datetime(2026, 6, 15, 10, 0),
+            finished_at=datetime(2026, 6, 15, 13, 0),  # 3h of edge banding
+        )
+    )
     db_session.commit()
 
     data = client.get("/api/v1/analytics/bottlenecks", params=_RANGE).json()["data"]
@@ -430,10 +471,18 @@ def test_bottlenecks_median_and_p90_across_orders(client, db_session):
     # Three cuts of 2h, 4h, and 10h -> median 4h, high p90 (slow tail).
     for end_hour in (2, 4, 10):
         history = [
-            _hist("cutting", datetime(2026, 6, 15, 0, 0)),
-            _hist("cut", datetime(2026, 6, 15, end_hour, 0), from_status="cutting"),
+            _hist("in_process", datetime(2026, 6, 15, 0, 0)),
         ]
-        _seed_order(db_session, status="cut", history=history)
+        order = _seed_order(db_session, status="in_process", history=history)
+        db_session.add(
+            _seed_activity(
+                order.id,
+                ActivityType.cutting,
+                started_at=datetime(2026, 6, 15, 0, 0),
+                finished_at=datetime(2026, 6, 15, end_hour, 0),
+            )
+        )
+        db_session.commit()
 
     data = client.get("/api/v1/analytics/bottlenecks", params=_RANGE).json()["data"]
     cutting = next(s for s in data["stages"] if s["key"] == "cutting")
@@ -466,12 +515,18 @@ def test_bottlenecks_series_places_duration_in_bucket(client, db_session):
 def test_user_productivity_operator_cutting(client, db_session):
     _seed_clients(db_session)
     op = _seed_user(db_session, role="operador", full_name="Op Uno")
-    history = [
-        _hist("cutting", datetime(2026, 6, 15, 8, 0)),
-        _hist("cut", datetime(2026, 6, 15, 10, 0), from_status="cutting"),
-    ]
-    order = _seed_order(db_session, status="cut", history=history)
+    order = _seed_order(db_session, status="in_process")
     order.assigned_to_id = op.id
+    # The cut's hours and its boards are credited to whoever FINISHED it.
+    db_session.add(
+        _seed_activity(
+            order.id,
+            ActivityType.cutting,
+            started_at=datetime(2026, 6, 15, 8, 0),
+            finished_at=datetime(2026, 6, 15, 10, 0),
+            finished_by=op.id,
+        )
+    )
     db_session.commit()
     board = _seed_board(db_session, order.id)
     _seed_placed_piece(db_session, order_id=order.id, board_id=board.id, cut_by=op.id)
@@ -498,11 +553,26 @@ def test_user_productivity_seller_and_bander(client, db_session):
     _seed_clients(db_session)
     seller = _seed_user(db_session, role="vendedor", full_name="Vende")
     bander = _seed_user(db_session, role="canteador", full_name="Canta")
-    order = _seed_order(db_session, status="completed", total=250.0)
+    order = _seed_order(db_session, status="finished", total=250.0)
     order.created_by = seller.id
-    order.banding_finished_by = bander.id
-    order.banding_started_at = datetime(2026, 6, 15, 9, 0)
-    order.banding_finished_at = datetime(2026, 6, 15, 10, 0)  # 1h
+    db_session.add(
+        _seed_activity(
+            order.id,
+            ActivityType.banding,
+            started_at=datetime(2026, 6, 15, 9, 0),
+            finished_at=datetime(2026, 6, 15, 10, 0),  # 1h
+            finished_by=bander.id,
+        )
+    )
+    db_session.add(
+        _seed_activity(
+            order.id,
+            ActivityType.additional,
+            started_at=datetime(2026, 6, 15, 10, 0),
+            finished_at=datetime(2026, 6, 15, 10, 30),  # 30 min
+            finished_by=bander.id,
+        )
+    )
     db_session.commit()
 
     data = client.get("/api/v1/analytics/users", params=_RANGE).json()["data"]
@@ -511,13 +581,16 @@ def test_user_productivity_seller_and_bander(client, db_session):
     assert by_id[seller.id]["revenueGenerated"] == 250.0
     assert by_id[bander.id]["ordersBanded"] == 1
     assert by_id[bander.id]["bandingHours"] == 1.0
+    # The additional work is the canteador's too, and counted apart.
+    assert by_id[bander.id]["ordersAdditional"] == 1
+    assert by_id[bander.id]["additionalHours"] == 0.5
 
 
 def test_user_productivity_filters_by_role(client, db_session):
     _seed_clients(db_session)
     op = _seed_user(db_session, role="operador", full_name="Op")
     seller = _seed_user(db_session, role="vendedor", full_name="Vende")
-    o1 = _seed_order(db_session, status="completed")
+    o1 = _seed_order(db_session, status="finished")
     o1.created_by = seller.id
     o2 = _seed_order(db_session, status="cut")
     o2.assigned_to_id = op.id
