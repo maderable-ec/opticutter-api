@@ -12,7 +12,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.modules.orders.model import OrderModel, OrderStatus
+from src.modules.orders.model import (
+    ActivityStatus,
+    ActivityType,
+    OrderActivityModel,
+    OrderModel,
+    OrderStatus,
+)
 from src.modules.orders.schemas import OrderPaymentInput
 from src.modules.orders.service import OrderService, _has_payment, _progress
 from src.modules.users.enums import UserRole
@@ -24,19 +30,30 @@ from src.shared.exceptions import (
 )
 
 
-def _order(
-    status: OrderStatus, *, banding_status: str = "not_applicable"
-) -> OrderModel:
-    """Transient order (no session) in the requested status."""
-    order = OrderModel(status=status.value, banding_status=banding_status)
+def _order(status: OrderStatus, *activities: OrderActivityModel) -> OrderModel:
+    """Transient order (no session) in the requested status.
+
+    ``activities`` are the rows the closing gate reads; the default is an order
+    whose work is all done, so a test that is not about the gate does not have to
+    describe one.
+    """
+    order = OrderModel(status=status.value)
     order.id = 1
+    order.activities = list(activities) or [_activity(ActivityType.cutting)]
     return order
+
+
+def _activity(
+    activity_type: ActivityType, status: ActivityStatus = ActivityStatus.done
+) -> OrderActivityModel:
+    return OrderActivityModel(type=activity_type.value, status=status.value)
 
 
 def _service(mock_session, order: OrderModel) -> OrderService:
     svc = OrderService(mock_session)
     # The branch-scoped id lookup is replaced with the order in hand.
     svc.get_scoped_or_404 = lambda *a, **k: order
+    svc._ensure_activities = lambda *a, **k: None
     return svc
 
 
@@ -48,7 +65,7 @@ def _actor(role: UserRole | None) -> Actor:
 def test_invalid_transition_raises_and_does_not_commit(mock_session):
     svc = _service(mock_session, _order(OrderStatus.confirmed))
     with pytest.raises(BusinessRuleError):
-        svc.transition(1, OrderStatus.cutting, actor=_actor(UserRole.ADMIN))
+        svc.transition(1, OrderStatus.in_process, actor=_actor(UserRole.ADMIN))
     mock_session.commit.assert_not_called()
 
 
@@ -101,52 +118,52 @@ def test_queued_freezes_every_method_split(mock_session):
     assert order.payment_credit_amount == 5.0
 
 
-# --- Production gate (cutting -> cut) --------------------------------------------
-def test_cut_blocked_while_pieces_pending(mock_session):
-    order = _order(OrderStatus.cutting)
+# --- Closing gate: the work has to be finished -----------------------------------
+def test_finished_blocked_while_an_activity_is_open(mock_session):
+    """Generalizes the old banding-only gate to the three activities."""
+    order = _order(
+        OrderStatus.in_process,
+        _activity(ActivityType.cutting),
+        _activity(ActivityType.banding, ActivityStatus.in_progress),
+    )
     svc = _service(mock_session, order)
-    svc._ensure_cutting_plan = lambda o: None  # the plan is already materialized
-    mock_session.query.return_value.filter.return_value.count.return_value = 2
-    with pytest.raises(BusinessRuleError):
-        svc.transition(1, OrderStatus.cut, actor=_actor(UserRole.OPERATOR))
+    with pytest.raises(BusinessRuleError) as exc:
+        svc.transition(1, OrderStatus.finished, actor=_actor(UserRole.ADMIN))
+    # The message names who is being waited on: "no se puede" is useless on a
+    # shop-floor panel.
+    assert "canteado" in str(exc.value).lower()
     mock_session.commit.assert_not_called()
 
 
-# --- Closing gate (banding pending) ----------------------------------------------
-def test_completed_blocked_when_banding_pending(mock_session):
-    order = _order(OrderStatus.cut, banding_status="in_progress")
+def test_finished_names_every_open_activity(mock_session):
+    order = _order(
+        OrderStatus.in_process,
+        _activity(ActivityType.cutting),
+        _activity(ActivityType.banding, ActivityStatus.pending),
+        _activity(ActivityType.additional, ActivityStatus.in_progress),
+    )
     svc = _service(mock_session, order)
-    with pytest.raises(BusinessRuleError):
-        svc.transition(1, OrderStatus.completed, actor=_actor(UserRole.ADMIN))
-    mock_session.commit.assert_not_called()
+    with pytest.raises(BusinessRuleError) as exc:
+        svc.transition(1, OrderStatus.finished, actor=_actor(UserRole.ADMIN))
+    message = str(exc.value).lower()
+    assert "canteado" in message and "adicionales" in message
 
 
-# --- Completion by the shop floor (operator / bander) ----------------------------
+# --- Finishing by hand (the derived path is covered in the activity tests) -------
 @pytest.mark.parametrize("role", [UserRole.OPERATOR, UserRole.BANDER])
-def test_shop_floor_can_complete_when_banding_settled(mock_session, role):
-    # No banding (not_applicable) or banding done → operator and bander may complete.
-    order = _order(OrderStatus.cut, banding_status="done")
+def test_shop_floor_can_finish_when_the_work_is_done(mock_session, role):
+    order = _order(OrderStatus.in_process)
     svc = _service(mock_session, order)
-    svc.transition(1, OrderStatus.completed, actor=_actor(role))
-    assert order.status == OrderStatus.completed.value
+    svc.transition(1, OrderStatus.finished, actor=_actor(role))
+    assert order.status == OrderStatus.finished.value
     mock_session.commit.assert_called_once()
 
 
-def test_operator_cannot_complete_while_bander_still_banding(mock_session):
-    # Scenario 1: the operator finished cutting but the bander is still banding;
-    # Gate B blocks the operator from closing the order early.
-    order = _order(OrderStatus.cut, banding_status="in_progress")
-    svc = _service(mock_session, order)
-    with pytest.raises(BusinessRuleError):
-        svc.transition(1, OrderStatus.completed, actor=_actor(UserRole.OPERATOR))
-    mock_session.commit.assert_not_called()
-
-
-# --- Dispatch (completed -> despachado): admin/seller only -----------------------
+# --- Dispatch (finished -> dispatched): admin/seller only ------------------------
 @pytest.mark.parametrize("role", [UserRole.OPERATOR, UserRole.BANDER])
 def test_shop_floor_cannot_dispatch(mock_session, role):
     # Dispatch is a commercial act: the shop floor (operator/bander) can't register it.
-    order = _order(OrderStatus.completed)
+    order = _order(OrderStatus.finished)
     svc = _service(mock_session, order)
     with pytest.raises(AuthorizationError):
         svc.transition(1, OrderStatus.dispatched, actor=_actor(role))
@@ -155,12 +172,40 @@ def test_shop_floor_cannot_dispatch(mock_session, role):
 
 @pytest.mark.parametrize("role", [UserRole.ADMIN, UserRole.SELLER])
 def test_admin_and_seller_can_dispatch(mock_session, role):
-    order = _order(OrderStatus.completed)
+    order = _order(OrderStatus.finished)
     svc = _service(mock_session, order)
     svc.transition(1, OrderStatus.dispatched, actor=_actor(role))
     assert order.status == OrderStatus.dispatched.value
     assert order.dispatched_by_label == "Tester"
     mock_session.commit.assert_called_once()
+
+
+# --- The admin rollback ----------------------------------------------------------
+def test_rollback_reopens_the_cut_and_clears_the_assignment(mock_session):
+    """It undoes somebody taking the wrong order, so the cut never started.
+
+    The other activities are left alone: their clocks are sealed-once and wiping
+    progress the bander declared would be destructive.
+    """
+    cut = _activity(ActivityType.cutting, ActivityStatus.in_progress)
+    cut.started_at = datetime(2026, 1, 1)
+    cut.started_by_label = "Operador"
+    banding = _activity(ActivityType.banding, ActivityStatus.in_progress)
+    banding.ready_at = datetime(2026, 1, 1)
+    order = _order(OrderStatus.in_process, cut, banding)
+    order.assigned_to_label = "Operador"
+    order.queued_at = datetime(2026, 1, 1)
+    svc = _service(mock_session, order)
+
+    svc.transition(1, OrderStatus.queued, actor=_actor(UserRole.ADMIN))
+    assert order.status == OrderStatus.queued.value
+    assert order.assigned_to_label is None
+    assert cut.status == ActivityStatus.pending.value
+    assert cut.started_at is None and cut.started_by_label is None
+    # Not re-dated, and the bander's clock is untouched.
+    assert order.queued_at == datetime(2026, 1, 1)
+    assert banding.status == ActivityStatus.in_progress.value
+    assert banding.ready_at == datetime(2026, 1, 1)
 
 
 # --- Pure helpers -----------------------------------------------------------------

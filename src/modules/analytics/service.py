@@ -12,13 +12,15 @@ from typing import Optional
 
 from fastapi import Depends
 from sqlalchemy import distinct, func
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from src.modules.analytics.constants import (
+    ACTIVITY_STAGE,
     PENDING_STATUSES,
     REALIZED_STATUSES,
     STAGE_LABELS,
     STAGE_ORDER,
+    STATUS_BREAKDOWN_ORDER,
     STATUS_LABELS,
     STATUS_PAIR_TO_STAGE,
     Granularity,
@@ -46,6 +48,7 @@ from src.modules.analytics.schemas import (
 )
 from src.modules.branches.model import BranchModel
 from src.modules.orders.model import (
+    ActivityType,
     OrderLineModel,
     OrderModel,
     OrderPlacedPieceModel,
@@ -111,7 +114,7 @@ class AnalyticsService:
         boards = [0] * n
         new_clients = [0] * n
 
-        completed = OrderStatus.completed.value
+        completed = OrderStatus.finished.value
         rows = (
             self.db.query(
                 OrderModel.created_at,
@@ -179,7 +182,10 @@ class AnalyticsService:
                 revenue=round(by_status.get(st.value, (0, 0.0))[1], 2),
                 order_count=by_status.get(st.value, (0, 0.0))[0],
             )
-            for st in OrderStatus  # densify: every status, even zero ones
+            # Densify: every LIVE status, even the zero ones. Not the whole enum
+            # -- the two legacy statuses only exist to label old history rows and
+            # would add two columns permanently at zero.
+            for st in STATUS_BREAKDOWN_ORDER
         ]
         return Breakdown(dimension="status", items=items)
 
@@ -235,9 +241,11 @@ class AnalyticsService:
     ) -> BottleneckReport:
         """Duration per process stage: what takes longest (avg/median/p90) and when.
 
-        Five stages come from consecutive pairs in the status history; the sixth
-        (``banding``) comes from the banding columns (parallel track). The
-        bottleneck is the slowest stage; ``series`` shows in which bucket it slows down.
+        Four stages come from consecutive pairs in the status history; the three
+        work stages (cut, banding, additional) come from the activity rows, which
+        is the whole point of having them -- as columns, only the banding was ever
+        measurable. The bottleneck is the slowest stage; ``series`` shows in which
+        bucket it slows down.
         """
         buckets = iter_buckets(dr.date_from, dr.date_to, granularity)
         labels = [b.isoformat() for b in buckets]
@@ -256,7 +264,14 @@ class AnalyticsService:
             if i is not None:
                 series_acc[stage][i].append(hours)
 
-        orders = self.db.query(OrderModel).filter(*self._range(dr, branch_id)).all()
+        orders = (
+            self.db.query(OrderModel)
+            .options(
+                selectinload(OrderModel.history), selectinload(OrderModel.activities)
+            )
+            .filter(*self._range(dr, branch_id))
+            .all()
+        )
         for o in orders:
             hist = sorted(o.history, key=lambda h: (h.created_at, h.id))
             for prev, cur in zip(hist, hist[1:]):
@@ -267,12 +282,19 @@ class AnalyticsService:
                     continue
                 hours = (cur.created_at - prev.created_at).total_seconds() / 3600.0
                 add_sample(stage, hours, cur.created_at)
-            # Banding: parallel track, not in the history → from columns.
-            if o.banding_started_at and o.banding_finished_at:
+            # The work itself: parallel activities, not in the history → their
+            # own rows. An unfinished one contributes nothing (it has no
+            # duration yet), same as a transition that never happened.
+            for activity in o.activities:
+                if not (activity.started_at and activity.finished_at):
+                    continue
+                stage = ACTIVITY_STAGE.get(ActivityType(activity.type))
+                if stage is None:
+                    continue
                 hours = (
-                    o.banding_finished_at - o.banding_started_at
+                    activity.finished_at - activity.started_at
                 ).total_seconds() / 3600.0
-                add_sample("banding", hours, o.banding_finished_at)
+                add_sample(stage, hours, activity.finished_at)
 
         stages = [
             StageDuration(
@@ -308,10 +330,15 @@ class AnalyticsService:
         branch_id: Optional[int] = None,
         role: Optional[str] = None,
     ) -> UserProductivityReport:
-        """Work and speed per user: cutting, banding and sales work.
+        """Work and speed per user: cutting, banding, additional and sales work.
 
         Per-piece cutting is measured by ``cut_at`` within the range; order-level
-        metrics (cutting time, banding, sales) by orders created in the range.
+        metrics (the three activities, sales) by orders created in the range.
+
+        Each activity is credited to whoever FINISHED it, which is also what made
+        the cutting hours honest: they used to be read off the status history and
+        kept the LAST entry into ``cutting``, so an admin rollback silently reset
+        the clock of whoever had been cutting since morning.
         """
         acc: dict[int, dict] = defaultdict(
             lambda: {
@@ -322,6 +349,8 @@ class AnalyticsService:
                 "boards_cut": 0,
                 "orders_banded": 0,
                 "banding_hours": 0.0,
+                "orders_additional": 0,
+                "additional_hours": 0.0,
                 "orders_created": 0,
                 "revenue_generated": 0.0,
             }
@@ -350,29 +379,33 @@ class AnalyticsService:
 
         # 2-4) Order-level metrics (order created in the range).
         realized = status_values(REALIZED_STATUSES)
-        orders = self.db.query(OrderModel).filter(*self._range(dr, branch_id)).all()
+        orders = (
+            self.db.query(OrderModel)
+            .options(selectinload(OrderModel.activities))
+            .filter(*self._range(dr, branch_id))
+            .all()
+        )
         for o in orders:
-            # Cutting time (cutting → cut) → assigned operator.
-            if o.assigned_to_id is not None:
-                cutting_ts = cut_ts = None
-                for h in o.history:
-                    if h.to_status == OrderStatus.cutting.value:
-                        cutting_ts = h.created_at
-                    elif h.to_status == OrderStatus.cut.value:
-                        cut_ts = h.created_at
-                if cutting_ts and cut_ts and cut_ts >= cutting_ts:
-                    acc[o.assigned_to_id]["cutting_hours"] += (
-                        cut_ts - cutting_ts
+            # Each activity → whoever finished it, with its own duration.
+            for activity in o.activities:
+                if activity.finished_by is None:
+                    continue
+                a = acc[activity.finished_by]
+                hours = 0.0
+                if activity.started_at and activity.finished_at:
+                    hours = (
+                        activity.finished_at - activity.started_at
                     ).total_seconds() / 3600.0
-                    acc[o.assigned_to_id]["boards_cut"] += o.total_boards_used or 0
-            # Banding → canteador who finished it.
-            if o.banding_finished_by is not None:
-                a = acc[o.banding_finished_by]
-                a["orders_banded"] += 1
-                if o.banding_started_at and o.banding_finished_at:
-                    a["banding_hours"] += (
-                        o.banding_finished_at - o.banding_started_at
-                    ).total_seconds() / 3600.0
+                kind = ActivityType(activity.type)
+                if kind is ActivityType.cutting:
+                    a["cutting_hours"] += hours
+                    a["boards_cut"] += o.total_boards_used or 0
+                elif kind is ActivityType.banding:
+                    a["orders_banded"] += 1
+                    a["banding_hours"] += hours
+                else:
+                    a["orders_additional"] += 1
+                    a["additional_hours"] += hours
             # Sales work → creating vendedor.
             if o.created_by is not None:
                 a = acc[o.created_by]
@@ -520,13 +553,18 @@ class AnalyticsService:
                     boards_cut=a["boards_cut"],
                     orders_banded=a["orders_banded"],
                     banding_hours=round(a["banding_hours"], 2),
+                    orders_additional=a["orders_additional"],
+                    additional_hours=round(a["additional_hours"], 2),
                     orders_created=a["orders_created"],
                     revenue_generated=round(a["revenue_generated"], 2),
                 )
             )
-        # Most work first (cutting + banding + sales).
+        # Most work first (cutting + banding + additional + sales).
         rows.sort(
-            key=lambda r: r.pieces_cut + r.orders_banded + r.orders_created,
+            key=lambda r: r.pieces_cut
+            + r.orders_banded
+            + r.orders_additional
+            + r.orders_created,
             reverse=True,
         )
         return rows

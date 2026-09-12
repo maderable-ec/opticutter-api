@@ -15,15 +15,20 @@ from src.modules.optimizations.pricing import build_pricing
 from src.modules.optimizations.schemas import OptimizeRequest
 from src.modules.optimizations.service import OptimizationService
 from src.modules.orders.model import (
-    BANDING_MUTABLE_ORDER_STATUSES,
-    BANDING_PENDING_STATUSES,
-    BANDING_TRANSITION_ROLES,
-    BANDING_TRANSITIONS,
+    ACTIVITY_FINISH_NEEDS_EVERY_PIECE,
+    ACTIVITY_LABELS,
+    ACTIVITY_MUTABLE_ORDER_STATUSES,
+    ACTIVITY_PIECES,
+    ACTIVITY_ROLES,
+    ACTIVITY_START_NEEDS_A_CUT_PIECE,
+    ACTIVITY_TRANSITIONS,
     TERMINAL_STATUSES,
     TRANSITION_ROLES,
     TRANSITIONS,
     WORKSHOP_QUEUE_STATUSES,
-    BandingStatus,
+    ActivityStatus,
+    ActivityType,
+    OrderActivityModel,
     OrderBoardModel,
     OrderLineModel,
     OrderModel,
@@ -33,9 +38,10 @@ from src.modules.orders.model import (
     OrderStatusHistoryModel,
 )
 from src.modules.orders.schemas import (
-    BandingStatusResponse,
+    ActivityResult,
     CuttingPlanResponse,
     CuttingProgress,
+    OrderActivityResponse,
     OrderBoardResponse,
     OrderCreate,
     OrderExportLine,
@@ -105,7 +111,8 @@ class OrderService(BranchScopedMixin):
         created_to: Optional[date] = None,
         sort: str = "oldest",
         is_priority: Optional[bool] = None,
-        banding_status: Optional[BandingStatus] = None,
+        activity: Optional[ActivityType] = None,
+        activity_status: Optional[ActivityStatus] = None,
     ) -> Tuple[List[OrderModel], int]:
         """Lists orders with total count: ``(items, total)``.
 
@@ -128,8 +135,9 @@ class OrderService(BranchScopedMixin):
         unlike ``is_priority``, this one DOES reorder, because "what has been
         sitting longest" is a question only an ordering can answer.
 
-        ``banding_status`` narrows to one stage of the parallel banding track
-        ("show me everything still to band").
+        ``activity``/``activity_status`` narrow to one stage of one parallel
+        activity ("show me everything still to band"). Either alone works: the
+        type alone means "orders that carry this activity at all".
         """
         # ``OrderResponse`` embeds client, branch, lines, pieces and history, so
         # without this every row of the page fires five lazy loads -- and the page
@@ -140,6 +148,7 @@ class OrderService(BranchScopedMixin):
             selectinload(OrderModel.lines),
             selectinload(OrderModel.pieces),
             selectinload(OrderModel.history),
+            selectinload(OrderModel.activities),
         )
         if status:
             query = query.filter(OrderModel.status.in_([s.value for s in status]))
@@ -147,8 +156,20 @@ class OrderService(BranchScopedMixin):
             query = query.filter(OrderModel.client_id == client_filter)
         if is_priority is not None:
             query = query.filter(OrderModel.is_priority.is_(is_priority))
-        if banding_status is not None:
-            query = query.filter(OrderModel.banding_status == banding_status.value)
+        if activity is not None or activity_status is not None:
+            # EXISTS rather than a join: an order has at most one row per type,
+            # but a join would still duplicate rows if the filter is loosened
+            # later, and the count above has to stay honest.
+            exists = self.db.query(OrderActivityModel.id).filter(
+                OrderActivityModel.order_id == OrderModel.id
+            )
+            if activity is not None:
+                exists = exists.filter(OrderActivityModel.type == activity.value)
+            if activity_status is not None:
+                exists = exists.filter(
+                    OrderActivityModel.status == activity_status.value
+                )
+            query = query.filter(exists.exists())
         if search:
             pattern = f"%{search}%"
             # Outer join: an order always has a client, but the join must not
@@ -273,18 +294,11 @@ class OrderService(BranchScopedMixin):
 
         # The order is born 'confirmed' (the client's prior review, formerly
         # 'quoted', now lives in the pre-order, which mints this order on confirmation).
-        # Banding track: starts 'pending' if the order has edge banding (something
-        # to band), else 'not_applicable' (doesn't participate in the closing gate).
-        has_banding = bool(payload.get("edge_bandings_summary"))
-        banding_status = (
-            BandingStatus.pending if has_banding else BandingStatus.not_applicable
-        )
         now = datetime.utcnow()
         order = OrderModel(
             client_id=data.client_id,
             branch_id=branch_id,
             status=data.status.value,
-            banding_status=banding_status.value,
             optimization_snapshot=snapshot,
             optimization_hash=optimization_hash,
             currency="USD",
@@ -349,6 +363,12 @@ class OrderService(BranchScopedMixin):
         # Cutting plan = physical boards with each placed piece (the unit the
         # operator marks in the workshop; mutable state outside the snapshot).
         _attach_cutting_plan(order, payload)
+        # The work of ``in_process``, one row per APPLICABLE activity: the cut
+        # always, the banding when something is billed as edge banding, the
+        # additional work when a service was registered. A missing row is the
+        # old ``not_applicable`` -- it cannot be started and never holds the
+        # closing gate.
+        order.activities = _build_activities(snapshot)
         order.history = [
             OrderStatusHistoryModel(
                 from_status=None,
@@ -382,12 +402,54 @@ class OrderService(BranchScopedMixin):
     ) -> OrderModel:
         """Validates and applies a state transition, recording the history.
 
-        Verifies the actor's role is authorized for the specific transition
-        (TRANSITION_ROLES). Production gate: moving to ``cut`` requires every
-        piece in the cutting plan to be marked.
+        Thin wrapper: ``_transition_unlocked`` does the work, this commits it and
+        notifies. The two moves the shop floor makes -- into ``in_process`` and
+        into ``finished`` -- normally arrive DERIVED from an activity
+        (``transition_activity``) rather than through this endpoint, and that is
+        exactly why the body is split: the activity and the order's transition
+        have to land in ONE transaction.
         """
         actor = actor or system_actor()
         order = self.get_scoped_or_404(order_id, branch_scope)
+        current = OrderStatus(order.status)
+        self._transition_unlocked(
+            order, to_status, actor=actor, note=note, payment=payment
+        )
+        self.db.commit()
+        self.db.refresh(order)
+
+        # Best-effort side-effect on the committed transition: notify the staff
+        # that should react (admins/sellers on completion, branch operators on
+        # enqueue). Never raises — a failure here can't undo the commit above.
+        notify_order_transition(self.db, order, current, to_status, actor)
+        return order
+
+    def _transition_unlocked(
+        self,
+        order: OrderModel,
+        to_status: OrderStatus,
+        actor: Actor,
+        note: Optional[str] = None,
+        payment: Optional[OrderPaymentInput] = None,
+        now: Optional[datetime] = None,
+    ) -> OrderStatus:
+        """Every gate and every side-effect of a transition, WITHOUT committing.
+
+        Returns the status the order came from, which is what the caller needs to
+        notify. Uncommitted on purpose: ``transition_activity`` composes an
+        activity change with the order transition it derives, and a commit in the
+        middle would leave the two halves separable.
+
+        ``now`` lets the caller share ONE instant across every record of the same
+        event -- the history row, the status clock, the activity's own
+        timestamps. Stamping them separately leaves them a fraction of a
+        millisecond apart, and the migration's backfill (which can only read the
+        history) then cannot reproduce what the service wrote.
+
+        Verifies the actor's role for the specific transition (TRANSITION_ROLES),
+        the payment on entering the queue, and -- closing the order -- that every
+        applicable activity is done.
+        """
         current = OrderStatus(order.status)
 
         # Per-transition role validation before touching the state.
@@ -399,27 +461,19 @@ class OrderService(BranchScopedMixin):
                     f"'{current.value}' → '{to_status.value}'"
                 )
 
-        # Gate: every piece must be cut before the cutting stage can close.
-        if to_status == OrderStatus.cut and order.status == OrderStatus.cutting.value:
-            self._ensure_cutting_plan(order)
-            pending = (
-                self.db.query(OrderPlacedPieceModel)
-                .filter(
-                    OrderPlacedPieceModel.order_id == order.id,
-                    OrderPlacedPieceModel.cut_at.is_(None),
-                )
-                .count()
-            )
+        # Closing gate: the order is finished when the WORK is finished. Replaces
+        # the old banding-only gate, generalized to the three activities; the
+        # message names the ones still open, because "no se puede" on a shop-floor
+        # panel has to say who is being waited on.
+        if to_status == OrderStatus.finished:
+            self._ensure_activities(order)
+            pending = [
+                ACTIVITY_LABELS[ActivityType(a.type)]
+                for a in order.activities
+                if ActivityStatus(a.status) != ActivityStatus.done
+            ]
             if pending:
-                raise BusinessRuleError(f"Faltan {pending} pieza(s) por cortar")
-
-        # Closing gate: if the order has edge banding, banding must be finished
-        # before completing it (orders with no banding pass straight through).
-        if (
-            to_status == OrderStatus.completed
-            and BandingStatus(order.banding_status) in BANDING_PENDING_STATUSES
-        ):
-            raise BusinessRuleError("Falta terminar el canteado")
+                raise BusinessRuleError(f"Falta terminar: {', '.join(pending)}")
 
         # Payment-method gate: entering the queue requires registering how the
         # client pays (at least one amount > 0). Informational only, not validated against the total.
@@ -432,44 +486,51 @@ class OrderService(BranchScopedMixin):
                 "para enviar a cola"
             )
 
-        self._apply_transition(order, to_status, actor=actor, note=note)
+        now = now or datetime.utcnow()
+        self._apply_transition(order, to_status, actor=actor, note=note, now=now)
 
-        # Assignment when transitioning to ``cutting``; cleared when returning to ``queued``.
-        if to_status == OrderStatus.cutting:
+        # Assignment when the shop takes the order; cleared when it goes back to
+        # the queue. The rollback also reopens the CUT: it undoes somebody taking
+        # the wrong order, so the cut has not started after all. The other
+        # activities are left alone -- their clocks are sealed-once, and wiping
+        # progress the bander declared would be destructive.
+        if to_status == OrderStatus.in_process and current == OrderStatus.queued:
             order.assigned_to_id = actor.user_id
-            order.assigned_at = datetime.utcnow()
+            order.assigned_at = now
             order.assigned_to_label = actor.label
-        elif to_status == OrderStatus.queued and current == OrderStatus.cutting:
+        elif to_status == OrderStatus.queued and current == OrderStatus.in_process:
             order.assigned_to_id = None
             order.assigned_at = None
             order.assigned_to_label = None
+            cut = self._activity(order, ActivityType.cutting)
+            if cut is not None:
+                cut.status = ActivityStatus.pending.value
+                cut.started_at = None
+                cut.started_by = None
+                cut.started_by_label = None
 
-        # Dispatch: freezes date and who handed it over (shown on the dispatch sheet).
+        # Dispatch: freezes date and who handed it over (shown on the delivery block).
         if to_status == OrderStatus.dispatched:
-            order.dispatched_at = datetime.utcnow()
+            order.dispatched_at = now
             order.dispatched_by = actor.user_id
             order.dispatched_by_label = actor.label
 
         # Payment method: freezes the amounts on entering the queue (informational).
-        # The admin cutting → queued rollback doesn't hit this (current != confirmed).
+        # The admin in_process → queued rollback doesn't hit this (current != confirmed).
         # ``queued_at`` rides the same guard on purpose: it is the workshop's arrival
         # time (the board's FIFO reads it), and the rollback undoes somebody taking the
         # wrong order -- re-dating it there would send the client to the back of the
-        # line for a mistake that was not theirs.
+        # line for a mistake that was not theirs. The cut's ``ready_at`` is the same
+        # instant: reaching the queue is when it stopped being blocked.
         if is_payment_capture:
             order.payment_cash_amount = payment.cash_amount
             order.payment_transfer_amount = payment.transfer_amount
             order.payment_credit_amount = payment.credit_amount
-            order.queued_at = datetime.utcnow()
-
-        self.db.commit()
-        self.db.refresh(order)
-
-        # Best-effort side-effect on the committed transition: notify the staff
-        # that should react (admins/sellers on completion, branch operators on
-        # enqueue). Never raises — a failure here can't undo the commit above.
-        notify_order_transition(self.db, order, current, to_status, actor)
-        return order
+            order.queued_at = now
+            cut = self._activity(order, ActivityType.cutting)
+            if cut is not None and cut.ready_at is None:
+                cut.ready_at = order.queued_at
+        return current
 
     def get_cutting_plan(
         self, order_id: int, branch_scope: Optional[int] = None
@@ -502,6 +563,7 @@ class OrderService(BranchScopedMixin):
             status=OrderStatus(order.status),
             notes=order.notes,
             progress=_progress(all_pieces),
+            activities=self._activity_responses(order),
             boards=boards,
             print_labels_enabled=order.branch.print_labels_enabled,
         )
@@ -516,16 +578,25 @@ class OrderService(BranchScopedMixin):
     ) -> PieceCutResponse:
         """Marks (or unmarks) a placed piece as cut, idempotently.
 
-        Only with the order in ``cutting``: before that there's nothing to cut,
-        and after that the cutting stage is already closed by the transition.
-        ``actor`` records who cut it (FK + label), in sync with ``cut_at``.
+        Only while the CUT is in progress: before that there is nothing to cut,
+        and once the operator closed the cut every piece is marked by definition
+        -- unmarking one there would break the invariant the closing gate just
+        checked. (The order status alone can no longer say this: ``cutting`` and
+        ``cut`` are one state now.) ``actor`` records who cut it (FK + label),
+        in sync with ``cut_at``.
         """
         actor = actor or system_actor()
         order = self.get_scoped_or_404(order_id, branch_scope)
         self._ensure_cutting_plan(order)
-        if order.status != OrderStatus.cutting.value:
+        self._ensure_activities(order)
+        cut_activity = self._activity(order, ActivityType.cutting)
+        if (
+            OrderStatus(order.status) not in ACTIVITY_MUTABLE_ORDER_STATUSES
+            or cut_activity is None
+            or ActivityStatus(cut_activity.status) != ActivityStatus.in_progress
+        ):
             raise BusinessRuleError(
-                "Solo se pueden marcar piezas con la orden en corte (cutting)"
+                "Solo se pueden marcar piezas con el corte en proceso"
             )
         piece = self.db.get(OrderPlacedPieceModel, placed_piece_id)
         if piece is None or piece.order_id != order.id:
@@ -534,11 +605,11 @@ class OrderService(BranchScopedMixin):
             piece.cut_at = datetime.utcnow()
             piece.cut_by = actor.user_id
             piece.cut_by_label = actor.label
-            # First banded piece cut = the banding track just became workable (the
-            # very gate ``transition_banding`` checks). Sealed once: unmarking the
-            # piece does not give the bander their waiting time back.
-            if order.banding_ready_at is None and _piece_is_banded(piece):
-                order.banding_ready_at = piece.cut_at
+            # This piece may be the one that UNBLOCKS the bander: banding waits
+            # for the first BANDED piece, the additional work for any piece at
+            # all (its set is every piece). Sealed once -- unmarking the piece
+            # does not give back the time already waited.
+            self._seal_activity_ready(order, piece)
         elif not cut:
             piece.cut_at = None
             piece.cut_by = None
@@ -555,23 +626,23 @@ class OrderService(BranchScopedMixin):
     def list_workshop_queue(
         self, branch_scope: Optional[int] = None
     ) -> List[WorkshopQueueItem]:
-        """Shared shop-floor board: orders from the queue up to "cut".
+        """Shared shop-floor board: the queue plus the orders in process.
 
         Self-sufficient card list for the operator and the bander (the latter has
         no ``orders:read``): embeds the client, board/banding usage per material
-        type and cutting progress so both can drive their actions -- take/cut,
-        band, complete -- from one place. Branch-isolated.
+        type and the activities so both can drive their actions -- take, cut,
+        band, register the additional work -- from one place. Branch-isolated.
 
-        ``banding_progress`` counts only the BANDED pieces, and it is what tells
-        the card whether the bander may start or finish (and, when not, how many
+        ``activities`` carries a per-activity progress, and it is what tells the
+        card whether an activity may start or finish (and, when not, how many
         pieces are still missing). The per-piece data lives in the cutting plan,
         an endpoint the bander cannot even reach -- and one request per card
-        every 15s -- so the aggregate rides here.
+        every 15s -- so the aggregates ride here.
 
         Prioritized orders come first, then FIFO. The shop works in arrival order
         and that stays the rule -- ``is_priority`` is the deliberate exception
         sales marks for an urgent client, and FIFO is what breaks the tie within
-        each group. The sort spans the three board statuses rather than only
+        each group. The sort spans both board statuses rather than only
         ``queued``: an urgent order already being cut is still the one to watch.
 
         **Arrival is ``queued_at``, not ``created_at``.** An order reaches the shop
@@ -586,7 +657,9 @@ class OrderService(BranchScopedMixin):
         )
         # The branch supplies each card's printing switch; eager-load it so the
         # admin's board (which spans every branch) doesn't fire one query per row.
-        query = query.options(joinedload(OrderModel.branch))
+        query = query.options(
+            joinedload(OrderModel.branch), selectinload(OrderModel.activities)
+        )
         query = self._apply_branch_scope(query, branch_scope, None)
         orders = query.order_by(
             OrderModel.is_priority.desc(),
@@ -597,6 +670,7 @@ class OrderService(BranchScopedMixin):
         progress_by_order = self._cutting_progress_by_order(order_ids)
         banded_by_order = self._banded_progress_by_order(order_ids)
         items = []
+        zero = CuttingProgress(cut_pieces=0, total_pieces=0)
         for o in orders:
             snapshot = o.optimization_snapshot or {}
             items.append(
@@ -604,22 +678,19 @@ class OrderService(BranchScopedMixin):
                     order_id=o.id,
                     order_code=o.code,
                     status=OrderStatus(o.status),
-                    banding_status=BandingStatus(o.banding_status),
                     notes=o.notes,
                     is_priority=o.is_priority,
                     created_at=o.created_at,
                     queued_at=o.queued_at,
                     status_changed_at=o.status_changed_at,
-                    banding_ready_at=o.banding_ready_at,
-                    banding_started_at=o.banding_started_at,
                     client=ClientResponse.model_validate(o.client),
                     board_usage=_board_usage(snapshot),
                     banding_usage=_banding_usage(snapshot),
-                    progress=progress_by_order.get(
-                        o.id, CuttingProgress(cut_pieces=0, total_pieces=0)
-                    ),
-                    banding_progress=banded_by_order.get(
-                        o.id, CuttingProgress(cut_pieces=0, total_pieces=0)
+                    progress=progress_by_order.get(o.id, zero),
+                    activities=_activity_responses(
+                        o.activities,
+                        all_progress=progress_by_order.get(o.id, zero),
+                        banded_progress=banded_by_order.get(o.id, zero),
                     ),
                     print_consolidated_enabled=o.branch.print_consolidated_enabled,
                 )
@@ -650,6 +721,22 @@ class OrderService(BranchScopedMixin):
             row.order_id: CuttingProgress(cut_pieces=row.cut, total_pieces=row.total)
             for row in rows
         }
+
+    def _cutting_progress(self, order_id: int) -> CuttingProgress:
+        """Cut/total counts over EVERY placed piece of one order.
+
+        The set the cut and the additional work are measured against (the
+        banding has its own, ``_banded_progress``).
+        """
+        row = (
+            self.db.query(
+                func.count(OrderPlacedPieceModel.id).label("total"),
+                func.count(OrderPlacedPieceModel.cut_at).label("cut"),
+            )
+            .filter(OrderPlacedPieceModel.order_id == order_id)
+            .one()
+        )
+        return CuttingProgress(cut_pieces=row.cut, total_pieces=row.total)
 
     def _banded_progress(self, order_id: int) -> CuttingProgress:
         """Cut/total counts over the pieces that carry edge banding.
@@ -695,81 +782,225 @@ class OrderService(BranchScopedMixin):
             for row in rows
         }
 
-    def transition_banding(
+    def transition_activity(
         self,
         order_id: int,
-        to_status: BandingStatus,
+        activity_type: ActivityType,
+        to_status: ActivityStatus,
         actor: Optional[Actor] = None,
+        note: Optional[str] = None,
         branch_scope: Optional[int] = None,
-    ) -> BandingStatusResponse:
-        """Advances the banding track (``in_progress``/``done``), idempotently.
+    ) -> ActivityResult:
+        """Advances one activity (``in_progress``/``done``), idempotently.
 
-        Track parallel to cutting -- the bander works on the pieces the operator
-        releases, without waiting for the whole board to be cut -- but not
-        independent of it: banding starts once the FIRST banded piece is cut and
-        finishes once the LAST one is. Plain pieces never hold it back, which is
-        what keeps the two tracks running side by side. Without that floor the
-        bander could open the order the instant the operator took it and declare
-        the work done with nothing cut, and ``done`` is terminal: it satisfies
-        the completion gate for good.
+        This is the shop floor's single endpoint, and the order's own status is
+        DERIVED from it: starting the cut takes the order out of the queue, and
+        closing the last applicable activity finishes it. Both derived
+        transitions ride the same transaction as the activity, so an order can
+        never be left claiming work that is not registered.
+
+        The three activities run in PARALLEL -- the bander works on the pieces
+        the operator releases, without waiting for the whole board -- but not
+        INDEPENDENTLY: each one's floors are measured against its own piece set
+        (``ACTIVITY_PIECES``). Starting needs one of its pieces cut, finishing
+        needs them all, except the additional work, which the bander closes on
+        their own word (there is no per-service piece data to check, and the
+        order still waits for the cut to reach ``finished`` anyway). Without the
+        start floor the bander could open an order the instant the operator took
+        it and declare the work done with nothing cut, and ``done`` is terminal:
+        it would satisfy the closing gate for good.
 
         Forward-only; re-applying the current status is a no-op. Seals
         start/finish with a timestamp + actor.
         """
         actor = actor or system_actor()
         order = self.get_scoped_or_404(order_id, branch_scope)
+        self._ensure_activities(order)
+        label = ACTIVITY_LABELS[activity_type]
 
         if actor.role is not None and actor.role not in (
-            r.value for r in BANDING_TRANSITION_ROLES
+            r.value for r in ACTIVITY_ROLES[activity_type]
         ):
-            raise AuthorizationError("Tu rol no puede registrar el canteado")
+            raise AuthorizationError(f"Tu rol no puede registrar el {label}")
 
-        current = BandingStatus(order.banding_status)
-        if current == BandingStatus.not_applicable:
-            raise BusinessRuleError("Esta orden no lleva tapacantos")
-        if OrderStatus(order.status) not in BANDING_MUTABLE_ORDER_STATUSES:
-            raise BusinessRuleError(
-                "El canteado solo se registra con la orden en corte o cortada"
-            )
+        activity = self._activity(order, activity_type)
+        # A missing row is the old ``not_applicable``: the activity does not
+        # apply to this order, so there is nothing to move and nothing to gate.
+        if activity is None:
+            raise BusinessRuleError(f"Esta orden no lleva {label}")
 
+        current = ActivityStatus(activity.status)
+        from_status: Optional[OrderStatus] = None
         # Idempotent: re-applying the current status is a no-op (timestamps aren't re-sealed).
         if to_status != current:
-            if to_status not in BANDING_TRANSITIONS.get(current, set()):
+            if to_status not in ACTIVITY_TRANSITIONS.get(current, set()):
                 raise BusinessRuleError(
-                    f"Transición de canteado inválida de '{current.value}' a "
+                    f"Transición de {label} inválida de '{current.value}' a "
                     f"'{to_status.value}'"
                 )
-            # Cutting gates: there has to be something to band. Checked after the
-            # transition table so an invalid jump still reports itself as invalid.
+            starting_the_cut = (
+                activity_type == ActivityType.cutting
+                and to_status == ActivityStatus.in_progress
+            )
+            order_status = OrderStatus(order.status)
+            # Order gate: the work happens while the order is in process.
+            # Starting the cut is the exception -- it is what takes the order out
+            # of the queue, so it is also allowed from there.
+            if order_status not in ACTIVITY_MUTABLE_ORDER_STATUSES and not (
+                starting_the_cut and order_status == OrderStatus.queued
+            ):
+                raise BusinessRuleError(
+                    f"El {label} solo se registra con la orden en proceso"
+                )
+            # Piece floors: checked AFTER the transition table so an invalid jump
+            # still reports itself as invalid rather than as missing pieces.
             self._ensure_cutting_plan(order)
-            banded = self._banded_progress(order.id)
-            if to_status == BandingStatus.in_progress and banded.cut_pieces == 0:
-                raise BusinessRuleError("Aún no se ha cortado ninguna pieza con canto")
-            if to_status == BandingStatus.done:
-                pending = banded.total_pieces - banded.cut_pieces
-                if pending:
-                    raise BusinessRuleError(
-                        f"Faltan {pending} pieza(s) con canto por cortar"
-                    )
+            self._check_activity_floor(order, activity_type, to_status)
+
             now = datetime.utcnow()
-            if to_status == BandingStatus.in_progress:
-                order.banding_started_at = now
-                order.banding_started_by = actor.user_id
-                order.banding_started_by_label = actor.label
-            elif to_status == BandingStatus.done:
-                order.banding_finished_at = now
-                order.banding_finished_by = actor.user_id
-                order.banding_finished_by_label = actor.label
-            order.banding_status = to_status.value
+            if to_status == ActivityStatus.in_progress:
+                activity.started_at = now
+                activity.started_by = actor.user_id
+                activity.started_by_label = actor.label
+            elif to_status == ActivityStatus.done:
+                activity.finished_at = now
+                activity.finished_by = actor.user_id
+                activity.finished_by_label = actor.label
+            activity.status = to_status.value
+
+            # Derived transitions of the ORDER, in the same transaction.
+            if starting_the_cut and order_status == OrderStatus.queued:
+                from_status = self._transition_unlocked(
+                    order, OrderStatus.in_process, actor=actor, note=note, now=now
+                )
+            elif to_status == ActivityStatus.done and all(
+                ActivityStatus(a.status) == ActivityStatus.done
+                for a in order.activities
+            ):
+                from_status = self._transition_unlocked(
+                    order, OrderStatus.finished, actor=actor, note=note, now=now
+                )
+            self.db.commit()
+            self.db.refresh(order)
+            self.db.refresh(activity)
+            if from_status is not None:
+                # Best-effort, post-commit, exactly like ``transition``.
+                notify_order_transition(
+                    self.db, order, from_status, OrderStatus(order.status), actor
+                )
+
+        return ActivityResult(
+            order_id=order.id,
+            order_code=order.code,
+            order_status=OrderStatus(order.status),
+            activity=self._activity_response(order, activity),
+        )
+
+    def _check_activity_floor(
+        self,
+        order: OrderModel,
+        activity_type: ActivityType,
+        to_status: ActivityStatus,
+    ) -> None:
+        """Raises unless the activity's own pieces allow the move.
+
+        Table-driven on purpose (``ACTIVITY_PIECES`` +
+        ``ACTIVITY_START_NEEDS_A_CUT_PIECE`` +
+        ``ACTIVITY_FINISH_NEEDS_EVERY_PIECE``): the rule is one idea applied to
+        three piece sets, and writing it as three ``if`` blocks is how the sets
+        and the floors drift apart.
+        """
+        banded = ACTIVITY_PIECES[activity_type] == "banded"
+        if to_status == ActivityStatus.in_progress:
+            if not ACTIVITY_START_NEEDS_A_CUT_PIECE[activity_type]:
+                return
+            progress = (
+                self._banded_progress(order.id)
+                if banded
+                else self._cutting_progress(order.id)
+            )
+            if progress.cut_pieces == 0:
+                raise BusinessRuleError(
+                    "Aún no se ha cortado ninguna pieza con canto"
+                    if banded
+                    else "Aún no se ha cortado ninguna pieza"
+                )
+            return
+        if to_status == ActivityStatus.done:
+            if not ACTIVITY_FINISH_NEEDS_EVERY_PIECE[activity_type]:
+                return
+            progress = (
+                self._banded_progress(order.id)
+                if banded
+                else self._cutting_progress(order.id)
+            )
+            pending = progress.total_pieces - progress.cut_pieces
+            if pending:
+                raise BusinessRuleError(
+                    f"Faltan {pending} pieza(s) con canto por cortar"
+                    if banded
+                    else f"Faltan {pending} pieza(s) por cortar"
+                )
+
+    def _activity(
+        self, order: OrderModel, activity_type: ActivityType
+    ) -> Optional[OrderActivityModel]:
+        """The order's row for one activity, or ``None`` when it does not apply."""
+        return next(
+            (a for a in order.activities if a.type == activity_type.value), None
+        )
+
+    def _ensure_activities(self, order: OrderModel) -> None:
+        """Materializes the activity rows from the snapshot if they are missing.
+
+        Twin of ``_ensure_cutting_plan``: covers whatever the migration could
+        not build and any order created by an older process, so no read or
+        registration ever finds an order without its activities.
+        """
+        if order.activities:
+            return
+        order.activities = _build_activities(order.optimization_snapshot or {})
+        if order.activities:
             self.db.commit()
             self.db.refresh(order)
 
-        return BandingStatusResponse(
-            order_id=order.id,
-            order_code=order.code,
-            banding_status=BandingStatus(order.banding_status),
-            banding_started_at=order.banding_started_at,
-            banding_finished_at=order.banding_finished_at,
+    def _seal_activity_ready(
+        self, order: OrderModel, piece: OrderPlacedPieceModel
+    ) -> None:
+        """Seals ``ready_at`` on the activities this freshly cut piece unblocks.
+
+        Sealed once and never undone: unmarking the piece does not give back the
+        time somebody already waited (same reason ``queued_at`` survives the
+        rollback).
+        """
+        piece_is_banded = _piece_is_banded(piece)
+        for activity in order.activities:
+            activity_type = ActivityType(activity.type)
+            if activity.ready_at is not None:
+                continue
+            if not ACTIVITY_START_NEEDS_A_CUT_PIECE[activity_type]:
+                continue
+            if ACTIVITY_PIECES[activity_type] == "banded" and not piece_is_banded:
+                continue
+            activity.ready_at = piece.cut_at
+
+    def _activity_response(
+        self, order: OrderModel, activity: OrderActivityModel
+    ) -> OrderActivityResponse:
+        """One activity with the progress of ITS pieces (two aggregates at most)."""
+        return _activity_responses(
+            [activity],
+            all_progress=self._cutting_progress(order.id),
+            banded_progress=self._banded_progress(order.id),
+        )[0]
+
+    def _activity_responses(self, order: OrderModel) -> List[OrderActivityResponse]:
+        """Every activity of the order, with each one's piece progress."""
+        self._ensure_activities(order)
+        return _activity_responses(
+            order.activities,
+            all_progress=self._cutting_progress(order.id),
+            banded_progress=self._banded_progress(order.id),
         )
 
     def _ensure_cutting_plan(self, order: OrderModel) -> None:
@@ -791,6 +1022,7 @@ class OrderService(BranchScopedMixin):
         to_status: OrderStatus,
         actor: Actor,
         note: Optional[str] = None,
+        now: Optional[datetime] = None,
     ) -> None:
         """Validates and applies the transition without committing (caller persists).
 
@@ -802,11 +1034,13 @@ class OrderService(BranchScopedMixin):
             raise BusinessRuleError(
                 f"Transición inválida de '{current.value}' a '{to_status.value}'"
             )
-        # One instant for both records of the same event: the history row and the
-        # clock the listing reads. Stamping them separately left them a fraction of
-        # a millisecond apart, which made the migration's backfill (which can only
-        # read the history) unable to reproduce what the service had written.
-        now = datetime.utcnow()
+        # One instant for every record of the same event: the history row, the
+        # clock the listing reads and -- when the transition was derived from an
+        # activity -- that activity's own timestamps. Stamping them separately left
+        # them a fraction of a millisecond apart, which made the migration's
+        # backfill (which can only read the history) unable to reproduce what the
+        # service had written.
+        now = now or datetime.utcnow()
         order.history.append(
             OrderStatusHistoryModel(
                 from_status=current.value,
@@ -1187,6 +1421,58 @@ def _piece_is_banded(piece: OrderPlacedPieceModel) -> bool:
     work.
     """
     return bool(piece.edges)
+
+
+def _build_activities(snapshot: dict) -> List[OrderActivityModel]:
+    """The activity rows an order needs, from its frozen snapshot.
+
+    One row per APPLICABLE activity and no row for the rest -- the cut always,
+    the banding when something is billed as edge banding, the additional work
+    when a service was registered. Both sources are the ones the documents
+    already read, so nothing new is stored to answer "does this apply".
+    """
+    types = [ActivityType.cutting]
+    if snapshot.get("edge_bandings_summary"):
+        types.append(ActivityType.banding)
+    if snapshot.get("additional_services"):
+        types.append(ActivityType.additional)
+    return [
+        OrderActivityModel(type=t.value, status=ActivityStatus.pending.value)
+        for t in types
+    ]
+
+
+def _activity_responses(
+    activities: List[OrderActivityModel],
+    *,
+    all_progress: CuttingProgress,
+    banded_progress: CuttingProgress,
+) -> List[OrderActivityResponse]:
+    """Projects activity rows, each with the progress of ITS piece set.
+
+    Takes the two aggregates already computed by the caller instead of querying
+    per activity: the board renders one card per order and would otherwise fire
+    two queries per activity per row.
+    """
+    return [
+        OrderActivityResponse(
+            type=ActivityType(a.type),
+            status=ActivityStatus(a.status),
+            ready_at=a.ready_at,
+            started_at=a.started_at,
+            started_by=a.started_by,
+            started_by_label=a.started_by_label,
+            finished_at=a.finished_at,
+            finished_by=a.finished_by,
+            finished_by_label=a.finished_by_label,
+            progress=(
+                banded_progress
+                if ACTIVITY_PIECES[ActivityType(a.type)] == "banded"
+                else all_progress
+            ),
+        )
+        for a in sorted(activities, key=lambda a: a.type)
+    ]
 
 
 def _progress(pieces: List[OrderPlacedPieceModel]) -> CuttingProgress:

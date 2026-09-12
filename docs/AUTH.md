@@ -92,14 +92,16 @@ route is protected with `Depends(require_permission("<key>"))`.
 | `orders:transition`  | ✅ | ✅ | ✅* | ✅* | `PATCH /orders/{id}/status` (narrowed per-transition by `TRANSITION_ROLES`) |
 | `cutting_plan`       | ✅ | ✅ | ✅ | ❌ | `GET /orders/{id}/cutting-plan` |
 | `orders:cut`         | ✅ | ❌ | ✅ | ❌ | `PATCH /orders/{id}/cutting-plan/pieces/{id}` |
-| `orders:band`        | ✅ | ❌ | ❌ | ✅ | `PATCH /orders/{id}/banding` (start needs the first banded piece cut; finish needs them all) |
+| `orders:activities`  | ✅ | ❌ | ✅* | ✅* | `PATCH /orders/{id}/activities/{type}` (narrowed per-activity by `ACTIVITY_ROLES`) |
 | `orders:workshop`    | ✅ | ❌ | ✅ | ✅ | `GET /orders/workshop-queue` (shared shop-floor board) |
 
-\* `orders:transition` is the coarse gate; which role can perform each
-*specific* transition lives in `TRANSITION_ROLES`
-(`src/modules/orders/model.py`). `operador`/`canteador` get into this permission
-to **complete** orders (`cut → completed`) from the shop-floor board — every
-other transition stays closed to them (dispatch is admin/vendedor only).
+\* Both starred rows are coarse gates, narrowed by a table in
+`src/modules/orders/model.py`: `TRANSITION_ROLES` per (from, to) transition and
+`ACTIVITY_ROLES` per activity (the operator cuts, the `canteador` bands and does
+the additional work). `operador`/`canteador` hold `orders:transition` only for
+the order's closing, which normally happens by itself when the last activity is
+closed — every other transition stays shut to them, and dispatch is
+admin/vendedor only.
 
 ### Order status transitions and roles
 
@@ -107,15 +109,25 @@ other transition stays closed to them (dispatch is admin/vendedor only).
 |------------|----------------|
 | `confirmed → queued` | administrador, vendedor (requires a `payment` body, see below) |
 | `confirmed → cancelled` | administrador, vendedor |
-| `queued → cutting` | administrador, operador |
-| `cutting → queued` (admin rollback) | administrador |
-| `cutting → cut` | administrador, operador |
-| `cut → completed` | administrador, vendedor, operador, canteador (Gate B: banding must be `done`) |
-| `completed → dispatched` | administrador, vendedor (commercial act; the shop floor cannot dispatch) |
+| `queued → in_process` | administrador, operador — **normally derived**: starting the `cutting` activity does it |
+| `in_process → queued` (admin rollback) | administrador (reopens the cut, keeps `queuedAt`) |
+| `in_process → finished` | administrador, vendedor, operador, canteador — **normally derived**: closing the last applicable activity does it. Gated on every activity being `done` |
+| `finished → dispatched` | administrador, vendedor (commercial act; the shop floor cannot dispatch) |
 
-Note: the order status wire value for the final state is the literal string
-`"despachado"` (`OrderStatus.dispatched`), kept in Spanish for backward
-compatibility with the dashboard.
+### Activities (`PATCH /orders/{id}/activities/{type}`)
+
+| Activity | Who | Starts when | Finishes when |
+|---|---|---|---|
+| `cutting` | administrador, operador | free (it IS the cut) | every piece is cut |
+| `banding` | administrador, canteador | the first BANDED piece is cut | every banded piece is cut |
+| `additional` | administrador, canteador | the first piece of any kind is cut | free |
+
+Forward-only (`pending → in_progress → done`) and idempotent. The response
+carries `orderStatus`, because the order may have moved by itself.
+
+Note: `cutting` and `cut` are still valid `OrderStatus` values on **read**, in
+the `history` of any order cut before the activities existed. They are not
+reachable: no transition targets them.
 
 ## Public endpoints (no token)
 

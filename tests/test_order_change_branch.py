@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from src.modules.branches.model import BranchModel
 from src.modules.orders.model import OrderStatusHistoryModel
-from tests.test_order_banding import (
+from tests.order_helpers import (
     _BRANCH,
     _create_board,
     _create_client,
@@ -19,7 +19,7 @@ from tests.test_order_banding import (
     _mint_order,
     _order_with_banding,
     _patch_status,
-    _to_cutting,
+    _to_in_process,
     _token_for,
 )
 
@@ -89,7 +89,7 @@ def test_moving_queued_order_notifies_new_branch_operators(client, db_session: S
 def test_cannot_change_branch_once_cutting_started(client, db_session: Session):
     """Frozen once the shop floor starts: 'cutting' rejects the move (422)."""
     order = _order_with_banding(client, db_session, identifier="0100000314")
-    _to_cutting(client, order["id"])  # confirmed → queued → cutting
+    _to_in_process(client, order["id"])  # confirmed → queued → cutting
     branch2 = _make_branch(db_session)
 
     assert _change_branch(client, order["id"], branch2.id).status_code == 422

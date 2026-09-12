@@ -9,5 +9,7 @@ class NotificationType(str, Enum):
     the model or the endpoints.
     """
 
+    # The order finished every activity. Keeps its wire value: the dashboard maps
+    # it, and the event is the same one -- only the state's name changed.
     order_completed = "order.completed"
     order_queued = "order.queued"

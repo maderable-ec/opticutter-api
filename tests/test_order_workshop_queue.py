@@ -1,16 +1,16 @@
 """Tests for the shared shop-floor board endpoint ``GET /orders/workshop-queue``.
 
 The board is a self-sufficient card list (client + board/banding usage + progress)
-for the operator AND the canteador (who lacks ``orders:read``). It lists orders from
-the queue up to ``cut``; ``confirmed``/``completed``/etc. are excluded. Reuses the
-catalog/order/token helpers of the banding-track suite.
+for the operator AND the canteador (who lacks ``orders:read``). It lists the queue and
+the orders in process; ``confirmed``/``finished``/etc. are excluded. Reuses the shared
+catalog/order/token helpers.
 """
 
 from sqlalchemy.orm import Session
 
 from src.modules.branches.model import BranchModel
 from src.modules.orders.model import OrderModel
-from tests.test_order_banding import (
+from tests.order_helpers import (
     _BRANCH,
     _create_board,
     _create_client,
@@ -20,9 +20,9 @@ from tests.test_order_banding import (
     _order_mixed_pieces,
     _order_with_banding,
     _order_without_banding,
-    _patch_banding,
+    _patch_activity,
     _patch_status,
-    _to_cutting,
+    _to_in_process,
     _token_for,
 )
 
@@ -38,26 +38,31 @@ def _billed_linear_m(db_session, order_id: int) -> float:
     return summary[0]["billed_linear_m"]
 
 
-def test_workshop_queue_lists_queued_through_cut(client, db_session):
-    """Orders in queued / cutting / cut all appear, with a self-sufficient projection."""
+def test_workshop_queue_lists_the_queue_and_the_work(client, db_session):
+    """Queued and in-process orders appear, with a self-sufficient projection."""
     queued = _order_with_banding(client, db_session, identifier="0100000181")
     assert _patch_status(client, queued["id"], "queued").status_code == 200
 
     cutting = _order_with_banding(client, db_session, identifier="0100000199")
-    _to_cutting(client, cutting["id"])
+    _to_in_process(client, cutting["id"])
 
     cut = _order_with_banding(client, db_session, identifier="0100000207")
-    _to_cutting(client, cut["id"])
+    _to_in_process(client, cut["id"])
     _cut_all_pieces(client, cut["id"])
-    assert _patch_status(client, cut["id"], "cut").status_code == 200
+    assert _patch_activity(client, cut["id"], "cutting", "done").status_code == 200
 
     board = client.get(_URL).json()["data"]
     by_id = {i["orderId"]: i for i in board}
     assert {queued["id"], cutting["id"], cut["id"]} <= set(by_id)
 
     item = by_id[cut["id"]]
-    assert item["status"] == "cut"
-    assert item["bandingStatus"] == "pending"
+    # The cut is closed but the banding is not, so the order is still in process --
+    # which is exactly why it is still on the board.
+    assert item["status"] == "in_process"
+    assert {a["type"]: a["status"] for a in item["activities"]} == {
+        "cutting": "done",
+        "banding": "pending",
+    }
     assert item["client"]["firstName"] == "Ada"
     # 1 board, one piece 500×1000mm fits on a single (half) MEL0207 sheet. The
     # row is named after the WHOLE board -- the "(medio tablero)" suffix is a
@@ -196,22 +201,27 @@ def test_workshop_queue_carries_the_branch_printing_switch(client, db_session):
     assert item["printConsolidatedEnabled"] is False
 
 
-def test_workshop_queue_excludes_confirmed_and_completed(client, db_session):
-    """The board only spans the active shop-floor window (queued..cut)."""
+def test_workshop_queue_excludes_confirmed_and_finished(client, db_session):
+    """The board only spans the active shop-floor window (queued + in process)."""
     confirmed = _order_with_banding(client, db_session, identifier="0100000215")
 
-    completed = _order_with_banding(client, db_session, identifier="0100000223")
-    _to_cutting(client, completed["id"])
-    # Cutting comes first: the bander can only close a track whose pieces are cut.
-    _cut_all_pieces(client, completed["id"])
-    assert _patch_banding(client, completed["id"], "in_progress").status_code == 200
-    assert _patch_banding(client, completed["id"], "done").status_code == 200
-    assert _patch_status(client, completed["id"], "cut").status_code == 200
-    assert _patch_status(client, completed["id"], "completed").status_code == 200
+    finished = _order_with_banding(client, db_session, identifier="0100000223")
+    _to_in_process(client, finished["id"])
+    # Cutting comes first: the bander can only close an activity whose pieces are cut.
+    _cut_all_pieces(client, finished["id"])
+    assert (
+        _patch_activity(client, finished["id"], "banding", "in_progress").status_code
+        == 200
+    )
+    assert _patch_activity(client, finished["id"], "banding", "done").status_code == 200
+    closed = _patch_activity(client, finished["id"], "cutting", "done")
+    assert closed.status_code == 200
+    # The last activity closed it: no status call anywhere in this ladder.
+    assert closed.json()["data"]["orderStatus"] == "finished"
 
     ids = {i["orderId"] for i in client.get(_URL).json()["data"]}
     assert confirmed["id"] not in ids  # not yet in the shop
-    assert completed["id"] not in ids  # already closed
+    assert finished["id"] not in ids  # already closed
 
 
 def test_workshop_queue_lists_banding_usage(client, db_session):
@@ -244,7 +254,7 @@ def test_workshop_queue_reports_banded_piece_progress(client, db_session):
     the cutting plan, an endpoint the canteador cannot even reach.
     """
     mixed = _order_mixed_pieces(client, db_session, identifier="0100000280")
-    _to_cutting(client, mixed["id"])
+    _to_in_process(client, mixed["id"])
     _cut_first_banded_piece(client, mixed["id"])
 
     plain = _order_without_banding(client, db_session)
@@ -253,17 +263,19 @@ def test_workshop_queue_reports_banded_piece_progress(client, db_session):
     by_id = {i["orderId"]: i for i in client.get(_URL).json()["data"]}
     # 2 banded + 2 plain pieces, one banded piece cut: the two counters differ.
     assert by_id[mixed["id"]]["progress"] == {"cutPieces": 1, "totalPieces": 4}
-    assert by_id[mixed["id"]]["bandingProgress"] == {"cutPieces": 1, "totalPieces": 2}
-    # No edge banding at all → nothing to gate.
-    assert by_id[plain["id"]]["bandingProgress"] == {"cutPieces": 0, "totalPieces": 0}
+    activities = {a["type"]: a for a in by_id[mixed["id"]]["activities"]}
+    assert activities["banding"]["progress"] == {"cutPieces": 1, "totalPieces": 2}
+    assert activities["cutting"]["progress"] == {"cutPieces": 1, "totalPieces": 4}
+    # No edge banding at all → no banding row to gate.
+    assert "banding" not in {a["type"] for a in by_id[plain["id"]]["activities"]}
 
 
 def test_workshop_queue_is_fifo_oldest_first(client, db_session):
     """FIFO is still the contract between orders of equal priority."""
     o1 = _order_with_banding(client, db_session, identifier="0100000231")
     o2 = _order_with_banding(client, db_session, identifier="0100000249")
-    _to_cutting(client, o1["id"])
-    _to_cutting(client, o2["id"])
+    _to_in_process(client, o1["id"])
+    _to_in_process(client, o2["id"])
     board = client.get(_URL).json()["data"]
     seen = [i["orderId"] for i in board if i["orderId"] in {o1["id"], o2["id"]}]
     assert seen == [o1["id"], o2["id"]]
@@ -274,7 +286,7 @@ def test_workshop_queue_is_fifo_oldest_first(client, db_session):
 def test_workshop_queue_is_branch_scoped(client, db_session: Session):
     """The board is branch-isolated: workshop roles see only their own branch."""
     order = _order_with_banding(client, db_session, identifier="0100000264")
-    _to_cutting(client, order["id"])
+    _to_in_process(client, order["id"])
 
     db_session.add(BranchModel(code="SUCW", name="Sucursal Taller", is_active=True))
     db_session.commit()
@@ -300,7 +312,7 @@ def test_workshop_queue_is_branch_scoped(client, db_session: Session):
 def test_workshop_queue_rbac(client, db_session):
     """Operator + canteador reach the board; seller (no ``orders:workshop``) can't."""
     order = _order_with_banding(client, db_session, identifier="0100000256")
-    _to_cutting(client, order["id"])
+    _to_in_process(client, order["id"])
 
     # The canteador reaches it despite lacking ``orders:read`` (embedded client proves it).
     canteador = _token_for(client, db_session, "canteador")
@@ -325,7 +337,7 @@ def test_workshop_card_carries_the_status_clock(client, db_session):
 
     ``queuedAt`` answers the wait before somebody takes the order; once taken it
     stops moving, so the card needs the current status's own clock to keep
-    counting through ``cutting`` and ``cut``.
+    counting through ``in_process``.
     """
     order = _order_with_banding(client, db_session, identifier="0100000322")
     assert _patch_status(client, order["id"], "queued").status_code == 200
@@ -335,34 +347,41 @@ def test_workshop_card_carries_the_status_clock(client, db_session):
     assert queued_card["statusChangedAt"] is not None
     assert queued_card["queuedAt"] is not None
 
-    _patch_status(client, order["id"], "cutting")
-    cutting_card = {i["orderId"]: i for i in client.get(_URL).json()["data"]}[
+    assert (
+        _patch_activity(client, order["id"], "cutting", "in_progress").status_code
+        == 200
+    )
+    working_card = {i["orderId"]: i for i in client.get(_URL).json()["data"]}[
         order["id"]
     ]
-    # Entering `cutting` moves the status clock but freezes the arrival time --
+    # Entering `in_process` moves the status clock but freezes the arrival time --
     # that split is the whole reason the card gets both.
-    assert cutting_card["statusChangedAt"] > queued_card["statusChangedAt"]
-    assert cutting_card["queuedAt"] == queued_card["queuedAt"]
+    assert working_card["statusChangedAt"] > queued_card["statusChangedAt"]
+    assert working_card["queuedAt"] == queued_card["queuedAt"]
 
 
-def test_workshop_card_carries_the_banding_clocks(client, db_session):
-    """`bandingReadyAt` is null while blocked, then both clocks fill in order."""
+def test_workshop_card_carries_the_activity_clocks(client, db_session):
+    """`readyAt` is null while the activity is blocked, then both clocks fill in order."""
     order = _order_mixed_pieces(client, db_session, identifier="0100000330")
-    _to_cutting(client, order["id"])
+    _to_in_process(client, order["id"])
 
-    def card():
-        return {i["orderId"]: i for i in client.get(_URL).json()["data"]}[order["id"]]
+    def banding():
+        card = {i["orderId"]: i for i in client.get(_URL).json()["data"]}[order["id"]]
+        return {a["type"]: a for a in card["activities"]}["banding"]
 
-    blocked = card()
-    assert blocked["bandingReadyAt"] is None
-    assert blocked["bandingStartedAt"] is None
+    blocked = banding()
+    assert blocked["readyAt"] is None
+    assert blocked["startedAt"] is None
 
     _cut_first_banded_piece(client, order["id"])
-    ready = card()
-    assert ready["bandingReadyAt"] is not None
-    assert ready["bandingStartedAt"] is None
+    ready = banding()
+    assert ready["readyAt"] is not None
+    assert ready["startedAt"] is None
 
-    assert _patch_banding(client, order["id"], "in_progress").status_code == 200
-    started = card()
-    assert started["bandingReadyAt"] == ready["bandingReadyAt"]
-    assert started["bandingStartedAt"] is not None
+    assert (
+        _patch_activity(client, order["id"], "banding", "in_progress").status_code
+        == 200
+    )
+    started = banding()
+    assert started["readyAt"] == ready["readyAt"]
+    assert started["startedAt"] is not None

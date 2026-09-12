@@ -124,6 +124,9 @@ class UserProductivity(CamelModel):
     # Banding (canteador).
     orders_banded: int
     banding_hours: float
+    # Additional work -- perforación, armado, bisagras (canteador too).
+    orders_additional: int = 0
+    additional_hours: float = 0.0
     # Sales (vendedor).
     orders_created: int
     revenue_generated: float

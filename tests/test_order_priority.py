@@ -7,12 +7,12 @@ seeing the highlight is not the same as being able to jump your own queue.
 Reuses the catalog/order/token helpers of the banding-track suite.
 """
 
-from tests.test_order_banding import (
+from tests.order_helpers import (
     _cut_all_pieces,
     _order_with_banding,
-    _patch_banding,
+    _patch_activity,
     _patch_status,
-    _to_cutting,
+    _to_in_process,
     _token_for,
 )
 
@@ -38,7 +38,7 @@ def test_priority_order_jumps_the_queue(client, db_session):
     second = _order_with_banding(client, db_session, identifier="0100000199")
     third = _order_with_banding(client, db_session, identifier="0100000207")
     for order in (first, second, third):
-        _to_cutting(client, order["id"])
+        _to_in_process(client, order["id"])
     ids = {o["id"] for o in (first, second, third)}
     assert _board_ids(client, ids) == [first["id"], second["id"], third["id"]]
 
@@ -57,7 +57,7 @@ def test_priority_keeps_fifo_among_prioritized_orders(client, db_session):
     second = _order_with_banding(client, db_session, identifier="0100000223")
     third = _order_with_banding(client, db_session, identifier="0100000231")
     for order in (first, second, third):
-        _to_cutting(client, order["id"])
+        _to_in_process(client, order["id"])
     ids = {o["id"] for o in (first, second, third)}
 
     # Marked youngest-first, so the board can't be echoing the order they were marked in.
@@ -70,8 +70,8 @@ def test_priority_can_be_withdrawn(client, db_session):
     """Reversible: unmarking puts the order back in its FIFO place."""
     first = _order_with_banding(client, db_session, identifier="0100000249")
     second = _order_with_banding(client, db_session, identifier="0100000256")
-    _to_cutting(client, first["id"])
-    _to_cutting(client, second["id"])
+    _to_in_process(client, first["id"])
+    _to_in_process(client, second["id"])
     ids = {first["id"], second["id"]}
 
     assert _set_priority(client, second["id"], True).status_code == 200
@@ -86,7 +86,7 @@ def test_priority_can_be_withdrawn(client, db_session):
 def test_priority_records_history_and_is_idempotent(client, db_session):
     """One history row per real change; re-marking writes nothing."""
     order = _order_with_banding(client, db_session, identifier="0100000264")
-    _to_cutting(client, order["id"])
+    _to_in_process(client, order["id"])
     before = len(client.get(f"{_URL}/{order['id']}").json()["data"]["history"])
 
     assert _set_priority(client, order["id"], True).status_code == 200
@@ -94,7 +94,7 @@ def test_priority_records_history_and_is_idempotent(client, db_session):
     assert len(history) == before + 1
     entry = history[-1]
     # Not a state transition: from == to, and the note says what happened.
-    assert entry["fromStatus"] == entry["toStatus"] == "cutting"
+    assert entry["fromStatus"] == entry["toStatus"] == "in_process"
     assert entry["note"] == "Marcada como prioritaria"
 
     # Re-marking is a no-op: no second row.
@@ -107,7 +107,7 @@ def test_priority_records_history_and_is_idempotent(client, db_session):
 def test_priority_accepts_a_note(client, db_session):
     """The reason travels into the order's timeline instead of the default text."""
     order = _order_with_banding(client, db_session, identifier="0100000272")
-    _to_cutting(client, order["id"])
+    _to_in_process(client, order["id"])
     resp = client.patch(
         f"{_URL}/{order['id']}/priority",
         json={"isPriority": True, "note": "Cliente viaja mañana"},
@@ -118,14 +118,16 @@ def test_priority_accepts_a_note(client, db_session):
 
 
 def test_priority_is_refused_on_a_closed_order(client, db_session):
-    """Prioritizing a completed order means nothing -- the board doesn't list it."""
+    """Prioritizing a finished order means nothing -- the board doesn't list it."""
     order = _order_with_banding(client, db_session, identifier="0100000280")
-    _to_cutting(client, order["id"])
+    _to_in_process(client, order["id"])
     _cut_all_pieces(client, order["id"])
-    assert _patch_status(client, order["id"], "cut").status_code == 200
-    assert _patch_banding(client, order["id"], "in_progress").status_code == 200
-    assert _patch_banding(client, order["id"], "done").status_code == 200
-    assert _patch_status(client, order["id"], "completed").status_code == 200
+    assert (
+        _patch_activity(client, order["id"], "banding", "in_progress").status_code
+        == 200
+    )
+    assert _patch_activity(client, order["id"], "banding", "done").status_code == 200
+    assert _patch_activity(client, order["id"], "cutting", "done").status_code == 200
 
     resp = _set_priority(client, order["id"], True)
     assert resp.status_code == 422
@@ -135,7 +137,7 @@ def test_priority_is_refused_on_a_closed_order(client, db_session):
 def test_priority_rbac(client, db_session):
     """Admin/seller mark it; the shop floor sees the flag but cannot set it."""
     order = _order_with_banding(client, db_session, identifier="0100000298")
-    _to_cutting(client, order["id"])
+    _to_in_process(client, order["id"])
 
     # The two workshop roles lack ``orders:write``: they must not jump their own queue.
     for role in ("operador", "canteador"):
@@ -194,7 +196,7 @@ def test_priority_still_wins_over_the_queue_entry(client, db_session):
 
 
 def test_admin_rollback_keeps_the_order_place_in_line(client, db_session):
-    """``cutting → queued`` undoes a wrong take; it must not re-date the arrival.
+    """``in_process → queued`` undoes a wrong take; it must not re-date the arrival.
 
     Sending the order to the back of the line would charge the client for a
     mistake that was not theirs.
@@ -208,7 +210,10 @@ def test_admin_rollback_keeps_the_order_place_in_line(client, db_session):
     queued_at = client.get(f"{_URL}/{first['id']}").json()["data"]["queuedAt"]
 
     # Taken by mistake and rolled back by the admin.
-    assert _patch_status(client, first["id"], "cutting").status_code == 200
+    assert (
+        _patch_activity(client, first["id"], "cutting", "in_progress").status_code
+        == 200
+    )
     assert _patch_status(client, first["id"], "queued").status_code == 200
 
     assert client.get(f"{_URL}/{first['id']}").json()["data"]["queuedAt"] == queued_at

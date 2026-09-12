@@ -49,12 +49,16 @@ def resolve_plan(
 ) -> Optional[NotificationPlan]:
     """Maps a transition to a notification plan (``None`` if it isn't notified).
 
-    Pure and DB-free (unit-testable): ``-> completed`` notifies the global
+    Pure and DB-free (unit-testable): ``-> finished`` notifies the global
     admins/sellers; the real enqueue ``confirmed -> queued`` notifies the branch
-    operators. The admin rollback ``cutting -> queued`` and every other
+    operators. The admin rollback ``in_process -> queued`` and every other
     transition produce nothing.
+
+    ``-> finished`` normally arrives DERIVED from the last activity closing, so
+    this is what tells the office the work is done without anybody pressing a
+    button for it.
     """
-    if to_status == OrderStatus.completed:
+    if to_status == OrderStatus.finished:
         return NotificationPlan(
             NotificationType.order_completed, _Audience.GLOBAL_ADMINS_SELLERS
         )
@@ -78,8 +82,8 @@ def _render(notification_type: NotificationType, order) -> Tuple[str, str]:
     code = order.code or f"#{order.id}"
     if notification_type is NotificationType.order_completed:
         return (
-            f"Orden {code} completada",
-            f"La orden {code} fue marcada como completada.",
+            f"Orden {code} terminada",
+            f"La orden {code} terminó todo su trabajo de taller.",
         )
     return (
         f"Orden {code} en cola",

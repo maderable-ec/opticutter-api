@@ -14,7 +14,7 @@ from src.modules.optimizations.schemas import (
     Requirement,
     validate_material_graph,
 )
-from src.modules.orders.model import BandingStatus, OrderStatus
+from src.modules.orders.model import ActivityStatus, ActivityType, OrderStatus
 from src.shared.schemas import CamelModel
 
 
@@ -226,6 +226,57 @@ class OrderStatusHistoryResponse(CamelModel):
     created_at: datetime
 
 
+class CuttingProgress(CamelModel):
+    """Cutting progress: pieces cut out of the total."""
+
+    cut_pieces: int
+    total_pieces: int
+
+
+class OrderActivityResponse(CamelModel):
+    """One activity of an order in process, with its clocks and its own progress.
+
+    ``progress`` counts the pieces of THIS activity's set (every piece for the
+    cut and for the additional work, only the banded ones for the banding), so
+    the card can say how many are missing before the activity may close. It is
+    optional because the order detail serializes these rows straight from the
+    table; see the field.
+    """
+
+    type: ActivityType
+    status: ActivityStatus
+    ready_at: Optional[datetime] = Field(
+        default=None,
+        description="When the activity stopped being BLOCKED: the order reached "
+        "the queue (cut) or the first piece of its set was cut (banding, "
+        "additional). NULL while nobody is allowed to work yet -- which is the "
+        "right answer, not missing data, so a pending clock never runs against "
+        "somebody who could not have started",
+    )
+    started_at: Optional[datetime] = None
+    started_by: Optional[int] = Field(
+        default=None, description="User id who started it (null while pending)"
+    )
+    started_by_label: Optional[str] = Field(
+        default=None, description="Frozen name of who started it"
+    )
+    finished_at: Optional[datetime] = None
+    finished_by: Optional[int] = Field(
+        default=None, description="User id who finished it"
+    )
+    finished_by_label: Optional[str] = Field(
+        default=None, description="Frozen name of who finished it"
+    )
+    progress: Optional[CuttingProgress] = Field(
+        default=None,
+        description="Cut pieces out of the total among THIS activity's pieces: "
+        "every piece for cut/additional, only the banded ones for banding. Filled "
+        "by the three shop-floor surfaces (board, cutting plan, activity result), "
+        "which is where it is the gate signal; NULL on the order detail, whose "
+        "rows are serialized straight from the table and would each cost a count",
+    )
+
+
 class OrderResponse(CamelModel):
     id: int
     code: Optional[str] = None
@@ -298,30 +349,12 @@ class OrderResponse(CamelModel):
     payment_credit_amount: Optional[float] = Field(
         default=None, description="Credit amount (registered on confirmed → queued)"
     )
-    banding_status: BandingStatus = Field(
-        default=BandingStatus.not_applicable,
-        description="Parallel edge-banding track (not_applicable if no edge banding)",
-    )
-    banding_ready_at: Optional[datetime] = Field(
-        default=None,
-        description="When the banding stopped being blocked: the first banded "
-        "piece was cut, which is the gate to start banding. NULL while the bander "
-        "still cannot work -- so a 'pending' clock only runs once somebody is "
-        "actually late",
-    )
-    banding_started_at: Optional[datetime] = None
-    banding_started_by: Optional[int] = Field(
-        default=None, description="User id who started banding (null while pending)"
-    )
-    banding_started_by_label: Optional[str] = Field(
-        default=None, description="Frozen name of who started banding"
-    )
-    banding_finished_at: Optional[datetime] = None
-    banding_finished_by: Optional[int] = Field(
-        default=None, description="User id who finished banding"
-    )
-    banding_finished_by_label: Optional[str] = Field(
-        default=None, description="Frozen name of who finished banding"
+    activities: List[OrderActivityResponse] = Field(
+        default_factory=list,
+        description="The parallel work of an order in process: one entry per "
+        "APPLICABLE activity (cut always; banding with edge banding; additional "
+        "with additional services). A missing entry means the activity does not "
+        "apply to this order",
     )
     lines: List[OrderLineResponse] = Field(default_factory=list)
     pieces: List[OrderPieceResponse] = Field(default_factory=list)
@@ -352,13 +385,6 @@ class PlacedPieceResponse(CamelModel):
     cut_by_label: Optional[str] = Field(
         default=None, description="Frozen name of who cut the piece"
     )
-
-
-class CuttingProgress(CamelModel):
-    """Cutting progress: pieces cut out of the total."""
-
-    cut_pieces: int
-    total_pieces: int
 
 
 class BoardUsage(CamelModel):
@@ -430,6 +456,12 @@ class CuttingPlanResponse(CamelModel):
         description="Commercial reference (project/site) frozen on the order",
     )
     progress: CuttingProgress
+    activities: List[OrderActivityResponse] = Field(
+        default_factory=list,
+        description="The order's activities: with cutting and cut merged into one "
+        "order status, this is what tells the touch view whether the cut is still "
+        "open (and lets it show the banding track read-only)",
+    )
     boards: List[OrderBoardResponse] = Field(default_factory=list)
     print_labels_enabled: bool = Field(
         ...,
@@ -452,23 +484,36 @@ class PieceCutResponse(CamelModel):
     board_progress: CuttingProgress = Field(..., description="Affected board progress")
 
 
-class BandingUpdate(CamelModel):
-    """Banding-track transition requested by the bander."""
+class ActivityUpdate(CamelModel):
+    """Activity transition requested from the shop floor."""
 
-    status: BandingStatus = Field(
-        ..., description="Target banding status: in_progress (start) | done (finish)"
+    status: ActivityStatus = Field(
+        ..., description="Target status: in_progress (start) | done (finish)"
     )
-    note: Optional[str] = Field(default=None, max_length=512)
+    note: Optional[str] = Field(
+        default=None,
+        max_length=512,
+        description="Rides on the order's history row when the activity derives "
+        "a transition of the order itself",
+    )
 
 
-class BandingStatusResponse(CamelModel):
-    """Minimal banding view for the bander (no prices or order detail)."""
+class ActivityResult(CamelModel):
+    """Result of registering an activity, for the shop floor (no prices).
+
+    Carries ``order_status`` because the order's own status is DERIVED from the
+    activities: starting the first one moves the order to ``in_process`` and
+    closing the last applicable one moves it to ``finished``. Whoever registered
+    the activity has to learn about that without fetching the order -- the card
+    leaves the board and the touch view turns read-only.
+    """
 
     order_id: int
     order_code: Optional[str] = None
-    banding_status: BandingStatus
-    banding_started_at: Optional[datetime] = None
-    banding_finished_at: Optional[datetime] = None
+    order_status: OrderStatus = Field(
+        ..., description="The order's status AFTER any derived transition"
+    )
+    activity: OrderActivityResponse
 
 
 class AttachmentResponse(CamelModel):
@@ -497,9 +542,6 @@ class WorkshopQueueItem(CamelModel):
     order_id: int
     order_code: Optional[str] = None
     status: OrderStatus = Field(..., description="Cutting-track status of the order")
-    banding_status: BandingStatus = Field(
-        ..., description="Parallel banding-track status (drives the banding actions)"
-    )
     notes: Optional[str] = Field(
         default=None,
         description="Commercial reference (project/site): tells apart several "
@@ -523,14 +565,6 @@ class WorkshopQueueItem(CamelModel):
         "using queuedAt instead -- the admin rollback cutting -> queued moves this "
         "one and would hide an order that has been waiting all day",
     )
-    banding_ready_at: Optional[datetime] = Field(
-        default=None,
-        description="When the banding stopped being blocked (first banded piece "
-        "cut). NULL while the bander cannot work yet",
-    )
-    banding_started_at: Optional[datetime] = Field(
-        default=None, description="When the bander started (null while pending)"
-    )
     client: ClientResponse = Field(..., description="Client the order belongs to")
     board_usage: List[BoardUsage] = Field(
         default_factory=list,
@@ -544,11 +578,12 @@ class WorkshopQueueItem(CamelModel):
     progress: CuttingProgress = Field(
         ..., description="Cut pieces out of the total (0/0 if not yet materialized)"
     )
-    banding_progress: CuttingProgress = Field(
-        ...,
-        description="Cut pieces out of the total among the BANDED ones only: the "
-        "bander's gate -- starting needs the first one cut, finishing needs them "
-        "all. 0/0 when the order carries no edge banding",
+    activities: List[OrderActivityResponse] = Field(
+        default_factory=list,
+        description="One entry per applicable activity, each with its own status, "
+        "clocks and piece progress -- which is what drives the card's buttons and "
+        "their blocked reasons. The bander cannot reach the cutting plan, so the "
+        "per-activity counts have to ride here",
     )
     print_consolidated_enabled: bool = Field(
         ...,
