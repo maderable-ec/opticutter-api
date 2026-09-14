@@ -8,8 +8,11 @@ price level.
 Business rules (decided with the user):
 - **Lines are already final.** The seller picks one price level per quote and
   marks board by board which ones get it; ``price_levels.apply_price_level``
-  rewrites those lines before this runs. So there is no discount adjustment
-  here: the subtotal IS the sum of what the document prints.
+  rewrites those lines before this runs. So there is no discount *adjustment*
+  here: the subtotal IS the sum of what the document prints. ``discount_amount``
+  and ``list_subtotal`` are reported beside it and change no total — they answer
+  "how much off list is this", which is the one thing a different unit price per
+  product hides from the client.
 - **Everything is net, once.** The catalog stores the vendor's net prices, and
   additional services — which staff registers **tax-included**, because that is
   how their price list is written — are converted to net here. One tax line then
@@ -35,7 +38,8 @@ def build_pricing(
 
     ``payload`` must have been through ``apply_price_level`` (the optimization
     service does it inside ``compute``), so ``total_boards_cost`` is what the
-    marked boards actually cost at ``price_level``. ``price_level`` is carried
+    marked boards actually cost at ``price_level`` and ``price_level_discount``
+    is how far below list that landed. ``price_level`` is carried
     only to name it on the document and freeze it on the order. Returns a
     serializable dict exposed in the response and frozen into the order's
     snapshot/columns.
@@ -53,9 +57,18 @@ def build_pricing(
     )
     subtotal = round(boards + edge + services_total, 2)
     tax_amount = round(subtotal * tax_rate, 2)
+    # Measured by ``price_levels.level_discount`` over the finished plan and
+    # carried on the payload, so every surface reporting money gets it from the
+    # one place that computed it. The reference is the whole document at level 1
+    # — edge banding and services are in it because neither ever takes a level,
+    # which is also what makes ``list_subtotal - discount_amount == subtotal``
+    # true by construction rather than by arithmetic done twice.
+    discount_amount = payload.get("price_level_discount", 0.0)
     return {
         "price_level": price_level,
         "price_level_name": PRICE_LEVEL_NAMES.get(price_level),
+        "discount_amount": discount_amount,
+        "list_subtotal": round(subtotal + discount_amount, 2),
         "subtotal": subtotal,
         "services_total": services_total,
         "tax_rate": tax_rate,

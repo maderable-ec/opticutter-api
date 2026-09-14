@@ -6,11 +6,21 @@ front would put it in the hash and make a checkbox re-run the search. What it
 must guarantee: only the marked catalog boards move, the half board keeps its
 half-plus-markup formula, the totals and the summary follow, and it is a strict
 no-op when there is nothing to change.
+
+``level_discount`` reads the same plan back the other way round — how far below
+the list price it landed — and its one hard case is the half board the client
+took whole, which is discounted twice over and only says so once the promotion
+has run.
 """
 
 from src.modules.optimizations.patterns import group_layouts
-from src.modules.optimizations.price_levels import apply_price_level, price_at_level
+from src.modules.optimizations.price_levels import (
+    apply_price_level,
+    level_discount,
+    price_at_level,
+)
 from src.modules.optimizations.summary import build_materials_summary
+from src.modules.optimizations.whole_boards import apply_whole_boards
 
 FULL_W = 1220.0
 HALF_W = 610.0
@@ -191,3 +201,74 @@ def test_the_total_is_a_delta_so_a_pooled_offcut_is_never_billed():
     )
     result = apply_price_level(payload, {"b1": LEVEL_2}, MARKUP)
     assert result["total_boards_cost"] == LEVEL_2
+
+
+# --- level_discount ---------------------------------------------------------------
+def test_a_marked_board_is_discounted_against_the_list_price():
+    payload = apply_price_level(_payload(), {"b1": LEVEL_2}, MARKUP)
+    assert level_discount(payload, {"b1": LIST}, MARKUP) == round(LIST - LEVEL_2, 2)
+
+
+def test_nothing_marked_is_no_discount():
+    """Level 1, or a quote where the seller marked no board at all."""
+    assert level_discount(_payload(), {}, MARKUP) == 0.0
+
+
+def test_a_board_priced_the_same_at_every_level_discounts_nothing():
+    """More than half the catalog, plus every level the vendor never loaded."""
+    assert level_discount(_payload(), {"b1": LIST}, MARKUP) == 0.0
+
+
+def test_an_unmarked_board_never_contributes():
+    """It bills at list, so the caller leaves it out of the reference map."""
+    payload = _payload(
+        layouts=[_layout(key="b1"), _layout(key="b2", sheet_number=2)],
+        materials=[_material(key="b1"), _material(key="b2")],
+        boards_cost=LIST * 2,
+    )
+    payload = apply_price_level(payload, {"b1": LEVEL_2}, MARKUP)
+    assert level_discount(payload, {"b1": LIST}, MARKUP) == round(LIST - LEVEL_2, 2)
+
+
+def test_the_clients_own_retazo_is_never_discounted():
+    """It is not in the reference map, which is the whole filter: its cost comes
+    from the request, not from a catalog that has levels."""
+    payload = _payload(
+        layouts=[_layout(key="b1"), _layout(key="r1", sheet_number=2, cost=0.0)],
+        materials=[
+            _material(key="b1"),
+            _material(key="r1", source="clientOffcut", cost=0.0),
+        ],
+        boards_cost=LIST,
+    )
+    payload = apply_price_level(payload, {"b1": LEVEL_2}, MARKUP)
+    assert level_discount(payload, {"b1": LIST}, MARKUP) == round(LIST - LEVEL_2, 2)
+
+
+def test_a_half_board_is_discounted_by_half_plus_markup():
+    payload = _payload(
+        layouts=[_layout(half=True, cost=HALF_LIST)], boards_cost=HALF_LIST
+    )
+    payload = apply_price_level(payload, {"b1": LEVEL_2}, MARKUP)
+    assert level_discount(payload, {"b1": LIST}, MARKUP) == round(
+        HALF_LIST - HALF_LEVEL_2, 2
+    )
+
+
+def test_a_half_board_taken_whole_is_discounted_as_a_whole_board():
+    """The case that forces this to be measured on the FINAL payload.
+
+    ``apply_whole_boards`` re-bills the sheet at the material's ``cost_per_unit``,
+    which is by then the level's price, so the client who takes the board whole
+    gets the whole board's discount — twice the half's. Measured inside
+    ``apply_price_level`` (before the promotion) it would report half of it.
+    """
+    payload = _payload(
+        layouts=[_layout(half=True, cost=HALF_LIST)], boards_cost=HALF_LIST
+    )
+    payload = apply_price_level(payload, {"b1": LEVEL_2}, MARKUP)
+    payload = apply_whole_boards(payload, ["b1"])
+
+    assert payload["layouts"][0]["material"]["half_board"] is False
+    assert payload["layouts"][0]["material"]["cost_per_unit"] == LEVEL_2
+    assert level_discount(payload, {"b1": LIST}, MARKUP) == round(LIST - LEVEL_2, 2)

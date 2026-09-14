@@ -34,7 +34,12 @@ from src.modules.optimizations.patterns import (
     group_layouts,
     order_sheets,
 )
-from src.modules.optimizations.price_levels import apply_price_level, price_at_level
+from src.modules.optimizations.price_levels import (
+    apply_price_level,
+    half_board_price,
+    level_discount,
+    price_at_level,
+)
 from src.modules.optimizations.pricing import build_pricing
 from src.modules.optimizations.schemas import (
     STRATEGY_TO_PACKING,
@@ -333,16 +338,25 @@ class OptimizationService:
         Applied on BOTH paths (cache hit and cold compute) through this single
         helper so the two can't drift, and after ``_log_compute`` so a bug here
         can never break the log's promise that it never fails a quote. Two
-        passes today, and the ORDER MATTERS: the price level first, because
-        ``apply_whole_boards`` reads a material's ``cost_per_unit`` as the whole
-        sheet's price when it promotes a half, and that has to already be the
-        level's price.
+        passes that move money, and the ORDER MATTERS: the price level first,
+        because ``apply_whole_boards`` reads a material's ``cost_per_unit`` as
+        the whole sheet's price when it promotes a half, and that has to already
+        be the level's price. Then the discount, which moves nothing and only
+        measures what those two did.
 
         ``resolved`` carries the levels (never serialized into the payload, so
         they can't go stale behind the cache); the tax is added afterwards, by
         ``build_pricing`` over the summary these rebuilt.
         """
         leveled = request.leveled_material_keys
+        # Resolved once: what these boards are billed at and what they would have
+        # been billed at are the same selection read two ways, and a predicate
+        # written twice is how the level and its discount would drift apart.
+        marked = {
+            key: material
+            for key, material in resolved.items()
+            if material.is_catalog and key in leveled
+        }
         level_prices = {
             key: price_at_level(
                 material.cost_per_unit,
@@ -350,11 +364,26 @@ class OptimizationService:
                 material.price_3,
                 request.price_level,
             )
-            for key, material in resolved.items()
-            if material.is_catalog and key in leveled
+            for key, material in marked.items()
         }
         payload = apply_price_level(payload, level_prices, half_board_markup_pct)
-        return apply_whole_boards(payload, request.whole_board_material_keys)
+        payload = apply_whole_boards(payload, request.whole_board_material_keys)
+
+        # Informative, and measured LAST: the promotion above re-bills a half
+        # sheet as a whole board at the level's price, so the discount on a
+        # board the client took whole is only visible once the plan is final.
+        # A copy rather than a key written in place, because on the cache-hit
+        # path both passes above return the very object they were handed when
+        # they are no-ops. The cache was written before any of this, so the key
+        # never reaches Redis.
+        discount = level_discount(
+            payload,
+            {key: material.cost_per_unit for key, material in marked.items()},
+            half_board_markup_pct,
+        )
+        if not discount:
+            return payload
+        return {**payload, "price_level_discount": discount}
 
     def _log_compute(
         self,
@@ -566,8 +595,8 @@ class OptimizationService:
             width=width,
             height=height,
             thickness=material.thickness,
-            cost_per_unit=round(
-                material.cost_per_unit / 2.0 * (1 + half_board_markup_pct), 2
+            cost_per_unit=half_board_price(
+                material.cost_per_unit, half_board_markup_pct
             ),
             half_board=True,
         )

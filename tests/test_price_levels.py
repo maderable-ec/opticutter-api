@@ -1,9 +1,10 @@
 """Tests for the catalog price levels and the explicit sales tax.
 
 Covers: the pure ``build_pricing`` transform, the tax config (GET/PATCH), the
-level selection in the pre-order (quote), the freeze + dedupe in the order, and
-the public review projection. The re-pricing pass itself
-(``apply_price_level``) is unit-tested in ``tests/unit/test_price_levels.py``.
+level selection in the pre-order (quote), the freeze + dedupe in the order, the
+discount reported against the list price, and the public review projection. The
+re-pricing pass itself (``apply_price_level``) and the discount measurement
+(``level_discount``) are unit-tested in ``tests/unit/test_price_levels.py``.
 """
 
 from src.modules.optimizations.pricing import build_pricing
@@ -27,6 +28,25 @@ def test_build_pricing_adds_the_tax_over_everything():
     assert p["total"] == 138.0
     assert p["price_level"] == 1
     assert p["price_level_name"] == "Precio 1"
+
+
+def test_build_pricing_reports_the_discount_without_moving_a_total():
+    """The reference is the whole document at level 1, so the two always close."""
+    payload = {**_payload(boards=100.0, edge=20.0), "price_level_discount": 15.0}
+    p = build_pricing(payload, 2, None, 0.15)
+    assert p["discount_amount"] == 15.0
+    assert p["list_subtotal"] == 135.0
+    assert p["list_subtotal"] - p["discount_amount"] == p["subtotal"] == 120.0
+    # Nothing else moved: the lines are already final.
+    assert p["tax_amount"] == 18.0
+    assert p["total"] == 138.0
+
+
+def test_build_pricing_reports_no_discount_when_the_payload_carries_none():
+    """Level 1, nothing marked, or an order snapshot frozen before the field."""
+    p = build_pricing(_payload(boards=100.0), 1, None, 0.15)
+    assert p["discount_amount"] == 0.0
+    assert p["list_subtotal"] == p["subtotal"] == 100.0
 
 
 def test_build_pricing_names_the_level():
@@ -125,8 +145,11 @@ def test_preorder_bills_the_marked_board_at_the_chosen_level(client):
     assert pricing["subtotal"] == 40.0  # the level's price, not 45.5
     assert pricing["taxAmount"] == 6.0
     assert pricing["total"] == 46.0
-    # The line itself carries the level's price: there is no discount row.
+    # The line itself carries the level's price: no total is derived from a
+    # discount. The discount is reported beside it, as the seller's argument.
     assert data["optimization"]["materialsSummary"][0]["costPerUnit"] == 40.0
+    assert pricing["discountAmount"] == 5.5  # 45.50 list - 40.00 at level 2
+    assert pricing["listSubtotal"] == 45.5
 
 
 def test_preorder_without_marked_boards_is_billed_at_list_price(client):
@@ -142,6 +165,9 @@ def test_preorder_without_marked_boards_is_billed_at_list_price(client):
     ]["pricing"]
     assert pricing["priceLevel"] == 2  # still the selected one
     assert pricing["subtotal"] == 45.5
+    # Nothing was marked, so there is nothing to claim.
+    assert pricing["discountAmount"] == 0.0
+    assert pricing["listSubtotal"] == 45.5
 
 
 def test_a_level_the_catalog_never_loaded_falls_back_to_the_list_price(client):
@@ -155,6 +181,9 @@ def test_a_level_the_catalog_never_loaded_falls_back_to_the_list_price(client):
         "optimization"
     ]["pricing"]
     assert pricing["subtotal"] == 45.5
+    # And a fallback is not a discount of zero dollars off nothing: it is no
+    # discount at all, so the row never shows.
+    assert pricing["discountAmount"] == 0.0
 
 
 def test_preorder_level_selection_survives_an_edit(client):
@@ -316,3 +345,6 @@ def test_public_review_reflects_the_level_and_the_tax(client, db_session):
     assert review["taxAmount"] == 6.0
     assert review["total"] == 46.0
     assert review["priceLevelName"] == "Precio 2"
+    # What the client is here to see: how much off the list price this is.
+    assert review["discountAmount"] == 5.5
+    assert review["listSubtotal"] == 45.5
