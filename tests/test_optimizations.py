@@ -297,22 +297,23 @@ def test_changing_the_price_level_reprices_without_touching_the_hash(client):
     created_client = _create_client(client)
     created_board = _create_board(client, price_2=40.0)
 
-    base = _optimize_payload(created_client["id"], created_board["id"])
+    base = _full_board_payload(created_client["id"], created_board["id"], quantity=1)
     base["priceLevel"] = 2
     plain = client.post("/api/v1/optimize/", json=base).json()["data"]
 
-    marked = _optimize_payload(created_client["id"], created_board["id"])
+    marked = _full_board_payload(created_client["id"], created_board["id"], quantity=1)
     marked["priceLevel"] = 2
     marked["materials"][0]["applyPriceLevel"] = True
     leveled = client.post("/api/v1/optimize/", json=marked).json()["data"]
 
     assert leveled["optimizationHash"] == plain["optimizationHash"]
-    # This job fits half a board, so both are billed as one: 45.5/2*1.10 = 25.03
-    # at list, 40.0/2*1.10 = 22.00 at level 2. Unmarked bills at list; marked
-    # bills at the level, and the line itself moves — there is no discount row.
-    assert plain["totalBoardsCost"] == 25.03
-    assert leveled["totalBoardsCost"] == 22.0
-    assert leveled["materialsSummary"][0]["costPerUnit"] == 22.0
+    # A WHOLE board on purpose: the level never reaches a half (see
+    # ``test_the_level_never_reaches_a_half_board``), so a job billed as a half
+    # would assert nothing here. Unmarked bills at list; marked bills at the
+    # level, and the line itself moves — there is no discount row.
+    assert plain["totalBoardsCost"] == 45.5
+    assert leveled["totalBoardsCost"] == 40.0
+    assert leveled["materialsSummary"][0]["costPerUnit"] == 40.0
     assert leveled["pricing"]["total"] < plain["pricing"]["total"]
 
 
@@ -1521,12 +1522,39 @@ def test_whole_board_is_ignored_on_inline_materials(client):
     assert a == b
 
 
+def test_the_level_never_reaches_a_half_board(client):
+    """A medio tablero is billed off the LIST price even on a marked board.
+
+    The level is a concession on the whole plank and the half already carries
+    its markup (the shop keeps the other half), so letting the level through
+    would rebate the same board twice. Reported at the counter as pre-order 54:
+    a marked board at level 3 billed its half at 29.65 instead of 32.40.
+    """
+    created_client = _create_client(client)
+    created_board = _create_board(client, price_2=40.0)
+
+    payload = _sparse_payload(created_client["id"], created_board["id"])
+    payload["priceLevel"] = 2
+    payload["materials"][0]["applyPriceLevel"] = True
+    data = client.post("/api/v1/optimize/", json=payload).json()["data"]
+
+    line = data["materialsSummary"][0]
+    assert line["halfBoard"] is True
+    # 45.5/2*1.10, not 40.0/2*1.10 = 22.00.
+    assert line["costPerUnit"] == 25.03
+    assert data["totalBoardsCost"] == 25.03
+    # And it saves the client nothing, so there is nothing to report as one.
+    assert data["pricing"]["discountAmount"] == 0.0
+
+
 def test_whole_board_and_price_level_compose(client):
     """Level first, promote after: the whole sheet is billed at the level's price.
 
     The order matters — ``apply_whole_boards`` reads the material's
     ``cost_per_unit`` as the full sheet's price, so it has to already be the
-    level's or the promotion would restore the list price.
+    level's or the promotion would restore the list price. This is also the ONE
+    way a level ever reaches a sheet the search billed as a half: by then it is
+    a full board, delivered and billed as one.
     """
     created_client = _create_client(client)
     created_board = _create_board(client, price_2=40.0)
