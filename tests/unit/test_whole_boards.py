@@ -262,3 +262,82 @@ def test_other_materials_are_left_alone():
     assert result["total_boards_cost"] == round(
         2 * HALF_COST + (FULL_COST - HALF_COST), 2
     )
+
+
+# --- the half ripped along the other axis ---------------------------------------
+# Plywood and MDF ranurado are cut parallel to the lado corto, so their half
+# keeps the full width and halves the height. ``_promote`` reads which axis was
+# ripped off the geometry (it runs after the cache and only ever sees the
+# payload), so both shapes have to work — and a payload that looks like neither
+# has to be refused rather than guessed at.
+HALF_H = H / 2
+
+
+def _short_layout(key="b1", sheet_number=1, used_area=180_000.0):
+    """A half board of the same material ripped parallel to the lado corto."""
+    layout = _layout(key=key, half=True, sheet_number=sheet_number, used_area=used_area)
+    layout["material"]["width"] = FULL_W
+    layout["material"]["height"] = HALF_H
+    layout["material"]["area"] = FULL_W * HALF_H
+    layout["statistics"]["waste_area"] = FULL_W * HALF_H - used_area
+    layout["statistics"]["efficiency"] = round(used_area / (FULL_W * HALF_H) * 100, 2)
+    return layout
+
+
+def test_short_side_half_is_promoted_to_the_whole_sheet():
+    payload = _payload(layouts=[_short_layout()])
+    material = apply_whole_boards(payload, {"b1"})["layouts"][0]["material"]
+    assert material["half_board"] is False
+    assert material["width"] == FULL_W
+    assert material["height"] == H
+    assert material["area"] == FULL_W * H
+    assert material["cost_per_unit"] == FULL_COST
+
+
+def test_short_side_remainder_is_the_untouched_half_above_the_cut():
+    payload = _payload(layouts=[_short_layout()])
+    remainders = apply_whole_boards(payload, {"b1"})["layouts"][0]["remainders"]
+    assert remainders[-1] == {
+        "x": 0.0,
+        "y": HALF_H,
+        "width": FULL_W,
+        "height": H - HALF_H,
+    }
+
+
+def test_short_side_rip_is_a_crosscut_along_the_width():
+    payload = _payload(layouts=[_short_layout()])
+    cuts = apply_whole_boards(payload, {"b1"})["layouts"][0]["cuts"]
+    assert cuts[0] == {"x": 0.0, "y": HALF_H, "length": FULL_W, "is_horizontal": True}
+
+
+def test_short_side_cut_meters_grow_by_the_width_not_the_height():
+    """The rip runs the length of the side it does NOT shorten — getting this
+    backwards is invisible on the diagram but wrong on the metres."""
+    result = apply_whole_boards(_payload(layouts=[_short_layout()]), {"b1"})
+    assert result["layouts"][0]["statistics"]["cut_linear_m"] == round(3.5 + 1.22, 2)
+    assert result["total_cut_linear_m"] == round(3.5 + 1.22, 2)
+
+
+def test_short_side_pieces_are_not_moved():
+    payload = _payload(layouts=[_short_layout()])
+    result = apply_whole_boards(payload, {"b1"})
+    assert (
+        result["layouts"][0]["placed_pieces"] == payload["layouts"][0]["placed_pieces"]
+    )
+
+
+def test_short_side_charges_the_delivered_half_as_waste():
+    result = apply_whole_boards(_payload(layouts=[_short_layout()]), {"b1"})
+    stats = result["layouts"][0]["statistics"]
+    assert stats["waste_area"] == FULL_W * H - 180_000.0
+    assert stats["efficiency"] == round(180_000.0 / (FULL_W * H) * 100, 2)
+
+
+def test_a_sheet_smaller_on_both_axes_is_refused():
+    """Not a half of anything this module knows how to give back: leave it alone
+    rather than invent a rip."""
+    layout = _short_layout()
+    layout["material"]["width"] = FULL_W / 2
+    payload = _payload(layouts=[layout])
+    assert apply_whole_boards(payload, {"b1"}) is payload
