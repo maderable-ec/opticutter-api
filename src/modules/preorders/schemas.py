@@ -351,6 +351,14 @@ class ReviewPreOrderResponse(CamelModel):
     price_level_name: Optional[str] = Field(
         default=None, description="Name of the applied price level"
     )
+    discount_amount: float = Field(
+        default=0.0,
+        description="How far below the list price the quoted boards landed (0 "
+        "when no level applies)",
+    )
+    list_subtotal: float = Field(
+        default=0.0, description="What the same quote would cost at the list price"
+    )
     services_total: float = Field(
         default=0.0, description="Net sum of the additional services"
     )

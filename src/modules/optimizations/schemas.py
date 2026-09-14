@@ -179,8 +179,10 @@ class PricingSummary(CamelModel):
     """Money block for a quote or an order: net subtotal, tax, total.
 
     Every line item is already priced at the level the seller chose (the boards
-    they marked; see ``applyPriceLevel``), so there is no discount row: the
-    subtotal IS the sum of what the document prints. Catalog prices are net, and
+    they marked; see ``applyPriceLevel``), so no total is derived from a
+    discount: the subtotal IS the sum of what the document prints.
+    ``discountAmount``/``listSubtotal`` sit beside it as the seller's argument —
+    what the same cut list would have cost at the list price. Catalog prices are net, and
     additional services — which staff registers tax-included — are converted to
     net here, so one tax line covers the whole document.
     """
@@ -189,6 +191,18 @@ class PricingSummary(CamelModel):
         default=1, ge=1, le=3, description="Price level applied to the marked boards"
     )
     price_level_name: Optional[str] = Field(default=None)
+    discount_amount: float = Field(
+        default=0.0,
+        description=(
+            "How far below the list price (level 1) the marked boards landed. "
+            "Informative: no line and no total is derived from it, and it is "
+            "0.0 at level 1 or when nothing was marked."
+        ),
+    )
+    list_subtotal: float = Field(
+        default=0.0,
+        description="What the same document would cost with no level applied",
+    )
     subtotal: float = Field(
         default=0.0, description="Net sum (boards + edge banding + services)"
     )
@@ -727,7 +741,7 @@ class OptimizeResponse(CamelModel):
     )
     pricing: Optional[PricingSummary] = Field(
         default=None,
-        description="Discount block for the selected price tier (document-level)",
+        description="Money block: net subtotal, tax and total",
     )
     unplaced: List[UnplacedPiece] = Field(
         default_factory=list,

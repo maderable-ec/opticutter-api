@@ -184,6 +184,8 @@ def _to_review_response(
         currency="USD",
         subtotal=pricing["subtotal"],
         price_level_name=pricing.get("price_level_name"),
+        discount_amount=pricing.get("discount_amount", 0.0),
+        list_subtotal=pricing.get("list_subtotal", 0.0),
         services_total=pricing.get("services_total", 0.0),
         tax_rate=pricing.get("tax_rate", 0.0),
         tax_amount=pricing.get("tax_amount", 0.0),

@@ -56,6 +56,18 @@ def price_at_level(
     return list_price
 
 
+def half_board_price(unit_price: float, half_board_markup_pct: float) -> float:
+    """Price of half a sheet: half the board plus its markup.
+
+    Written once because it is written from three angles — the bin the search
+    is handed (``OptimizationService._half_spec``), the re-pricing below, and
+    the list reference ``level_discount`` measures against — and a half board
+    billed by one formula and discounted by another is a cent that nobody can
+    explain on the page.
+    """
+    return round(unit_price / 2.0 * (1 + half_board_markup_pct), 2)
+
+
 def apply_price_level(
     payload: dict,
     level_prices: Dict[str, float],
@@ -110,9 +122,9 @@ def apply_price_level(
             continue
         unit = changed[key]
         if material.get("half_board"):
-            # Same formula as ``OptimizationService._half_spec``, so a half board
-            # keeps costing half the sheet plus its markup at every level.
-            unit = round(unit / 2.0 * (1 + half_board_markup_pct), 2)
+            # A half board keeps costing half the sheet plus its markup at every
+            # level, by the one formula every caller shares.
+            unit = half_board_price(unit, half_board_markup_pct)
         cost_delta += unit - material.get("cost_per_unit", 0.0)
         # ``placed_pieces``/``cuts``/``remainders`` carry over by reference:
         # re-pricing must be incapable of moving a piece, and sharing the lists
@@ -137,3 +149,47 @@ def apply_price_level(
     # and sheet numbers come back identical.
     result["layout_groups"] = group_layouts(layouts)
     return result
+
+
+def level_discount(
+    payload: dict,
+    list_prices: Dict[str, float],
+    half_board_markup_pct: float,
+) -> float:
+    """How much the quote is discounted against the list price (level 1).
+
+    Informative only: the lines are already final — the level is a different
+    unit price per product, not a percentage off a base — so this changes no
+    total. It exists because the seller has to be able to say *how much* the
+    client is getting off, which is the one thing the level's design hides.
+
+    ``list_prices`` maps a material key to its level-1 unit price. The caller
+    builds it from the resolved materials, for the marked catalog boards only,
+    and **that restriction is the whole filter**: a client retazo, a manual
+    measurement and an unmarked board are never in it, so they can't contribute
+    — the same discipline as ``apply_price_level``'s ``source`` check, done at
+    the one point that still knows what a material is.
+
+    Measured over the FINAL payload, not inside ``apply_price_level``: the
+    ``cost_delta`` that one accumulates is the discount *before*
+    ``whole_boards.apply_whole_boards`` runs, and the promotion re-bills a half
+    sheet as the whole board at the **level's** price. So a half board the
+    client took whole is discounted twice over, and only the finished plan says
+    so.
+    """
+    if not list_prices:
+        return 0.0
+
+    discount = 0.0
+    for layout in payload.get("layouts") or []:
+        material = layout.get("material") or {}
+        list_price = list_prices.get(material.get("material_key"))
+        if list_price is None:
+            continue
+        reference = (
+            half_board_price(list_price, half_board_markup_pct)
+            if material.get("half_board")
+            else list_price
+        )
+        discount += reference - material.get("cost_per_unit", 0.0)
+    return round(discount, 2)
