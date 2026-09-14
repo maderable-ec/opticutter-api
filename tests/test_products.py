@@ -131,6 +131,11 @@ def test_board_subtype_spanish_aliases_normalize_to_english(client):
     created = client.post("/api/v1/products/", json=payload).json()["data"]
     assert created["attributes"]["subtype"] == "Veneer"
 
+    payload = _board_payload(code="RAN1", name="Ranurado board")
+    payload["attributes"]["subtype"] = "RANURADO"  # the vendor writes it upper-case
+    created = client.post("/api/v1/products/", json=payload).json()["data"]
+    assert created["attributes"]["subtype"] == "Grooved"
+
 
 def test_edge_banding_subtype_round_trips(client):
     payload = _edge_banding_payload()
@@ -340,6 +345,40 @@ def test_sync_infers_hard_band_type_from_thickness(client, monkeypatch):
     eb = client.get("/api/v1/products/?search=IBIZA").json()["data"][0]
     assert eb["attributes"]["thickness"] == 1.5
     assert eb["attributes"]["bandType"] == "Hard"
+
+
+def test_sync_imports_a_grooved_board(client, monkeypatch):
+    """A new ``tip`` in TABLEROS must land in the catalog, not in ``issues``.
+
+    ``BoardSubtype`` is a closed enum fed straight from the vendor's raw TIPO
+    text, so a value it doesn't know takes the *whole row* down with it
+    ("atributos de tablero inválidos") — the article silently stops being
+    sellable. RANURADO is the real case: the vendor loaded it, and these boards
+    carry no ``obs`` (a board with no family is deliberately not warned).
+    """
+    _load_inventory(
+        monkeypatch,
+        _board_record(
+            cin=157,
+            nom="MDF BLANCO RANURADO 2C (2.44X2.15)M-15MM",
+            mar="DISTABLASA",
+            tip="RANURADO",
+            gru="-",
+            ven=Decimal("77.826087"),
+            obs="",
+        ),
+    )
+    resp = _sync(client)
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["created"] == 1
+    assert data["skippedInvalid"] == 0
+    assert _issues(resp) == []
+
+    board = client.get("/api/v1/products/?search=RANURADO").json()["data"][0]
+    assert board["attributes"]["subtype"] == "Grooved"
+    assert board["attributes"]["height"] == 2440
+    assert board["attributes"]["width"] == 2150
 
 
 def test_sync_skips_medio_row(client, monkeypatch):

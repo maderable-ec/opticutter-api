@@ -12,6 +12,7 @@ _BOARD_SUBTYPE_SPANISH_ALIASES = {
     "pino": "Pine",
     "madera natural": "Natural Wood",
     "enchapado": "Veneer",
+    "ranurado": "Grooved",
 }
 
 
@@ -36,6 +37,7 @@ class BoardSubtype(str, Enum):
     MATH_SOFT = "Math Soft"
     OSB = "OSB"
     VENEER = "Veneer"
+    GROOVED = "Grooved"
 
     @classmethod
     def _missing_(cls, value):
