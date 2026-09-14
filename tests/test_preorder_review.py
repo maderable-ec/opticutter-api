@@ -219,8 +219,80 @@ def test_public_review_layout_hides_production_internals(client):
     for piece in group["placedPieces"]:
         edges = piece.get("edges")
         if edges:
-            for leaked in ("productId", "code", "product_id"):
+            for leaked in ("productId", "code", "product_id", "alias"):
                 assert leaked not in edges
+
+    # The cut list is the other surface carrying banding, and it used to forward
+    # the payload's dict untouched — ``product_id`` and all.
+    for piece in resp.json()["data"]["pieces"]:
+        edges = piece.get("edges")
+        if edges:
+            for leaked in ("productId", "code", "product_id", "alias"):
+                assert leaked not in edges
+
+
+def test_public_review_names_the_tape_on_every_piece(client):
+    """Both piece shapes say *which* tapacanto the piece carries, not just how many sides.
+
+    The name is joined in from ``edge_bandings_summary``, which is keyed by the
+    same ``product_id`` the payload holds on each piece, so the cut list and the
+    diagram cannot disagree about it.
+    """
+    c = _create_client(client)
+    b = _create_board(client)
+    eb = _create_edge_banding(client, band_type="Soft", color="Nogal")
+
+    pre = client.post(
+        "/api/v1/preorders/",
+        json={
+            "clientId": c["id"],
+            "branchId": 1,
+            "materials": [{"key": "b1", "source": "catalog", "productId": b["id"]}],
+            "requirements": [
+                {
+                    "priority": 0,
+                    "height": 720,
+                    "width": 400,
+                    "quantity": 2,
+                    "materialKey": "b1",
+                    "label": "Puerta",
+                    "canRotate": True,
+                    "edgeBanding": {"productId": eb["id"], "sides": ["left", "top"]},
+                },
+                {
+                    "priority": 0,
+                    "height": 600,
+                    "width": 400,
+                    "quantity": 1,
+                    "materialKey": "b1",
+                    "label": "Fondo",
+                    "canRotate": True,
+                },
+            ],
+        },
+    ).json()["data"]
+    link = _generate_link(client, pre["id"])
+
+    data = client.get(f"/api/v1/public/review/{link['token']}").json()["data"]
+
+    banded = next(p for p in data["pieces"] if p["label"] == "Puerta")
+    assert banded["edges"]["productName"] == eb["name"]
+    assert banded["edges"]["color"] == "Nogal"
+    # Nominal already: the cut list never rotates, which is what lets the client
+    # read the L/C notation straight off these.
+    assert sorted(banded["edges"]["sides"]) == ["left", "top"]
+
+    # A piece with no banding carries no edges at all, not an empty shell.
+    assert next(p for p in data["pieces"] if p["label"] == "Fondo")["edges"] is None
+
+    drawn = [
+        piece
+        for group in data["layoutGroups"]
+        for piece in group["placedPieces"]
+        if piece["edges"]
+    ]
+    assert drawn, "the banded piece should be placed somewhere"
+    assert all(p["edges"]["productName"] == eb["name"] for p in drawn)
 
 
 def test_public_review_shows_the_commercial_reference(client):
