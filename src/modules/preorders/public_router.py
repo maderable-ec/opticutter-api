@@ -18,6 +18,7 @@ from src.modules.preorders.review_service import (
 )
 from src.modules.preorders.schemas import (
     ReviewActionRequest,
+    ReviewCutPieceEdges,
     ReviewLayoutGroup,
     ReviewLineResponse,
     ReviewPieceEdges,
@@ -45,8 +46,44 @@ def _client_meta(request: Request) -> dict:
     return {"ip": ip, "user_agent": request.headers.get("user-agent")}
 
 
+def _edge_banding_index(payload: dict) -> dict:
+    """Tapacanto display attributes by ``product_id``, from the banding summary.
+
+    The summary is already in the payload and is keyed by the same
+    ``product_id`` both piece shapes carry, so naming a piece's tape costs a
+    dict lookup and no extra query. It is read here rather than injected
+    upstream in ``_dump_requirement`` on purpose: optimization results are
+    cached and the hash covers the *inputs*, so a quote already in Redis would
+    otherwise stay nameless until it expired.
+    """
+    return {
+        e.get("product_id"): e
+        for e in payload.get("edge_bandings_summary", [])
+        if e.get("product_id") is not None
+    }
+
+
+def _to_review_cut_edges(
+    edges: Optional[dict], eb_by_id: dict
+) -> Optional[ReviewCutPieceEdges]:
+    """Projects a cut-list piece's banding; drops the catalog identifiers.
+
+    No rotation here, unlike ``_to_review_edges``: these sides come from the
+    requirement's own ``EdgeBandingSpec`` and are nominal already.
+    """
+    if not edges:
+        return None
+    summary = eb_by_id.get(edges.get("product_id")) or {}
+    return ReviewCutPieceEdges(
+        sides=list(edges.get("sides") or []),
+        band_type=edges.get("band_type"),
+        product_name=summary.get("product_name"),
+        color=summary.get("color"),
+    )
+
+
 def _to_review_edges(
-    edges: Optional[dict], rotated: bool
+    edges: Optional[dict], rotated: bool, eb_by_id: dict
 ) -> Optional[ReviewPieceEdges]:
     """Keeps only what the diagram draws; drops the catalog identifiers.
 
@@ -54,6 +91,9 @@ def _to_review_edges(
     predates the field: results are cached for ``OPT_RESULT_TTL_SECONDS`` and the
     hash covers the *inputs*, so a quote already in Redis keeps its old shape and
     would otherwise leave the client's diagram without it for days.
+
+    ``product_name`` is joined in the same way the cut list does it, so the two
+    surfaces name the same tape — the diagram's own dict carries only ``code``.
     """
     if not edges:
         return None
@@ -61,12 +101,14 @@ def _to_review_edges(
     nominal = edges.get("nominal_sides")
     if nominal is None:
         nominal = [CCW_ROTATION[s] for s in geo] if rotated else list(geo)
+    summary = eb_by_id.get(edges.get("product_id")) or {}
     return ReviewPieceEdges(
         sides=geo,
         nominal_sides=list(nominal),
         color=edges.get("color"),
         band_type=edges.get("band_type"),
         notation=edges.get("notation"),
+        product_name=summary.get("product_name"),
     )
 
 
@@ -83,6 +125,7 @@ def _to_review_layouts(payload: dict) -> List[ReviewLayoutGroup]:
         m.get("material_key"): (m.get("product_name") or m.get("product_code"))
         for m in payload.get("materials_summary", [])
     }
+    eb_by_id = _edge_banding_index(payload)
     groups = []
     for group in payload.get("layout_groups", []):
         layout = group.get("layout", {})
@@ -110,7 +153,7 @@ def _to_review_layouts(payload: dict) -> List[ReviewLayoutGroup]:
                         original_width=p.get("original_width", 0),
                         original_height=p.get("original_height", 0),
                         edges=_to_review_edges(
-                            p.get("edges"), bool(p.get("rotated", False))
+                            p.get("edges"), bool(p.get("rotated", False)), eb_by_id
                         ),
                     )
                     for p in pieces
@@ -162,6 +205,7 @@ def _to_review_response(
         )
         for s in preorder.additional_services or []
     ]
+    eb_by_id = _edge_banding_index(payload)
     pieces = [
         ReviewPieceResponse(
             label=r.get("label"),
@@ -170,7 +214,7 @@ def _to_review_response(
             height=r["height"],
             width=r["width"],
             quantity=r["quantity"],
-            edges=r.get("edge_banding"),
+            edges=_to_review_cut_edges(r.get("edge_banding"), eb_by_id),
         )
         for r in payload.get("requirements", [])
     ]

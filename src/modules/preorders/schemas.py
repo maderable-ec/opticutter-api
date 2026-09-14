@@ -232,6 +232,28 @@ class ReviewServiceResponse(CamelModel):
     line_total: float
 
 
+class ReviewCutPieceEdges(CamelModel):
+    """Edge banding of a cut-list piece, without the catalog identifiers.
+
+    Unlike ``ReviewPieceEdges`` there is no rotation here: ``sides`` come from
+    the requirement's own ``EdgeBandingSpec``, so they are already nominal and
+    the client can read the L/C notation straight off them.
+
+    ``product_name`` is what tells the client *which* tape a piece carries; it
+    is joined in from ``edge_bandings_summary`` rather than forwarded, so the
+    ``product_id`` the payload holds never reaches the response.
+    """
+
+    sides: List[str] = Field(
+        default_factory=list, description="Banded sides: top | bottom | left | right"
+    )
+    band_type: Optional[str] = Field(
+        default=None, description="Canonical band type (Soft/Hard)"
+    )
+    product_name: Optional[str] = None
+    color: Optional[str] = None
+
+
 class ReviewPieceResponse(CamelModel):
     """Cut-list piece projected for the public review."""
 
@@ -241,7 +263,7 @@ class ReviewPieceResponse(CamelModel):
     height: int
     width: int
     quantity: int
-    edges: Optional[dict] = None
+    edges: Optional[ReviewCutPieceEdges] = None
 
 
 class ReviewPieceEdges(CamelModel):
@@ -266,6 +288,10 @@ class ReviewPieceEdges(CamelModel):
     )
     notation: Optional[str] = Field(
         default=None, description="Workshop notation, e.g. '2L1C CS'"
+    )
+    product_name: Optional[str] = Field(
+        default=None,
+        description="Tape the piece carries, joined in from the banding summary",
     )
 
 
