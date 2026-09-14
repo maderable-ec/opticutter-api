@@ -15,6 +15,7 @@ from src.modules.optimizations.schemas import (
 from src.modules.optimizations.service import OptimizationService
 from src.modules.preorders.model import (
     OPEN_STATUSES,
+    TERMINAL_STATUSES,
     PreOrderModel,
     PreOrderStatus,
     PreOrderStatusHistoryModel,
@@ -31,6 +32,7 @@ from src.shared.exceptions import (
 )
 
 _OPEN_VALUES = [s.value for s in OPEN_STATUSES]
+_TERMINAL_VALUES = [s.value for s in TERMINAL_STATUSES]
 
 
 class PreOrderService(BranchScopedMixin):
@@ -134,6 +136,7 @@ class PreOrderService(BranchScopedMixin):
         actor: Optional[Actor] = None,
         branch_scope: Optional[int] = None,
         default_branch_id: Optional[int] = None,
+        note: str = "Pre-orden creada",
     ) -> PreOrderModel:
         """Creates an open (``draft``) pre-order with the optimizer inputs.
 
@@ -142,6 +145,10 @@ class PreOrderService(BranchScopedMixin):
         otherwise ``default_branch_id`` (the creator's base branch — the seller
         defaults to one, the admin has none and must provide ``branchId``). The
         anti-abuse cap is per branch.
+
+        ``note`` is what the birth entry of the history says; ``duplicate``
+        overrides it to name the quote this one was copied from, which is the
+        whole of the copy's traceability (there is no ``duplicated_from`` column).
         """
         actor = actor or system_actor()
         if self.db.get(ClientModel, data.client_id) is None:
@@ -172,15 +179,71 @@ class PreOrderService(BranchScopedMixin):
             expires_at=now + timedelta(days=validity_days),
             created_by=actor.user_id,
         )
-        self._record_transition(
-            preorder, None, PreOrderStatus.draft, actor, note="Pre-orden creada"
-        )
+        self._record_transition(preorder, None, PreOrderStatus.draft, actor, note=note)
         self.db.add(preorder)
         self.db.flush()  # assigns the id needed to build the readable code
         preorder.code = f"PRE-{now.year}-{preorder.id:04d}"
         self.db.commit()
         self.db.refresh(preorder)
         return preorder
+
+    def duplicate(
+        self,
+        preorder_id: int,
+        actor: Optional[Actor] = None,
+        branch_scope: Optional[int] = None,
+    ) -> PreOrderModel:
+        """Creates a fresh quote from a closed one, with the same inputs.
+
+        The case is the expired quote: once past its validity a pre-order is
+        dead for good (``_ensure_open`` blocks every edit, the review link
+        cannot be reissued and the public confirm answers "solicita una nueva"),
+        so re-quoting means a NEW row rather than reopening this one. The same
+        applies to a ``rejected``/``cancelled`` one, and to a ``confirmed`` one
+        when the client orders the same job again.
+
+        Nothing is frozen on the way: the copy re-optimizes on every read like
+        any other pre-order, so it quotes itself at today's catalog prices and
+        the current tax rate.
+        """
+        source = self.get_scoped_or_404(preorder_id, branch_scope)
+        # After ``get_scoped_or_404``, never before: that getter runs the lazy
+        # expiry, so a quote that just crossed its validity is marked ``expired``
+        # here and becomes duplicable in this same call.
+        if source.status not in _TERMINAL_VALUES:
+            raise BusinessRuleError(
+                "Solo se puede duplicar una cotización cerrada (vencida, "
+                "rechazada, cancelada o confirmada); una cotización abierta se "
+                "edita."
+            )
+        # Rebuilt as a ``PreOrderCreate`` rather than copied column by column:
+        # the stored JSON is ``model_dump(mode="json")``, the same round trip
+        # ``build_request`` does on every read, and going through the schema
+        # brings back ``validate_material_graph`` plus everything ``create``
+        # owns (client check, branch resolution, the open cap, the new
+        # ``expires_at`` and the new ``code``).
+        data = PreOrderCreate(
+            materials=source.materials,
+            requirements=source.requirements,
+            additional_services=source.additional_services,
+            client_id=source.client_id,
+            branch_id=source.branch_id,
+            price_level=source.price_level,
+            strategy=source.strategy,
+            variant=source.variant or 0,
+            notes=source.notes,
+            source=source.source,
+        )
+        return self.create(
+            data,
+            actor=actor,
+            branch_scope=branch_scope,
+            # The copy stays in the source's branch. ``branch_id`` covers the
+            # global roles (the only ones that reach this router) and the
+            # default covers the admin, who has no base branch to fall back to.
+            default_branch_id=source.branch_id,
+            note=f"Duplicada desde {source.code}",
+        )
 
     def update(
         self,

@@ -435,3 +435,164 @@ def test_a_preorder_can_turn_the_refilado_off_after_the_fact(client):
     assert data["materials"][0]["skipTrim"] is True
     # It moves the geometry, so unlike a price mark it moves the hash too.
     assert data["optimization"]["optimizationHash"] != before
+
+
+# --- Duplicating a closed quote ----------------------------------------------
+#
+# A quote past its validity is dead for good: it can't be edited, its review link
+# can't be reissued and the public confirm tells the client to ask for a new one.
+# "A new one" used to mean rebuilding the whole despiece by hand.
+
+
+def _expire(db_session, preorder_id):
+    """Backdates the validity; the next read marks the quote ``expired``."""
+    db_pre = db_session.get(PreOrderModel, preorder_id)
+    db_pre.expires_at = datetime.utcnow() - timedelta(days=1)
+    db_session.commit()
+
+
+def _confirm_via_review(client, preorder_id):
+    """Drives the real flow: link → client confirms → the order is minted."""
+    link = client.post(f"/api/v1/preorders/{preorder_id}/review-link").json()["data"]
+    resp = client.post(f"/api/v1/public/review/{link['token']}/confirm")
+    assert resp.status_code == 200
+
+
+def test_duplicate_expired_preorder_copies_the_inputs(client, db_session):
+    c, b = _setup(client)
+    payload = _order_payload(c["id"], b["id"], strategy="longOffcuts")
+    payload["notes"] = "Obra Los Cerezos"
+    payload["priceLevel"] = 2
+    payload["variant"] = 3
+    payload["additionalServices"] = [
+        {"name": "Perforación", "unitPrice": 5.0, "quantity": 4}
+    ]
+    original = client.post("/api/v1/preorders/", json=payload).json()["data"]
+    _expire(db_session, original["id"])
+
+    resp = client.post(f"/api/v1/preorders/{original['id']}/duplicate")
+    assert resp.status_code == 201
+    copy = resp.json()["data"]
+
+    assert copy["id"] != original["id"]
+    assert copy["code"] != original["code"]
+    assert copy["status"] == "draft"
+    assert copy["client"]["id"] == c["id"]
+    assert copy["branch"]["id"] == original["branch"]["id"]
+
+    # The summary is what the POST answers (no recompute); the inputs are read
+    # back from the detail.
+    detail = client.get(f"/api/v1/preorders/{copy['id']}").json()["data"]
+    assert detail["materials"] == original["materials"]
+    assert detail["requirements"] == original["requirements"]
+    assert detail["additionalServices"] == original["additionalServices"]
+    assert detail["priceLevel"] == 2
+    assert detail["strategy"] == "longOffcuts"
+    assert detail["variant"] == 3
+    assert detail["notes"] == "Obra Los Cerezos"
+    # Nothing is frozen: the copy quotes itself at today's prices.
+    assert detail["optimization"]["totalBoardsUsed"] >= 1
+
+
+def test_duplicate_leaves_the_original_alone(client, db_session):
+    c, b = _setup(client)
+    original = _create_preorder(client, c, b).json()["data"]
+    _expire(db_session, original["id"])
+    client.post(f"/api/v1/preorders/{original['id']}/duplicate")
+
+    again = client.get(f"/api/v1/preorders/{original['id']}").json()["data"]
+    assert again["status"] == "expired"
+    assert again["code"] == original["code"]
+
+
+def test_duplicate_starts_a_clean_life(client, db_session):
+    """The copy inherits the inputs, never the original's conversation."""
+    c, b = _setup(client)
+    original = _create_preorder(client, c, b).json()["data"]
+    link = client.post(f"/api/v1/preorders/{original['id']}/review-link").json()["data"]
+    client.post(
+        f"/api/v1/public/review/{link['token']}/request-changes",
+        json={"note": "Cámbienme la puerta"},
+    )
+    _expire(db_session, original["id"])
+
+    copy_id = client.post(f"/api/v1/preorders/{original['id']}/duplicate").json()[
+        "data"
+    ]["id"]
+    copy = client.get(f"/api/v1/preorders/{copy_id}").json()["data"]
+
+    assert copy["clientNote"] is None
+    assert copy["orderId"] is None
+    assert copy["sentAt"] is None
+    assert copy["confirmedAt"] is None
+    # A fresh validity window, counted from now and not inherited.
+    assert copy["expiresAt"] > original["expiresAt"]
+
+
+def test_duplicate_records_its_origin_in_the_history(client, db_session):
+    """The only trace of the copy's lineage: there is no ``duplicated_from`` column."""
+    c, b = _setup(client)
+    original = _create_preorder(client, c, b).json()["data"]
+    _expire(db_session, original["id"])
+
+    copy_id = client.post(f"/api/v1/preorders/{original['id']}/duplicate").json()[
+        "data"
+    ]["id"]
+    history = client.get(f"/api/v1/preorders/{copy_id}").json()["data"]["history"]
+
+    assert len(history) == 1
+    assert history[0]["fromStatus"] is None
+    assert history[0]["toStatus"] == "draft"
+    assert history[0]["note"] == f"Duplicada desde {original['code']}"
+
+
+def test_duplicate_rejects_an_open_preorder(client):
+    """An open quote is edited, not copied — that is what the PUT is for."""
+    c, b = _setup(client)
+    draft = _create_preorder(client, c, b).json()["data"]
+
+    blocked = client.post(f"/api/v1/preorders/{draft['id']}/duplicate")
+    assert blocked.status_code == 422
+    assert "cerrada" in blocked.json()["errors"][0]["message"]
+
+    # Same for one already sent to the client.
+    client.post(f"/api/v1/preorders/{draft['id']}/review-link")
+    assert client.post(f"/api/v1/preorders/{draft['id']}/duplicate").status_code == 422
+
+
+def test_duplicate_a_confirmed_preorder_is_the_repeat_order(client):
+    c, b = _setup(client)
+    original = _create_preorder(client, c, b).json()["data"]
+    _confirm_via_review(client, original["id"])
+
+    resp = client.post(f"/api/v1/preorders/{original['id']}/duplicate")
+    assert resp.status_code == 201
+    assert resp.json()["data"]["status"] == "draft"
+    # The order the original minted stays attached to the original, not the copy.
+    assert resp.json()["data"]["orderId"] is None
+
+
+def test_duplicate_respects_the_open_cap(client, db_session):
+    """The copy is a new open quote, so it answers to the same anti-abuse cap."""
+    assert (
+        client.patch(
+            "/api/v1/settings/preorders", json={"maxOpenPreordersPerClient": 1}
+        ).status_code
+        == 200
+    )
+    c, b = _setup(client)
+    original = _create_preorder(client, c, b).json()["data"]
+    _expire(db_session, original["id"])
+
+    # The expired one doesn't count, so the first copy fits the cap of 1...
+    assert (
+        client.post(f"/api/v1/preorders/{original['id']}/duplicate").status_code == 201
+    )
+    # ...and the second one doesn't.
+    blocked = client.post(f"/api/v1/preorders/{original['id']}/duplicate")
+    assert blocked.status_code == 422
+    assert "abierta" in blocked.json()["errors"][0]["message"]
+
+
+def test_duplicate_unknown_preorder_404(client):
+    assert client.post("/api/v1/preorders/999999/duplicate").status_code == 404

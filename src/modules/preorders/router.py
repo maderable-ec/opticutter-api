@@ -54,6 +54,7 @@ def _detail(svc: PreOrderService, preorder: PreOrderModel) -> PreOrderResponse:
         status=PreOrderStatus(preorder.status),
         price_level=preorder.price_level,
         strategy=preorder.strategy,
+        variant=preorder.variant,
         notes=preorder.notes,
         client_note=preorder.client_note,
         source=preorder.source,
@@ -183,6 +184,37 @@ def update_preorder(
                 actor=staff_actor(current_user),
                 branch_scope=branch_scope,
             ),
+        )
+    )
+
+
+@router.post(
+    "/{preorder_id}/duplicate",
+    response_model=DataResponse[PreOrderSummaryResponse],
+    status_code=201,
+)
+def duplicate_preorder(
+    preorder_id: int,
+    svc: PreOrderService = Depends(preorder_service),
+    current_user: UserModel = Depends(get_current_user),
+    branch_scope: Optional[int] = Depends(get_branch_scope),
+):
+    """Creates a new quote from a closed one (expired/rejected/cancelled/confirmed).
+
+    Copies the optimizer inputs, the services, the price level, the strategy,
+    the variant and the commercial reference into a fresh ``draft`` in the same
+    branch; the copy re-optimizes on read, so it quotes at today's prices.
+
+    Answers with the SUMMARY and not the detail on purpose: the detail recomputes
+    the optimization, which costs tens of seconds on a big job. The caller only
+    needs the id to redirect, and the destination page computes it once, behind
+    its own loading state, instead of leaving a button hanging.
+    """
+    return ok(
+        svc.duplicate(
+            preorder_id,
+            actor=staff_actor(current_user),
+            branch_scope=branch_scope,
         )
     )
 
