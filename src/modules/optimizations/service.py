@@ -233,9 +233,7 @@ class OptimizationService:
         if cached is not None:
             self._log_compute(optimization_hash, started, hit=True, jobs=(), results=())
             return (
-                self._apply_commercial_overrides(
-                    cached, request, resolved, half_board_markup_pct
-                ),
+                self._apply_commercial_overrides(cached, request, resolved),
                 optimization_hash,
             )
 
@@ -320,9 +318,7 @@ class OptimizationService:
             optimization_hash, started, hit=False, jobs=jobs, results=pool_results
         )
         return (
-            self._apply_commercial_overrides(
-                payload, request, resolved, half_board_markup_pct
-            ),
+            self._apply_commercial_overrides(payload, request, resolved),
             optimization_hash,
         )
 
@@ -331,7 +327,6 @@ class OptimizationService:
         payload: dict,
         request: OptimizeRequest,
         resolved: Dict[str, ResolvedMaterial],
-        half_board_markup_pct: float,
     ) -> dict:
         """Reshapes the cached plan for the flags that live outside the hash.
 
@@ -343,6 +338,10 @@ class OptimizationService:
         the whole sheet's price when it promotes a half, and that has to already
         be the level's price. Then the discount, which moves nothing and only
         measures what those two did.
+
+        A half board is billed off the LIST price at every level (see
+        ``price_levels``), so the only half that ever sees a level here is one
+        the client took whole — which by then is a full sheet.
 
         ``resolved`` carries the levels (never serialized into the payload, so
         they can't go stale behind the cache); the tax is added afterwards, by
@@ -366,7 +365,7 @@ class OptimizationService:
             )
             for key, material in marked.items()
         }
-        payload = apply_price_level(payload, level_prices, half_board_markup_pct)
+        payload = apply_price_level(payload, level_prices)
         payload = apply_whole_boards(payload, request.whole_board_material_keys)
 
         # Informative, and measured LAST: the promotion above re-bills a half
@@ -379,7 +378,6 @@ class OptimizationService:
         discount = level_discount(
             payload,
             {key: material.cost_per_unit for key, material in marked.items()},
-            half_board_markup_pct,
         )
         if not discount:
             return payload

@@ -3,14 +3,16 @@
 ``apply_price_level`` is a pure payload→payload transform applied AFTER the
 optimization cache — that is the whole point of it, since resolving the level up
 front would put it in the hash and make a checkbox re-run the search. What it
-must guarantee: only the marked catalog boards move, the half board keeps its
-half-plus-markup formula, the totals and the summary follow, and it is a strict
-no-op when there is nothing to change.
+must guarantee: only the marked catalog boards move, **the half board never
+does** (it is billed off the list price at every level — the level is a
+concession on the whole plank and the half already carries its own markup), the
+totals and the summary follow, and it is a strict no-op when there is nothing to
+change.
 
 ``level_discount`` reads the same plan back the other way round — how far below
 the list price it landed — and its one hard case is the half board the client
-took whole, which is discounted twice over and only says so once the promotion
-has run.
+took whole: it discounts nothing while it is a half, and the whole board's
+discount the moment the promotion makes it a full sheet.
 """
 
 from src.modules.optimizations.patterns import group_layouts
@@ -27,10 +29,11 @@ HALF_W = 610.0
 H = 2440.0
 LIST = 45.5
 LEVEL_2 = 40.0
-MARKUP = 0.10
-# 45.5 / 2 * 1.10 and 40.0 / 2 * 1.10, the same formula as _half_spec.
+# 45.5 / 2 * 1.10, the formula ``_half_spec`` bills a half board by. The second
+# one is what a half would cost if the level reached it — the number these tests
+# exist to keep it away from.
 HALF_LIST = 25.03
-HALF_LEVEL_2 = 22.0
+HALF_LEVEL_2_IF_IT_APPLIED = 22.0
 
 
 def _material(key="b1", source="catalog", cost=LIST):
@@ -110,18 +113,18 @@ def test_a_level_the_vendor_never_loaded_falls_back_to_the_list_price():
 def test_no_marked_boards_returns_the_same_object():
     """The normal case (nothing marked) must not even copy the payload."""
     payload = _payload()
-    assert apply_price_level(payload, {}, MARKUP) is payload
+    assert apply_price_level(payload, {}) is payload
 
 
 def test_a_level_priced_the_same_as_the_list_is_a_noop():
     """More than half the real catalog publishes the same number at every level."""
     payload = _payload()
-    assert apply_price_level(payload, {"b1": LIST}, MARKUP) is payload
+    assert apply_price_level(payload, {"b1": LIST}) is payload
 
 
 def test_an_unknown_material_key_is_skipped():
     payload = _payload()
-    assert apply_price_level(payload, {"otro": 1.0}, MARKUP) is payload
+    assert apply_price_level(payload, {"otro": 1.0}) is payload
 
 
 def test_an_offcut_is_never_re_priced():
@@ -131,13 +134,13 @@ def test_an_offcut_is_never_re_priced():
         materials=[_material(key="r1", source="companyOffcut", cost=0.0)],
         boards_cost=0.0,
     )
-    assert apply_price_level(payload, {"r1": LEVEL_2}, MARKUP) is payload
+    assert apply_price_level(payload, {"r1": LEVEL_2}) is payload
 
 
 # --- the re-pricing itself -------------------------------------------------------
 def test_a_marked_board_is_re_priced_everywhere_it_appears():
     payload = _payload()
-    result = apply_price_level(payload, {"b1": LEVEL_2}, MARKUP)
+    result = apply_price_level(payload, {"b1": LEVEL_2})
 
     assert result is not payload  # the input is never mutated
     assert payload["total_boards_cost"] == LIST
@@ -153,7 +156,7 @@ def test_a_marked_board_is_re_priced_everywhere_it_appears():
 
 def test_the_pieces_never_move():
     payload = _payload()
-    result = apply_price_level(payload, {"b1": LEVEL_2}, MARKUP)
+    result = apply_price_level(payload, {"b1": LEVEL_2})
     # Shared by reference, which is what makes "re-pricing cannot move a piece"
     # structural rather than a promise.
     assert (
@@ -161,14 +164,51 @@ def test_the_pieces_never_move():
     )
 
 
-def test_a_half_board_keeps_the_half_plus_markup_formula():
+def test_a_half_board_never_takes_the_level():
+    """The half is billed off the LIST price even on a marked board.
+
+    The level is a concession on the whole plank, and the half already carries
+    its markup because the shop keeps the other half — letting the level through
+    would rebate the same board twice.
+    """
     payload = _payload(
         layouts=[_layout(half=True, cost=HALF_LIST)],
         boards_cost=HALF_LIST,
     )
-    result = apply_price_level(payload, {"b1": LEVEL_2}, MARKUP)
-    assert result["layouts"][0]["material"]["cost_per_unit"] == HALF_LEVEL_2
-    assert result["total_boards_cost"] == HALF_LEVEL_2
+    result = apply_price_level(payload, {"b1": LEVEL_2})
+    assert result["layouts"][0]["material"]["cost_per_unit"] == HALF_LIST
+    assert result["layouts"][0]["material"]["cost_per_unit"] != (
+        HALF_LEVEL_2_IF_IT_APPLIED
+    )
+    assert result["total_boards_cost"] == HALF_LIST
+    # The sheet is carried over untouched, not rebuilt at the same price.
+    assert result["layouts"][0] is payload["layouts"][0]
+    # The material still moves: ``whole_boards`` reads it as the whole sheet's
+    # price when the client takes the half whole.
+    assert result["materials"][0]["cost_per_unit"] == LEVEL_2
+
+
+def test_a_marked_material_moves_its_whole_sheets_and_not_its_half():
+    """The two rules on one material, which is how a real quote comes out.
+
+    A board cut as one full sheet plus a half yields two billing lines, and only
+    the full one follows the level.
+    """
+    payload = _payload(
+        layouts=[_layout(), _layout(half=True, sheet_number=2, cost=HALF_LIST)],
+        boards_cost=round(LIST + HALF_LIST, 2),
+    )
+    result = apply_price_level(payload, {"b1": LEVEL_2})
+
+    assert result["layouts"][0]["material"]["cost_per_unit"] == LEVEL_2
+    assert result["layouts"][1]["material"]["cost_per_unit"] == HALF_LIST
+    assert result["total_boards_cost"] == round(LEVEL_2 + HALF_LIST, 2)
+    # One line each, keyed by ``(material_key, half_board)``.
+    lines = {
+        (row["material_key"], row["half_board"]): row["cost_per_unit"]
+        for row in result["materials_summary"]
+    }
+    assert lines == {("b1", False): LEVEL_2, ("b1", True): HALF_LIST}
 
 
 def test_only_the_marked_material_moves():
@@ -177,7 +217,7 @@ def test_only_the_marked_material_moves():
         materials=[_material(key="b1"), _material(key="b2")],
         boards_cost=LIST * 2,
     )
-    result = apply_price_level(payload, {"b1": LEVEL_2}, MARKUP)
+    result = apply_price_level(payload, {"b1": LEVEL_2})
     costs = {
         layout["material"]["material_key"]: layout["material"]["cost_per_unit"]
         for layout in result["layouts"]
@@ -199,24 +239,24 @@ def test_the_total_is_a_delta_so_a_pooled_offcut_is_never_billed():
         # Only the catalog sheet is billed: the offcut is the client's.
         boards_cost=LIST,
     )
-    result = apply_price_level(payload, {"b1": LEVEL_2}, MARKUP)
+    result = apply_price_level(payload, {"b1": LEVEL_2})
     assert result["total_boards_cost"] == LEVEL_2
 
 
 # --- level_discount ---------------------------------------------------------------
 def test_a_marked_board_is_discounted_against_the_list_price():
-    payload = apply_price_level(_payload(), {"b1": LEVEL_2}, MARKUP)
-    assert level_discount(payload, {"b1": LIST}, MARKUP) == round(LIST - LEVEL_2, 2)
+    payload = apply_price_level(_payload(), {"b1": LEVEL_2})
+    assert level_discount(payload, {"b1": LIST}) == round(LIST - LEVEL_2, 2)
 
 
 def test_nothing_marked_is_no_discount():
     """Level 1, or a quote where the seller marked no board at all."""
-    assert level_discount(_payload(), {}, MARKUP) == 0.0
+    assert level_discount(_payload(), {}) == 0.0
 
 
 def test_a_board_priced_the_same_at_every_level_discounts_nothing():
     """More than half the catalog, plus every level the vendor never loaded."""
-    assert level_discount(_payload(), {"b1": LIST}, MARKUP) == 0.0
+    assert level_discount(_payload(), {"b1": LIST}) == 0.0
 
 
 def test_an_unmarked_board_never_contributes():
@@ -226,8 +266,8 @@ def test_an_unmarked_board_never_contributes():
         materials=[_material(key="b1"), _material(key="b2")],
         boards_cost=LIST * 2,
     )
-    payload = apply_price_level(payload, {"b1": LEVEL_2}, MARKUP)
-    assert level_discount(payload, {"b1": LIST}, MARKUP) == round(LIST - LEVEL_2, 2)
+    payload = apply_price_level(payload, {"b1": LEVEL_2})
+    assert level_discount(payload, {"b1": LIST}) == round(LIST - LEVEL_2, 2)
 
 
 def test_the_clients_own_retazo_is_never_discounted():
@@ -241,18 +281,17 @@ def test_the_clients_own_retazo_is_never_discounted():
         ],
         boards_cost=LIST,
     )
-    payload = apply_price_level(payload, {"b1": LEVEL_2}, MARKUP)
-    assert level_discount(payload, {"b1": LIST}, MARKUP) == round(LIST - LEVEL_2, 2)
+    payload = apply_price_level(payload, {"b1": LEVEL_2})
+    assert level_discount(payload, {"b1": LIST}) == round(LIST - LEVEL_2, 2)
 
 
-def test_a_half_board_is_discounted_by_half_plus_markup():
+def test_a_half_board_discounts_nothing():
+    """It was never re-priced, so there is nothing for the client to save."""
     payload = _payload(
         layouts=[_layout(half=True, cost=HALF_LIST)], boards_cost=HALF_LIST
     )
-    payload = apply_price_level(payload, {"b1": LEVEL_2}, MARKUP)
-    assert level_discount(payload, {"b1": LIST}, MARKUP) == round(
-        HALF_LIST - HALF_LEVEL_2, 2
-    )
+    payload = apply_price_level(payload, {"b1": LEVEL_2})
+    assert level_discount(payload, {"b1": LIST}) == 0.0
 
 
 def test_a_half_board_taken_whole_is_discounted_as_a_whole_board():
@@ -260,15 +299,16 @@ def test_a_half_board_taken_whole_is_discounted_as_a_whole_board():
 
     ``apply_whole_boards`` re-bills the sheet at the material's ``cost_per_unit``,
     which is by then the level's price, so the client who takes the board whole
-    gets the whole board's discount — twice the half's. Measured inside
-    ``apply_price_level`` (before the promotion) it would report half of it.
+    gets the whole board's discount — where the same sheet, left as a half,
+    discounts nothing at all. Measured inside ``apply_price_level`` (before the
+    promotion) it would report zero.
     """
     payload = _payload(
         layouts=[_layout(half=True, cost=HALF_LIST)], boards_cost=HALF_LIST
     )
-    payload = apply_price_level(payload, {"b1": LEVEL_2}, MARKUP)
+    payload = apply_price_level(payload, {"b1": LEVEL_2})
     payload = apply_whole_boards(payload, ["b1"])
 
     assert payload["layouts"][0]["material"]["half_board"] is False
     assert payload["layouts"][0]["material"]["cost_per_unit"] == LEVEL_2
-    assert level_discount(payload, {"b1": LIST}, MARKUP) == round(LIST - LEVEL_2, 2)
+    assert level_discount(payload, {"b1": LIST}) == round(LIST - LEVEL_2, 2)
