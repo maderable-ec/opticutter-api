@@ -21,6 +21,7 @@ from src.modules.optimizations.schemas import (
 )
 from src.modules.products.model import ProductType
 from src.modules.products.service import ProductService
+from src.modules.products.types.board import HalfBoardSplit, half_board_split
 from src.shared.exceptions import BusinessRuleError, EntityNotFoundError
 
 
@@ -67,6 +68,16 @@ class ResolvedMaterial:
     # anyway (the resolution runs before the cache lookup, for the hash).
     price_2: Optional[float] = None
     price_3: Optional[float] = None
+    # Whether this board is sold as a half board and, if so, which axis the shop
+    # rips it along. Derived from the product's subtype (never stored per
+    # product) by ``products.types.board.half_board_split``, and read by
+    # ``OptimizationService._half_spec`` — the single place that builds the half
+    # bin — plus ``_compute_hash``, so correcting a product's subtype is not
+    # served stale. The default is the behavior every board had before the
+    # policy existed, which is also what an unknown subtype falls back to; an
+    # inline source keeps it and is excluded by ``is_catalog`` instead, since an
+    # offcut is a physical piece with no half to sell.
+    half_split: HalfBoardSplit = HalfBoardSplit.LONG_SIDE
 
     @property
     def is_catalog(self) -> bool:
@@ -143,6 +154,9 @@ class MaterialResolver:
             skip_trim=material.skip_trim,
             price_2=product.price_2,
             price_3=product.price_3,
+            half_split=half_board_split(
+                attrs.get("subtype"), attrs.get("thickness", 0.0)
+            ),
         )
 
     def _resolve_inline(self, material: InlineMaterialInput) -> ResolvedMaterial:

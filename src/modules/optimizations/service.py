@@ -50,6 +50,7 @@ from src.modules.optimizations.summary import build_materials_summary
 from src.modules.optimizations.whole_boards import apply_whole_boards
 from src.modules.products.model import ProductModel, ProductType
 from src.modules.products.service import ProductService
+from src.modules.products.types.board import HalfBoardSplit
 from src.modules.settings.service import SettingsService
 from src.shared.cache import cache
 from src.shared.config import config
@@ -467,6 +468,20 @@ class OptimizationService:
                 # geometry that did not move. ``ENGINE_VERSION`` stays put for
                 # the same reason.
                 **({"skip_trim": True} if rm.skip_trim else {}),
+                # Same device, same reason: only a board whose half board is
+                # gone or is now ripped along the other axis emits this, so
+                # every quote on an MDP/MDF — and every inline material, which
+                # never had a half — hashes byte-identically to what this
+                # produced before the policy existed and keeps reading its
+                # Redis entry. It is in the hash at all (rather than riding an
+                # ``ENGINE_VERSION`` bump) because the policy is read from the
+                # catalog: correcting a product's subtype has to show up on the
+                # next quote, not after ``OPT_RESULT_TTL_SECONDS``.
+                **(
+                    {"half_split": rm.half_split.value}
+                    if rm.is_catalog and rm.half_split is not HalfBoardSplit.LONG_SIDE
+                    else {}
+                ),
             }
             for key, rm in resolved.items()
         }
@@ -520,19 +535,36 @@ class OptimizationService:
     def _half_spec(
         material: ResolvedMaterial, half_board_markup_pct: float
     ) -> Optional[BinSpec]:
-        """Half-board bin for a catalog material (``None`` for inline sources).
+        """Half-board bin for a catalog material (``None`` when there is none).
 
-        The business sells half catalog boards split lengthwise: same length,
-        width/2, charged ``price/2 * (1 + markup)``. Handing it to the search as
-        a cheaper sibling bin makes the half board an optimization objective
-        instead of a post-hoc billing check.
+        The single place the half board's geometry is built. Handing it to the
+        search as a cheaper sibling bin makes the half an optimization objective
+        instead of a post-hoc billing check — and it is also what keeps the
+        engine out of this decision entirely: ``src/cutting/`` re-packs against
+        whatever spec it is given and never derives one, so both the axis and
+        the "this material has no half" case are settled here.
+
+        Which axis (and whether there is a half at all) is the material's own
+        policy, ``ResolvedMaterial.half_split``, derived from the product's
+        subtype: a cut parallel to the largo halves the width (what every board
+        used to do), one parallel to the lado corto halves the height, and the
+        materials the shop only sells whole get ``None``.
+
+        The price is the same either way — half the sheet is half the sheet —
+        ``price/2 * (1 + markup)``.
         """
         if not material.is_catalog:
             return None
+        if material.half_split is HalfBoardSplit.SHORT_SIDE:
+            width, height = material.width, material.height / 2.0
+        elif material.half_split is HalfBoardSplit.LONG_SIDE:
+            width, height = material.width / 2.0, material.height
+        else:
+            return None
         return BinSpec(
             key=material.key,
-            width=material.width / 2.0,
-            height=material.height,
+            width=width,
+            height=height,
             thickness=material.thickness,
             cost_per_unit=round(
                 material.cost_per_unit / 2.0 * (1 + half_board_markup_pct), 2

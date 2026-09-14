@@ -73,3 +73,70 @@ class BoardAttributes(CamelModel):
         max_length=64,
         description="Familia/diseño para coordinar tapacantos (debe coincidir con el tapacanto)",
     )
+
+
+class HalfBoardSplit(str, Enum):
+    """How (and whether) a board is sold as a half board.
+
+    The shop does not cut every material in two, and the ones it does cut are
+    not all cut the same way: the split axis is a property of the MATERIAL, so
+    it is derived from ``BoardAttributes.subtype`` (which the catalog sync fills
+    from the vendor's own ``TIPO``) rather than stored per product.
+
+    The names are the shop's: a cut *parallel to the long side* runs along the
+    largo and therefore halves the ``width``; one *parallel to the short side*
+    halves the ``height``. ``height`` is the largo by convention (the first
+    dimension the vendor writes and the one ``BoardAttributes`` documents), and
+    the sync warns when a row comes in the other way round.
+    """
+
+    NONE = "none"
+    LONG_SIDE = "long_side"
+    SHORT_SIDE = "short_side"
+
+
+# Subtype -> how its boards are halved. Confirmed twice: with the shop, and
+# against the vendor's own "(MEDIO)" SKUs, which exist for MDP, PLYWOOD, MDF,
+# RANURADO and HDF only — never for OSB, pino, madera natural or enchapado.
+_HALF_BOARD_SPLIT = {
+    BoardSubtype.MDP: HalfBoardSplit.LONG_SIDE,
+    BoardSubtype.MDF: HalfBoardSplit.LONG_SIDE,
+    BoardSubtype.HDF: HalfBoardSplit.LONG_SIDE,
+    BoardSubtype.PLYWOOD: HalfBoardSplit.SHORT_SIDE,
+    BoardSubtype.GROOVED: HalfBoardSplit.SHORT_SIDE,
+    BoardSubtype.OSB: HalfBoardSplit.NONE,
+    BoardSubtype.PINE: HalfBoardSplit.NONE,
+    BoardSubtype.NATURAL_WOOD: HalfBoardSplit.NONE,
+    BoardSubtype.HIGH_GLOSS: HalfBoardSplit.NONE,
+    BoardSubtype.MATH_SOFT: HalfBoardSplit.NONE,
+    BoardSubtype.VENEER: HalfBoardSplit.NONE,
+}
+
+# The thick MDP the shop never halves. Written as a floor rather than ``== 36``
+# so it can't be defeated by a float comparison; nothing above 36 exists in the
+# catalog today, so the two readings select the same boards.
+_MDP_UNSPLITTABLE_THICKNESS_MM = 36.0
+
+
+def half_board_split(subtype, thickness: float) -> HalfBoardSplit:
+    """The half-board policy for a board, from its subtype and thickness.
+
+    ``subtype`` accepts the enum, its raw string or ``None`` (a board registered
+    by hand, or a vendor ``TIPO`` this build does not know yet). An unknown
+    subtype falls back to ``LONG_SIDE`` — the behavior every board had before
+    this rule existed, so nothing a seller already quotes stops being offered
+    because the catalog grew a value.
+    """
+    if not isinstance(subtype, BoardSubtype):
+        if subtype is None:
+            return HalfBoardSplit.LONG_SIDE
+        try:
+            subtype = BoardSubtype(subtype)
+        except ValueError:
+            return HalfBoardSplit.LONG_SIDE
+    if (
+        subtype is BoardSubtype.MDP
+        and float(thickness or 0) >= _MDP_UNSPLITTABLE_THICKNESS_MM
+    ):
+        return HalfBoardSplit.NONE
+    return _HALF_BOARD_SPLIT.get(subtype, HalfBoardSplit.LONG_SIDE)

@@ -809,6 +809,144 @@ def test_optimize_keeps_full_board_for_wide_job(client):
     assert data["totalBoardsCost"] == 45.5
 
 
+def _create_subtype_board(client, code, subtype, thickness=18):
+    """A catalog board carrying the vendor's own material subtype.
+
+    The subtype is what decides whether the shop sells this board in halves and
+    which way it rips it, so it is the only thing that differs between these
+    jobs — same sheet, same price, same pieces.
+    """
+    return client.post(
+        "/api/v1/products/",
+        json={
+            "type": "board",
+            "code": code,
+            "name": f"Tablero {code}",
+            "price": 45.5,
+            "attributes": {
+                "height": 2440,
+                "width": 1220,
+                "thickness": thickness,
+                "subtype": subtype,
+            },
+        },
+    ).json()["data"]
+
+
+def _sparse_job(client_id, product_id):
+    """One small piece: fits in half a sheet whichever way the sheet is halved."""
+    return {
+        "clientId": client_id,
+        "materials": [{"key": "b1", "source": "catalog", "productId": product_id}],
+        "requirements": [
+            {
+                "priority": 0,
+                "height": 300,
+                "width": 300,
+                "quantity": 1,
+                "materialKey": "b1",
+                "label": "Repisa",
+                "canRotate": True,
+            }
+        ],
+    }
+
+
+def test_plywood_is_halved_across_the_short_side(client):
+    """Plywood and MDF ranurado are ripped parallel to the lado corto: the half
+    keeps the full width and halves the length."""
+    created_client = _create_client(client)
+    board = _create_subtype_board(client, "PLY15", "Plywood")
+
+    data = client.post(
+        "/api/v1/optimize/", json=_sparse_job(created_client["id"], board["id"])
+    ).json()["data"]
+
+    material = data["layouts"][0]["material"]
+    assert material["halfBoard"] is True
+    assert material["width"] == 1220
+    assert material["height"] == 1220
+    # Half the sheet, so the same money as any other half board.
+    assert data["totalBoardsCost"] == 25.03
+    assert data["materialsSummary"][0]["productName"].endswith("(medio tablero)")
+
+
+def test_grooved_board_is_halved_across_the_short_side(client):
+    created_client = _create_client(client)
+    board = _create_subtype_board(client, "RAN15", "Grooved")
+
+    data = client.post(
+        "/api/v1/optimize/", json=_sparse_job(created_client["id"], board["id"])
+    ).json()["data"]
+
+    material = data["layouts"][0]["material"]
+    assert (material["width"], material["height"]) == (1220, 1220)
+
+
+def test_melamine_is_still_halved_across_the_long_side(client):
+    """The majority case, unchanged: same length, half the width."""
+    created_client = _create_client(client)
+    board = _create_subtype_board(client, "MDP15", "MDP", thickness=15)
+
+    data = client.post(
+        "/api/v1/optimize/", json=_sparse_job(created_client["id"], board["id"])
+    ).json()["data"]
+
+    material = data["layouts"][0]["material"]
+    assert (material["width"], material["height"]) == (610, 2440)
+
+
+@pytest.mark.parametrize(
+    "code,subtype,thickness",
+    [
+        ("OSB15", "OSB", 15),
+        ("PINO15", "Pine", 15),
+        ("EUC20", "Natural Wood", 20),
+        ("HG18", "High Gloss", 18),
+        ("MS18", "Math Soft", 18),
+        ("ENC16", "Veneer", 16),
+        ("MDP36", "MDP", 36),
+    ],
+)
+def test_materials_the_shop_only_sells_whole_are_never_halved(
+    client, code, subtype, thickness
+):
+    """The same sparse job that bills a half board on melamine bills a WHOLE
+    sheet here: the shop doesn't cut these in two, so quoting one would promise
+    something it can't deliver."""
+    created_client = _create_client(client)
+    board = _create_subtype_board(client, code, subtype, thickness=thickness)
+
+    data = client.post(
+        "/api/v1/optimize/", json=_sparse_job(created_client["id"], board["id"])
+    ).json()["data"]
+
+    material = data["layouts"][0]["material"]
+    assert material["halfBoard"] is False
+    assert (material["width"], material["height"]) == (1220, 2440)
+    assert data["totalBoardsCost"] == 45.5
+    assert data["materialsSummary"][0]["halfBoard"] is False
+
+
+def test_the_split_policy_is_in_the_optimization_hash(client):
+    """Two boards that differ ONLY in subtype must not share a cached plan —
+    the policy is read from the catalog, so it has to reach the hash."""
+    created_client = _create_client(client)
+    plywood = _create_subtype_board(client, "PLY15H", "Plywood")
+    melamine = _create_subtype_board(client, "MDP15H", "MDP", thickness=15)
+
+    first = client.post(
+        "/api/v1/optimize/", json=_sparse_job(created_client["id"], plywood["id"])
+    ).json()["data"]
+    second = client.post(
+        "/api/v1/optimize/", json=_sparse_job(created_client["id"], melamine["id"])
+    ).json()["data"]
+
+    assert first["optimizationHash"] != second["optimizationHash"]
+    assert first["layouts"][0]["material"]["height"] == 1220
+    assert second["layouts"][0]["material"]["height"] == 2440
+
+
 # --- Material pool: catalog board + client offcut ---------------------------
 
 

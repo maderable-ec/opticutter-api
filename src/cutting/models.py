@@ -115,10 +115,12 @@ class Material:
     height: float
     thickness: float
     cost_per_unit: float = 0.0
-    # Descriptive metadata: ``True`` if this sheet is a half board (width/2,
-    # cost = price/2 plus a configurable markup, e.g. cost/2 * 1.15). The
-    # algorithm ignores it; upper layers use it to group billing and label
-    # the document/cutting plan.
+    # Descriptive metadata: ``True`` if this sheet is a half board (half the
+    # area of its catalog sheet, cost = price/2 plus a configurable markup,
+    # e.g. cost/2 * 1.15). WHICH dimension was halved is not recorded and is
+    # not this layer's business — the caller decides it per material and hands
+    # down the finished dimensions. The algorithm ignores the flag; upper
+    # layers use it to group billing and label the document/cutting plan.
     half_board: bool = False
 
     def __post_init__(self):
@@ -152,9 +154,12 @@ class BinSpec:
 
     ``count=None`` means infinite supply (catalog boards); a finite ``count``
     models offcuts. A half board shares the parent's ``key`` (the material
-    identity) and differs only in ``width``/``cost_per_unit``/``half_board`` —
-    the search treats it as a cheaper alternative bin for the same material and
-    the cost objective decides when it pays off.
+    identity) and differs only in one dimension plus
+    ``cost_per_unit``/``half_board`` — the search treats it as a cheaper
+    alternative bin for the same material and the cost objective decides when
+    it pays off. Which dimension is halved (or whether a half exists at all) is
+    decided upstream, per material: nothing here derives a half spec, it only
+    ever re-packs against one it was given.
     """
 
     key: str

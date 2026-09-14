@@ -90,7 +90,12 @@ class MaterialSummary(CamelModel):
     total_cost: float
     half_board: bool = Field(
         default=False,
-        description="True if this line is a half board (length kept, width/2, cost/2)",
+        description=(
+            "True if this line is a half board: half the sheet at cost/2 plus "
+            "markup. Which side is halved depends on the material (the largo "
+            "for most, the lado corto for plywood and ranurado); read the "
+            "width/height, don't assume."
+        ),
     )
     skip_trim: bool = Field(
         default=False,
@@ -567,7 +572,11 @@ class Material(CamelModel):
     area: float = Field(..., description="Area of the material")
     half_board: bool = Field(
         default=False,
-        description="True if this sheet is a half board (length kept, width/2, cost/2)",
+        description=(
+            "True if this sheet is a half board: half the catalog sheet at "
+            "cost/2 plus markup. Which side is halved depends on the material, "
+            "so read the width/height above rather than assuming."
+        ),
     )
 
 
