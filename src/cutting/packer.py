@@ -9,11 +9,7 @@ so geometry, kerf, trims and the cut list have a single implementation.
 from operator import attrgetter
 from typing import List, Tuple
 
-from src.cutting.enums import (
-    PACKING_STRATEGY_SPLIT_RULE,
-    PackingStrategy,
-    SplitRule,
-)
+from src.cutting.enums import Selection, SplitRule
 from src.cutting.models import (
     Cut,
     Material,
@@ -27,15 +23,13 @@ from src.cutting.parameters import CuttingParameters
 _AREA = attrgetter("area")
 
 
-def _sort_pieces(pieces: List[Piece], strategy: PackingStrategy) -> List[Piece]:
-    """Placement order based on the packing strategy.
+def _sort_pieces(pieces: List[Piece]) -> List[Piece]:
+    """Placement order for a direct caller: Decreasing Area.
 
-    ``MAX_EFFICIENCY`` sorts by decreasing area (Decreasing Area).
-    ``LONG_OFFCUTS`` sorts by decreasing height then width, so the tallest
-    pieces anchor full columns along the long axis.
+    The search's constructors choose the order themselves (it is one of the
+    portfolio axes, see ``constructors.SORT_KEYS``) and pass ``presorted=True``,
+    so this is only what a caller that packs one sheet directly gets.
     """
-    if strategy == PackingStrategy.LONG_OFFCUTS:
-        return sorted(pieces, key=lambda p: (-p.priority, -p.height, -p.width))
     return sorted(pieces, key=lambda p: (-p.priority, -p.area))
 
 
@@ -84,15 +78,12 @@ class GuillotineOptimizer:
         cutting_params: CuttingParameters = None,
         split_rule: SplitRule = None,
         min_rect_size: float = 0.1,
-        strategy: PackingStrategy = PackingStrategy.MAX_EFFICIENCY,
+        selection: Selection = Selection.BEST_AREA_FIT,
     ):
         self.material = material
-        self.strategy = strategy
-        # Explicit ``split_rule`` wins; otherwise it's derived from the strategy.
+        self.selection = selection
         self.split_rule = (
-            split_rule
-            if split_rule is not None
-            else PACKING_STRATEGY_SPLIT_RULE[strategy]
+            split_rule if split_rule is not None else SplitRule.SHORTER_LEFTOVER_AXIS
         )
         self.cutting_params = cutting_params or CuttingParameters()
         self.kerf = max(0, self.cutting_params.kerf)
@@ -132,18 +123,14 @@ class GuillotineOptimizer:
 
         The search constructors decide the placement order themselves (it's one
         of the portfolio dimensions), so they pass ``presorted=True``; direct
-        callers keep the strategy-derived sort.
+        callers keep the default sort.
         """
         if not pieces:
             return [], []
 
         expanded_pieces = expand_pieces(pieces)
 
-        sorted_pieces = (
-            expanded_pieces
-            if presorted
-            else _sort_pieces(expanded_pieces, self.strategy)
-        )
+        sorted_pieces = expanded_pieces if presorted else _sort_pieces(expanded_pieces)
 
         unplaced_pieces = []
 
@@ -164,23 +151,22 @@ class GuillotineOptimizer:
         # per (piece, gap) pair. ``Rectangle.contains`` and the fit score are
         # inlined here for the same reason.
         #
-        # The fit score ranks gaps, lower first. ``MAX_EFFICIENCY`` is
-        # Best-Area-Fit: the leftover area after placing the piece.
-        # ``LONG_OFFCUTS`` is Bottom-Left — the gap furthest left and down
-        # wins, ties broken by area fit — which pushes pieces into a corner and
-        # leaves the dominant leftover as one continuous strip on the opposite
-        # side.
+        # The fit score ranks gaps, lower first. ``BEST_AREA_FIT`` compares the
+        # leftover area after placing the piece; ``BOTTOM_LEFT`` compares the
+        # gap's position first — furthest left and down wins, ties broken by
+        # area fit — which pushes pieces into a corner and leaves the dominant
+        # leftover as one continuous strip on the opposite side.
         piece_w = piece.width
         piece_h = piece.height
         piece_area = piece.area
         can_rotate = piece.can_rotate
-        long_offcuts = self.strategy == PackingStrategy.LONG_OFFCUTS
+        bottom_left = self.selection == Selection.BOTTOM_LEFT
 
         for i, rect in enumerate(self.remainders):
             rect_w = rect.width
             rect_h = rect.height
             leftover = rect.area - piece_area
-            fit = (rect.x, rect.y, leftover) if long_offcuts else leftover
+            fit = (rect.x, rect.y, leftover) if bottom_left else leftover
 
             if rect_w >= piece_w and rect_h >= piece_h:
                 # Secondary key: leftover width after placing. On equal-area

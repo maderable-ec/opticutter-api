@@ -45,9 +45,7 @@ def _create_board(client, code="MEL18"):
 _BRANCH = 1
 
 
-def _order_payload(
-    client_id, product_id, height=800, width=700, quantity=2, strategy=None
-):
+def _order_payload(client_id, product_id, height=800, width=700, quantity=2):
     # Default non-halvable (both sides > half-width of 610): full-board charging is
     # tested with a job that doesn't fit in half a board. Half-board tests pass
     # explicit small dimensions.
@@ -67,8 +65,6 @@ def _order_payload(
             }
         ],
     }
-    if strategy is not None:
-        payload["strategy"] = strategy
     return payload
 
 
@@ -814,21 +810,6 @@ def test_non_catalog_order_renders_its_document(client, db_session):
     assert document.status_code == 200
     assert document.headers["content-type"] == "application/pdf"
     assert len(document.content) > 1000
-
-
-def test_order_freezes_chosen_packing_strategy(client, db_session):
-    """The chosen strategy freezes into the order's immutable snapshot."""
-    b = _create_board(client)
-    c1 = _create_client(client, identifier="0100000371", phone="0100000371")
-    order = _mint_order(
-        db_session, _order_payload(c1["id"], b["id"], strategy="longOffcuts")
-    )
-    assert order.optimization_snapshot["strategy"] == "longOffcuts"
-
-    # Omitting the strategy freezes the default behavior.
-    c2 = _create_client(client, identifier="0100000389", phone="0100000389")
-    order_default = _mint_order(db_session, _order_payload(c2["id"], b["id"]))
-    assert order_default.optimization_snapshot["strategy"] == "default"
 
 
 def test_order_freezes_whole_board_line_and_plan(client, db_session):

@@ -10,7 +10,6 @@ from pydantic import (
     model_validator,
 )
 
-from src.cutting import PackingStrategy
 from src.modules.clients.schemas import ClientResponse
 from src.shared.schemas import CamelModel
 
@@ -28,26 +27,6 @@ class MaterialSource(str, Enum):
     company_offcut = "companyOffcut"
     client_offcut = "clientOffcut"
     manual = "manual"
-
-
-class OptimizationStrategy(str, Enum):
-    """Packing heuristic to apply during optimization.
-
-    ``default`` (Best-Area-Fit) minimizes total waste but fragments it across
-    several offcuts. ``longOffcuts`` pushes pieces against one side of the
-    board and concentrates the waste into one long continuous strip (along the
-    board's long axis), reusable as an offcut. Maps to ``cutting.PackingStrategy``.
-    """
-
-    default = "default"
-    long_offcuts = "longOffcuts"
-
-
-# Translation from the API enum to the cutting domain's profile.
-STRATEGY_TO_PACKING = {
-    OptimizationStrategy.default: PackingStrategy.MAX_EFFICIENCY,
-    OptimizationStrategy.long_offcuts: PackingStrategy.LONG_OFFCUTS,
-}
 
 
 # The three sale prices the catalog carries per product, by the number the API
@@ -522,15 +501,6 @@ class OptimizeRequest(CamelModel):
             "optimization geometry or hash; only what the marked lines cost."
         ),
     )
-    strategy: OptimizationStrategy = Field(
-        default=OptimizationStrategy.default,
-        description=(
-            "Packing heuristic. `default`: maximum efficiency (minimizes total "
-            "waste). `longOffcuts`: concentrates waste into one long reusable "
-            "strip by pushing pieces to one side. DOES affect optimization "
-            "geometry and hash (unlike clientId/priceLevel)."
-        ),
-    )
     variant: int = Field(
         default=0,
         ge=0,
@@ -706,10 +676,6 @@ class OptimizeResponse(CamelModel):
     )
     optimization_hash: Optional[str] = Field(
         default=None, description="Deterministic hash of the optimization inputs"
-    )
-    strategy: OptimizationStrategy = Field(
-        default=OptimizationStrategy.default,
-        description="Packing heuristic applied to this optimization",
     )
     variant: int = Field(
         default=0,

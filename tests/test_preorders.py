@@ -137,36 +137,6 @@ def test_create_preorder_unknown_client_404(client):
     assert resp.status_code == 404
 
 
-def test_preorder_persists_strategy_and_recomputes_with_it(client):
-    """The strategy is saved and the recompute (cache-first) uses it on every read."""
-    c, b = _setup(client)
-    data = _create_preorder(client, c, b, strategy="longOffcuts").json()["data"]
-    assert data["strategy"] == "longOffcuts"
-    assert data["optimization"]["strategy"] == "longOffcuts"
-
-    # Re-reading the pre-order recomputes again and keeps the strategy.
-    reread = client.get(f"/api/v1/preorders/{data['id']}").json()["data"]
-    assert reread["strategy"] == "longOffcuts"
-    assert reread["optimization"]["strategy"] == "longOffcuts"
-
-    # Omitting the strategy falls back to the default behavior.
-    other = _create_preorder(client, c, b, width=500).json()["data"]
-    assert other["strategy"] == "default"
-    assert other["optimization"]["strategy"] == "default"
-
-
-def test_update_preorder_changes_strategy(client):
-    c, b = _setup(client)
-    pre = _create_preorder(client, c, b).json()["data"]
-    assert pre["strategy"] == "default"
-
-    upd = client.put(f"/api/v1/preorders/{pre['id']}", json={"strategy": "longOffcuts"})
-    assert upd.status_code == 200
-    data = upd.json()["data"]
-    assert data["strategy"] == "longOffcuts"
-    assert data["optimization"]["strategy"] == "longOffcuts"
-
-
 def test_list_preorders_filter_by_multiple_statuses(client, db_session):
     """Repeating ``status`` filters by several at once; one occurrence still works."""
     c, b = _setup(client)
@@ -460,7 +430,7 @@ def _confirm_via_review(client, preorder_id):
 
 def test_duplicate_expired_preorder_copies_the_inputs(client, db_session):
     c, b = _setup(client)
-    payload = _order_payload(c["id"], b["id"], strategy="longOffcuts")
+    payload = _order_payload(c["id"], b["id"])
     payload["notes"] = "Obra Los Cerezos"
     payload["priceLevel"] = 2
     payload["variant"] = 3
@@ -487,7 +457,6 @@ def test_duplicate_expired_preorder_copies_the_inputs(client, db_session):
     assert detail["requirements"] == original["requirements"]
     assert detail["additionalServices"] == original["additionalServices"]
     assert detail["priceLevel"] == 2
-    assert detail["strategy"] == "longOffcuts"
     assert detail["variant"] == 3
     assert detail["notes"] == "Obra Los Cerezos"
     # Nothing is frozen: the copy quotes itself at today's prices.

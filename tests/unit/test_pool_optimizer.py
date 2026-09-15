@@ -4,7 +4,7 @@ Pure functions over the cutting engine — no DB. Cover the three fill orders,
 finite offcut supply, the catalog fallback and the determinism of ``auto``.
 """
 
-from src.cutting import CuttingParameters, PackingStrategy
+from src.cutting import CuttingParameters
 from src.cutting.models import BinSpec, Piece
 from src.modules.optimizations.materials import ResolvedMaterial
 from src.modules.optimizations.pool import optimize_offcut_pool, optimize_pool
@@ -185,22 +185,6 @@ def test_auto_minimizes_catalog_waste_and_is_deterministic():
         PARAMS,
     )
     assert _signature(auto) == _signature(again)
-
-
-def test_long_offcuts_strategy_threads_through():
-    # The packing strategy is forwarded to both the offcut and catalog passes.
-    primary = _mat("board", 2440, 1220, fill_order=PoolFillOrder.offcuts_first)
-    offcuts = [_offcut("off1", 800, 600)]
-    pieces = [
-        Piece(id="a", width=500, height=400),
-        Piece(id="b", width=2000, height=1000),
-    ]
-
-    layouts = _pool(
-        pieces, primary, offcuts, PARAMS, strategy=PackingStrategy.LONG_OFFCUTS
-    )
-
-    assert _all_placed_ids(layouts) == ["a", "b"]
 
 
 # --- Offcut-only pool: no catalog board, finite supply -----------------------
@@ -502,7 +486,6 @@ def test_skipping_the_trims_rescues_an_offcut_they_made_unusable():
         cutting_params=CuttingParameters(
             kerf=3, top_trim=60, bottom_trim=60, left_trim=60, right_trim=60
         ),
-        strategy=PackingStrategy.MAX_EFFICIENCY,
     )
     assert [p.id for p in stranded] == ["p1"]
 
@@ -511,7 +494,6 @@ def test_skipping_the_trims_rescues_an_offcut_they_made_unusable():
         anchor=anchor,
         offcuts=[],
         cutting_params=PARAMS,
-        strategy=PackingStrategy.MAX_EFFICIENCY,
     )
     assert none_stranded == []
     assert _all_placed_ids(layouts) == ["p1"]

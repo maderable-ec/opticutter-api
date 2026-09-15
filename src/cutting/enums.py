@@ -12,27 +12,23 @@ class SplitRule(Enum):
     LONGER_AXIS = "longer_axis"
 
 
-class PackingStrategy(str, Enum):
-    """Packing profile: groups the optimizer's three decisions.
+class Selection(str, Enum):
+    """How the packer picks WHICH free rectangle a piece goes into.
 
-    ``MAX_EFFICIENCY`` (default) minimizes total waste but fragments it:
-    area-decreasing sort + Best-Area-Fit selection + ``SHORTER_LEFTOVER_AXIS``
-    split.
+    ``BEST_AREA_FIT`` (the default everywhere) ranks gaps by the leftover area
+    after placing the piece: the tightest gap wins, which minimizes total waste
+    but fragments it across several offcuts.
 
-    ``LONG_OFFCUTS`` concentrates the waste into one continuous, reusable strip
-    along the board's long axis: height/width-decreasing sort (builds columns)
-    + Bottom-Left selection (pushes pieces into a corner) + ``LONGER_AXIS``
-    split (preserves the rectangle's long axis). This is the "usable offcuts"
-    heuristic (Cutting Stock Problem with Usable Leftovers).
+    ``BOTTOM_LEFT`` ranks by position first — the gap furthest left and down
+    wins, ties broken by area fit — which pushes pieces into a corner and leaves
+    the dominant leftover as one continuous strip on the opposite side.
+
+    This is an axis of the search's candidate portfolio (see
+    ``constructors.GREEDY_PORTFOLIO``), not a user-facing setting: the seller
+    picks no heuristic, the search evaluates both and keeps whatever bills less.
+    The integer codes the Rust kernel reads are in ``rust_backend``; they are the
+    FFI contract and must keep matching ``rust/src/models.rs``.
     """
 
-    MAX_EFFICIENCY = "max_efficiency"
-    LONG_OFFCUTS = "long_offcuts"
-
-
-# Single source of truth for the split rule per strategy. ``GuillotineOptimizer``
-# uses it when no explicit ``split_rule`` is passed.
-PACKING_STRATEGY_SPLIT_RULE = {
-    PackingStrategy.MAX_EFFICIENCY: SplitRule.SHORTER_LEFTOVER_AXIS,
-    PackingStrategy.LONG_OFFCUTS: SplitRule.LONGER_AXIS,
-}
+    BEST_AREA_FIT = "best_area_fit"
+    BOTTOM_LEFT = "bottom_left"

@@ -21,7 +21,7 @@ import opticutter_core  # noqa: E402
 
 from src.cutting import CuttingParameters  # noqa: E402
 from src.cutting.constructors import GREEDY_PORTFOLIO, greedy_fill  # noqa: E402
-from src.cutting.enums import PackingStrategy, SplitRule  # noqa: E402
+from src.cutting.enums import Selection, SplitRule  # noqa: E402
 from src.cutting.packer import expand_pieces  # noqa: E402
 
 PARAMS = CuttingParameters(
@@ -47,7 +47,7 @@ SPLIT_CODES = {
     SplitRule.SHORTER_AXIS: 4,
     SplitRule.LONGER_AXIS: 5,
 }
-SELECTION_CODES = {PackingStrategy.MAX_EFFICIENCY: 0, PackingStrategy.LONG_OFFCUTS: 1}
+SELECTION_CODES = {Selection.BEST_AREA_FIT: 0, Selection.BOTTOM_LEFT: 1}
 PT = (
     PARAMS.kerf,
     PARAMS.top_trim,

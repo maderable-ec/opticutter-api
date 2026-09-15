@@ -160,20 +160,18 @@ No cycles, enforced by convention:
   list (catalog boards, company/client offcuts, or manual entries, unified by
   a `MaterialInput` discriminated union) and `requirements` that reference a
   material by `materialKey`, never a catalog ID directly — `cutting/` only
-  ever sees geometry. A pluggable `strategy` (`default` for maximum
-  efficiency, `longOffcuts` to concentrate waste into one reusable strip)
-  affects both the geometry and the result's cache key. Results are
-  deterministic and cached in Redis by a hash of the canonical request — nothing
-  is persisted to the database here. This module also owns the rendering
+  ever sees geometry. There is no packing heuristic to choose: the search
+  evaluates its whole candidate portfolio and keeps whatever bills least.
+  Results are deterministic and cached in Redis by a hash of the canonical
+  request — nothing is persisted to the database here. This module also owns the rendering
   pipeline behind the order's one PDF (`build_order_packet`): `documents.py`
   (document layout via ReportLab) and
   `visualization.py` (the cutting diagram via Pillow — see
   [`CUTTING_DIAGRAM.md`](CUTTING_DIAGRAM.md)).
 - **`optimization_drafts`** — lets a seller save a named, editable optimizer
-  input (materials + requirements + strategy) before turning it into a
-  pre-order.
+  input (materials + requirements) before turning it into a pre-order.
 - **`preorders`** — mutable quotes. A pre-order re-optimizes from its stored
-  `materials`/`requirements`/`strategy` on every read, so prices and layout
+  `materials`/`requirements` on every read, so prices and layout
   always reflect current catalog/settings. Supports a client-review flow:
   `POST /preorders/{id}/review-link` issues a single-use, sha256-hashed
   token; the public, token-gated endpoints in `public_router.py` let the

@@ -53,7 +53,6 @@ def _detail(svc: PreOrderService, preorder: PreOrderModel) -> PreOrderResponse:
         branch=preorder.branch,
         status=PreOrderStatus(preorder.status),
         price_level=preorder.price_level,
-        strategy=preorder.strategy,
         variant=preorder.variant,
         notes=preorder.notes,
         client_note=preorder.client_note,
@@ -201,9 +200,9 @@ def duplicate_preorder(
 ):
     """Creates a new quote from a closed one (expired/rejected/cancelled/confirmed).
 
-    Copies the optimizer inputs, the services, the price level, the strategy,
-    the variant and the commercial reference into a fresh ``draft`` in the same
-    branch; the copy re-optimizes on read, so it quotes at today's prices.
+    Copies the optimizer inputs, the services, the price level, the variant and
+    the commercial reference into a fresh ``draft`` in the same branch; the copy
+    re-optimizes on read, so it quotes at today's prices.
 
     Answers with the SUMMARY and not the detail on purpose: the detail recomputes
     the optimization, which costs tens of seconds on a big job. The caller only

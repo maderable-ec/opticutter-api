@@ -7,7 +7,6 @@ public endpoints, and idempotent order creation.
 
 from datetime import datetime, timedelta
 
-from src.modules.orders.model import OrderModel
 from src.modules.preorders.model import PreOrderModel
 from src.shared.config import config
 
@@ -336,21 +335,6 @@ def test_confirm_creates_immutable_order(client):
     info = client.get(f"/api/v1/preorders/{pre['id']}/review-link").json()["data"]
     assert info["status"] == "used"
     assert info["usedAt"] is not None
-
-
-def test_confirm_inherits_preorder_strategy(client, db_session):
-    """On confirmation, the order inherits and freezes the pre-order's strategy."""
-    pre = _setup_preorder(client, strategy="longOffcuts")
-    assert pre["strategy"] == "longOffcuts"
-    link = _generate_link(client, pre["id"])
-
-    resp = client.post(f"/api/v1/public/review/{link['token']}/confirm")
-    assert resp.status_code == 200
-
-    order_id = client.get(f"/api/v1/preorders/{pre['id']}").json()["data"]["orderId"]
-    db_session.expire_all()
-    order = db_session.get(OrderModel, order_id)
-    assert order.optimization_snapshot["strategy"] == "longOffcuts"
 
 
 def test_reconfirm_is_benign_and_does_not_duplicate_order(client):

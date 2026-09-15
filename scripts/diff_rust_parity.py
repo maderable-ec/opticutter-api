@@ -29,7 +29,7 @@ from src.cutting.constructors import (  # noqa: E402
     greedy_fill,
     strip_fill,
 )
-from src.cutting.enums import PackingStrategy, SplitRule  # noqa: E402
+from src.cutting.enums import Selection, SplitRule  # noqa: E402
 from src.cutting.packer import expand_pieces  # noqa: E402
 
 PARAMS = CuttingParameters(
@@ -57,8 +57,8 @@ SPLIT_CODES = {
     SplitRule.LONGER_AXIS: 5,
 }
 SELECTION_CODES = {
-    PackingStrategy.MAX_EFFICIENCY: 0,
-    PackingStrategy.LONG_OFFCUTS: 1,
+    Selection.BEST_AREA_FIT: 0,
+    Selection.BOTTOM_LEFT: 1,
 }
 MIN_RECT = 0.1
 

@@ -9,7 +9,6 @@ from src.modules.optimizations.schemas import (
     AdditionalServiceLine,
     CutSegment,
     MaterialInput,
-    OptimizationStrategy,
     Remainder,
     Requirement,
     validate_material_graph,
@@ -43,13 +42,6 @@ class OrderCreate(CamelModel):
         ge=1,
         le=3,
         description="Catalog price level to bill the marked boards at (1 = list)",
-    )
-    strategy: OptimizationStrategy = Field(
-        default=OptimizationStrategy.default,
-        description=(
-            "Packing heuristic to use when recomputing and freezing the snapshot "
-            "(default | longOffcuts). Inherited from the pre-order on confirmation."
-        ),
     )
     variant: int = Field(
         default=0,

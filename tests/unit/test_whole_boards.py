@@ -77,7 +77,6 @@ def _payload(layouts=None, materials=None, boards_cost=HALF_COST):
     from src.modules.optimizations.summary import build_materials_summary
 
     return {
-        "strategy": "default",
         "variant": 0,
         "total_boards_used": len(layouts),
         "total_boards_cost": boards_cost,

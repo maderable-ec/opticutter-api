@@ -29,7 +29,7 @@ import os
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from src.cutting.constructors import BinFill, GreedyConfig
-from src.cutting.enums import PackingStrategy, SplitRule
+from src.cutting.enums import Selection, SplitRule
 from src.cutting.models import BinSpec, Cut, Piece, PlacedPiece, Rectangle
 from src.cutting.parameters import CuttingParameters
 
@@ -57,9 +57,11 @@ _SPLIT_CODES: Dict[SplitRule, int] = {
     SplitRule.SHORTER_AXIS: 4,
     SplitRule.LONGER_AXIS: 5,
 }
-_SELECTION_CODES: Dict[PackingStrategy, int] = {
-    PackingStrategy.MAX_EFFICIENCY: 0,
-    PackingStrategy.LONG_OFFCUTS: 1,
+# The FFI contract: these integers must keep matching ``Selection`` in
+# ``rust/src/models.rs``.
+_SELECTION_CODES: Dict[Selection, int] = {
+    Selection.BEST_AREA_FIT: 0,
+    Selection.BOTTOM_LEFT: 1,
 }
 
 

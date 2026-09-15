@@ -35,10 +35,6 @@ saved.
 the budget is counted in candidate fills (decodes) and solver calls, never wall
 clock, every iteration order is stable, and ``seed`` (the request ``variant``)
 only reorders exploration to yield alternative solutions on demand.
-
-``LONG_OFFCUTS`` keeps the legacy single pass on purpose: its contract is
-geometric (one continuous reusable strip) and minimizing boards would trade it
-away. It still benefits from the half-board downgrade.
 """
 
 import math
@@ -56,11 +52,7 @@ from src.cutting.constructors import (
     piece_type,
     strip_fill,
 )
-from src.cutting.enums import (
-    PACKING_STRATEGY_SPLIT_RULE,
-    PackingStrategy,
-    SplitRule,
-)
+from src.cutting.enums import Selection, SplitRule
 from src.cutting.models import BinSpec, CuttingLayout, Piece, PlacedPiece
 from src.cutting.packer import expand_pieces
 from src.cutting.parameters import CuttingParameters
@@ -192,18 +184,12 @@ _REPAIR_FILL_GATE = 0.30
 _HALF_REPARTITION_GATE = 0.55
 _REPAIR_KERF_DELTAS = (1.0, 2.0)
 
-_LEGACY_CONFIG = {
-    PackingStrategy.MAX_EFFICIENCY: GreedyConfig(
-        sort="area",
-        split=SplitRule.SHORTER_LEFTOVER_AXIS,
-        selection=PackingStrategy.MAX_EFFICIENCY,
-    ),
-    PackingStrategy.LONG_OFFCUTS: GreedyConfig(
-        sort="height",
-        split=SplitRule.LONGER_AXIS,
-        selection=PackingStrategy.LONG_OFFCUTS,
-    ),
-}
+# The single-pass greedy that gives stage 0 its baseline and upper bound.
+_LEGACY_CONFIG = GreedyConfig(
+    sort="area",
+    split=SplitRule.SHORTER_LEFTOVER_AXIS,
+    selection=Selection.BEST_AREA_FIT,
+)
 
 
 @dataclass(frozen=True)
@@ -1441,7 +1427,6 @@ def optimize_bins(
     pieces: List[Piece],
     bins: List[BinSpec],
     cutting_params: CuttingParameters = None,
-    strategy: PackingStrategy = PackingStrategy.MAX_EFFICIENCY,
     budget: SearchBudget = None,
     seed: int = 0,
     min_rect_size: float = 0.1,
@@ -1492,13 +1477,13 @@ def optimize_bins(
             placeable,
             bins,
             params,
-            _LEGACY_CONFIG[strategy],
+            _LEGACY_CONFIG,
             min_rect_size,
             max_sheets,
         )
         solution = _Solution(fills=legacy_fills, unplaced=legacy_rest)
 
-        if strategy == PackingStrategy.MAX_EFFICIENCY and not legacy_rest:
+        if not legacy_rest:
             total_area = sum(p.area for p in placeable)
             lb = _cost_lower_bound(total_area, bins, params)
 
@@ -1595,7 +1580,7 @@ def optimize_bins(
 
     layouts = _to_layouts(solution.fills)
 
-    if _repair and placeable and strategy == PackingStrategy.MAX_EFFICIENCY:
+    if _repair and placeable:
         repaired = _relaxed_kerf_repair(
             placeable,
             bins,
@@ -1836,19 +1821,15 @@ class MultiSheetGuillotineOptimizer:
         split_rule: SplitRule = None,
         max_sheets: int = 100,
         min_rect_size: float = 0.1,
-        strategy: PackingStrategy = PackingStrategy.MAX_EFFICIENCY,
         budget: SearchBudget = None,
         seed: int = 0,
         exact_config: ExactConfig = None,
     ):
         self.material_template = material_template
-        self.strategy = strategy
         # Kept for API compatibility: the search explores many split rules, but
-        # the derived/explicit one still drives the legacy sequential pass.
+        # the explicit one still drives the legacy sequential pass.
         self.split_rule = (
-            split_rule
-            if split_rule is not None
-            else PACKING_STRATEGY_SPLIT_RULE[strategy]
+            split_rule if split_rule is not None else SplitRule.SHORTER_LEFTOVER_AXIS
         )
         self.cutting_params = cutting_params
         self.max_sheets = max_sheets
@@ -1870,7 +1851,6 @@ class MultiSheetGuillotineOptimizer:
             pieces,
             [spec],
             cutting_params=self.cutting_params,
-            strategy=self.strategy,
             budget=self.budget,
             seed=self.seed,
             min_rect_size=self.min_rect_size,

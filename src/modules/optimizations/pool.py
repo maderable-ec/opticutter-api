@@ -30,7 +30,6 @@ Three fill orders (see ``PoolFillOrder``), all specific to a catalog anchor:
 
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from src.cutting.enums import PackingStrategy
 from src.cutting.models import BinSpec, CuttingLayout, Material, Piece
 from src.cutting.packer import GuillotineOptimizer
 from src.cutting.parameters import CuttingParameters
@@ -60,7 +59,6 @@ def _pack_offcut(
     material: Material,
     pieces: List[Piece],
     cutting_params: CuttingParameters,
-    strategy: PackingStrategy,
     min_rect_size: float,
     sheet_number: int,
 ) -> Tuple[Optional[CuttingLayout], List[Piece]]:
@@ -69,7 +67,6 @@ def _pack_offcut(
         optimizer = GuillotineOptimizer(
             material=material,
             cutting_params=cutting_params,
-            strategy=strategy,
             min_rect_size=min_rect_size,
         )
     except ValueError:
@@ -92,7 +89,6 @@ def _fill_offcuts(
     offcuts: List[ResolvedMaterial],
     pieces: List[Piece],
     cutting_params: CuttingParameters,
-    strategy: PackingStrategy,
     min_rect_size: float,
 ) -> Tuple[List[CuttingLayout], List[Piece]]:
     """Greedily fills each finite offcut sheet; returns ``(layouts, remaining)``."""
@@ -108,7 +104,6 @@ def _fill_offcuts(
                 material,
                 remaining,
                 cutting_params,
-                strategy,
                 min_rect_size,
                 sheet_number=unit,
             )
@@ -136,7 +131,6 @@ def _fill_catalog(
     primary: ResolvedMaterial,
     pieces: List[Piece],
     cutting_params: CuttingParameters,
-    strategy: PackingStrategy,
     min_rect_size: float,
     max_sheets: int,
     budget: Optional[SearchBudget] = None,
@@ -175,7 +169,6 @@ def _fill_catalog(
     )
     kwargs = dict(
         cutting_params=cutting_params,
-        strategy=strategy,
         budget=budget,
         seed=seed,
         min_rect_size=min_rect_size,
@@ -204,7 +197,6 @@ def _offcuts_first(
     primary: ResolvedMaterial,
     offcuts: List[ResolvedMaterial],
     cutting_params: CuttingParameters,
-    strategy: PackingStrategy,
     min_rect_size: float,
     max_sheets: int,
     budget: Optional[SearchBudget] = None,
@@ -213,13 +205,12 @@ def _offcuts_first(
     half_spec: Optional[BinSpec] = None,
 ) -> Tuple[List[CuttingLayout], List[Piece]]:
     offcut_layouts, remaining = _fill_offcuts(
-        offcuts, pieces, cutting_params, strategy, min_rect_size
+        offcuts, pieces, cutting_params, min_rect_size
     )
     catalog_layouts, unplaced = _fill_catalog(
         primary,
         remaining,
         cutting_params,
-        strategy,
         min_rect_size,
         max_sheets,
         budget,
@@ -235,7 +226,6 @@ def _catalog_first(
     primary: ResolvedMaterial,
     offcuts: List[ResolvedMaterial],
     cutting_params: CuttingParameters,
-    strategy: PackingStrategy,
     min_rect_size: float,
     max_sheets: int,
     budget: Optional[SearchBudget] = None,
@@ -255,7 +245,6 @@ def _catalog_first(
         primary,
         pieces,
         cutting_params,
-        strategy,
         min_rect_size,
         max_sheets,
         budget,
@@ -270,7 +259,6 @@ def _catalog_first(
             primary,
             pieces,
             cutting_params,
-            strategy,
             min_rect_size,
             k,
             budget,
@@ -279,7 +267,7 @@ def _catalog_first(
             half_spec,
         )
         offcut_layouts, remaining = _fill_offcuts(
-            offcuts, remaining, cutting_params, strategy, min_rect_size
+            offcuts, remaining, cutting_params, min_rect_size
         )
         if not remaining:
             return catalog_layouts + offcut_layouts, oversized
@@ -330,7 +318,6 @@ def optimize_pool(
     primary: ResolvedMaterial,
     offcuts: List[ResolvedMaterial],
     cutting_params: CuttingParameters,
-    strategy: PackingStrategy = PackingStrategy.MAX_EFFICIENCY,
     min_rect_size: float = 0.1,
     max_sheets: int = 100,
     half_spec: Optional[BinSpec] = None,
@@ -362,7 +349,6 @@ def optimize_pool(
             primary,
             pieces,
             cutting_params,
-            strategy,
             min_rect_size,
             max_sheets,
             budget,
@@ -383,7 +369,6 @@ def optimize_pool(
         primary,
         offcuts,
         cutting_params,
-        strategy,
         min_rect_size,
         max_sheets,
         budget,
@@ -472,7 +457,6 @@ def optimize_offcut_pool(
     anchor: ResolvedMaterial,
     offcuts: List[ResolvedMaterial],
     cutting_params: CuttingParameters,
-    strategy: PackingStrategy = PackingStrategy.MAX_EFFICIENCY,
     min_rect_size: float = 0.1,
     max_sheets: int = 100,
     budget: Optional[SearchBudget] = None,
@@ -510,7 +494,6 @@ def optimize_offcut_pool(
             pool,
             specs,
             cutting_params=cutting_params,
-            strategy=strategy,
             budget=budget,
             seed=seed,
             min_rect_size=min_rect_size,
