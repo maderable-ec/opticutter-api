@@ -342,13 +342,19 @@ class OrderService(BranchScopedMixin):
             for e in payload.get("edge_bandings_summary", [])
         ]
         # Cut list = pieces (production input; not billed). The product is
-        # resolved by the material's key (null if the material isn't from the catalog).
+        # resolved by the material's key (null if the material isn't from the catalog),
+        # and the key itself is frozen alongside it: it is the only identity that
+        # survives a client's offcut, a manual measurement, or two pools of the same
+        # board. ``_dump_requirement`` puts all three on the requirement.
         product_id_by_key = {
             m["material_key"]: m["product_id"] for m in payload.get("materials", [])
         }
         order.pieces = [
             OrderPieceModel(
+                material_key=r["material_key"],
                 product_id=product_id_by_key[r["material_key"]],
+                product_code=r.get("product_code"),
+                product_name=r.get("product_name"),
                 label=r.get("label"),
                 height=r["height"],
                 width=r["width"],

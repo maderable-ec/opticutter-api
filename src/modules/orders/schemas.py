@@ -189,7 +189,16 @@ class OrderLineResponse(CamelModel):
 
 class OrderPieceResponse(CamelModel):
     id: int
+    material_key: Optional[str] = Field(
+        default=None,
+        description="Material this piece is cut from, as the optimization keys "
+        "it. The only identity that survives a non-catalog material or two "
+        "pools of the same board; NULL only on an order whose snapshot the "
+        "backfill could not read",
+    )
     product_id: Optional[int] = None  # null if the material isn't from the catalog
+    product_code: Optional[str] = None
+    product_name: Optional[str] = None
     label: Optional[str] = None
     height: int
     width: int
