@@ -308,7 +308,7 @@ pub fn strip_fill(
                 mat_h,
                 &strip_params,
                 SplitRule::ShorterLeftoverAxis,
-                Selection::MaxEfficiency,
+                Selection::BestAreaFit,
                 min_rect_size,
             ) {
                 Some(p) => p,

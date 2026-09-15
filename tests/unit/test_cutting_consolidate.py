@@ -19,7 +19,6 @@ from src.cutting import (
     CuttingParameters,
     Material,
     MultiSheetGuillotineOptimizer,
-    PackingStrategy,
     Piece,
     Rectangle,
     consolidate_layout,
@@ -33,12 +32,8 @@ PARAMS = CuttingParameters(
 SHEET = Material(id="mdp", width=2070, height=2800, thickness=15, cost_per_unit=79.0)
 
 
-def _pack(pieces, params=PARAMS, material=SHEET, strategy=None):
-    optimizer = MultiSheetGuillotineOptimizer(
-        material,
-        params,
-        strategy=strategy or PackingStrategy.MAX_EFFICIENCY,
-    )
+def _pack(pieces, params=PARAMS, material=SHEET):
+    optimizer = MultiSheetGuillotineOptimizer(material, params)
     layouts, unplaced = optimizer.optimize(pieces)
     assert not unplaced
     return layouts

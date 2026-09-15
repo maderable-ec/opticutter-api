@@ -8,11 +8,7 @@ from src.cutting.consolidate import (
     consolidate_layout,
     consolidate_layouts,
 )
-from src.cutting.enums import (
-    PACKING_STRATEGY_SPLIT_RULE,
-    PackingStrategy,
-    SplitRule,
-)
+from src.cutting.enums import Selection, SplitRule
 from src.cutting.exact import is_available as exact_available
 from src.cutting.models import (
     BinSpec,
@@ -36,7 +32,6 @@ from src.cutting.search import (
 __all__ = [
     "DEFAULT_MIN_USABLE_OFFCUT",
     "ENGINE_VERSION",
-    "PACKING_STRATEGY_SPLIT_RULE",
     "BinSpec",
     "Cut",
     "CuttingLayout",
@@ -45,11 +40,11 @@ __all__ = [
     "GuillotineOptimizer",
     "Material",
     "MultiSheetGuillotineOptimizer",
-    "PackingStrategy",
     "Piece",
     "PlacedPiece",
     "Rectangle",
     "SearchBudget",
+    "Selection",
     "SplitRule",
     "consolidate_layout",
     "consolidate_layouts",

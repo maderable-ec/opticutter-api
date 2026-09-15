@@ -3,16 +3,18 @@
 import pytest
 
 from src.cutting import (
+    BinSpec,
     CuttingLayout,
     CuttingParameters,
     GuillotineOptimizer,
     Material,
     MultiSheetGuillotineOptimizer,
-    PackingStrategy,
     Piece,
     Rectangle,
+    Selection,
     SplitRule,
 )
+from src.cutting.constructors import GreedyConfig, greedy_fill
 
 # --- Models ----------------------------------------------------------------
 
@@ -224,7 +226,12 @@ def test_multisheet_layouts_track_cut_length():
         assert layout.cut_length > 0
 
 
-# --- Packing strategies (PackingStrategy) -------------------------------------
+# --- Free-rect selection (Selection) -----------------------------------------
+#
+# ``Selection`` is no longer a user-facing heuristic: it is one axis of the
+# search's candidate portfolio (``constructors.GREEDY_PORTFOLIO``), so it is
+# exercised where it lives -- on a single greedy fill -- rather than through a
+# strategy argument the API no longer has.
 
 
 def _example_setup():
@@ -241,27 +248,53 @@ def _example_setup():
     return material, params, pieces
 
 
-def test_strategy_derives_split_rule_when_not_passed():
-    """Without an explicit ``split_rule``, the strategy defines the split rule."""
-    material = Material(id="m", width=1830, height=2440, thickness=15)
-    default = MultiSheetGuillotineOptimizer(material_template=material)
-    long_off = MultiSheetGuillotineOptimizer(
-        material_template=material, strategy=PackingStrategy.LONG_OFFCUTS
+def _example_spec(material):
+    return BinSpec(
+        key=material.id,
+        width=material.width,
+        height=material.height,
+        thickness=material.thickness,
+        cost_per_unit=100.0,
     )
-    assert default.strategy == PackingStrategy.MAX_EFFICIENCY
-    assert default.split_rule == SplitRule.SHORTER_LEFTOVER_AXIS
-    assert long_off.split_rule == SplitRule.LONGER_AXIS
-    # An explicit ``split_rule`` wins over the one derived from the strategy.
+
+
+# The two portfolio points that bracket the axis: Best-Area-Fit with the default
+# split (what a direct caller gets) and Bottom-Left with ``LONGER_AXIS``, the
+# combination that concentrates the waste into one strip.
+_BAF = GreedyConfig(
+    sort="area",
+    split=SplitRule.SHORTER_LEFTOVER_AXIS,
+    selection=Selection.BEST_AREA_FIT,
+)
+_BOTTOM_LEFT = GreedyConfig(
+    sort="height",
+    split=SplitRule.LONGER_AXIS,
+    selection=Selection.BOTTOM_LEFT,
+)
+
+
+def test_split_rule_defaults_to_shorter_leftover_axis():
+    """Without an explicit ``split_rule`` both optimizers take the default one."""
+    material = Material(id="m", width=1830, height=2440, thickness=15)
+    assert (
+        MultiSheetGuillotineOptimizer(material_template=material).split_rule
+        == SplitRule.SHORTER_LEFTOVER_AXIS
+    )
+    assert (
+        GuillotineOptimizer(material=material).split_rule
+        == SplitRule.SHORTER_LEFTOVER_AXIS
+    )
+    # An explicit ``split_rule`` wins over the default.
     override = GuillotineOptimizer(
         material=material,
         split_rule=SplitRule.MAXIMIZE_AREA,
-        strategy=PackingStrategy.LONG_OFFCUTS,
+        selection=Selection.BOTTOM_LEFT,
     )
     assert override.split_rule == SplitRule.MAXIMIZE_AREA
 
 
-def test_default_strategy_preserves_best_area_fit_layout():
-    """The default (MAX_EFFICIENCY) preserves the historical behavior (BAF)."""
+def test_default_search_preserves_best_area_fit_layout():
+    """The engine's default preserves the historical behavior (BAF)."""
     material, params, pieces = _example_setup()
     optimizer = MultiSheetGuillotineOptimizer(
         material_template=material, cutting_params=params
@@ -278,41 +311,31 @@ def test_default_strategy_preserves_best_area_fit_layout():
     assert max(p.x + p.width for p in layout.placed_pieces) > 1700
 
 
-def test_long_offcuts_leaves_full_height_strip_against_one_side():
-    """``LONG_OFFCUTS`` pushes pieces to the left and leaves a full-height strip."""
+def test_bottom_left_leaves_full_height_strip_against_one_side():
+    """``BOTTOM_LEFT`` pushes pieces to the left and leaves a full-height strip."""
     material, params, pieces = _example_setup()
-    optimizer = MultiSheetGuillotineOptimizer(
-        material_template=material,
-        cutting_params=params,
-        strategy=PackingStrategy.LONG_OFFCUTS,
-    )
-    layouts, remaining = optimizer.optimize(pieces)
+    fill = greedy_fill(pieces, _example_spec(material), params, _BOTTOM_LEFT)
 
-    assert remaining == []
-    layout = layouts[0]
+    assert fill is not None and len(fill.placed) == len(pieces)
     usable_height = material.height - params.top_trim - params.bottom_trim  # 2420
 
     # The dominant leftover is a strip spanning the full usable height.
-    biggest = max(layout.remainders, key=lambda r: r.area)
+    biggest = max(fill.remainders, key=lambda r: r.area)
     assert biggest.height == pytest.approx(usable_height)
     # It hugs one side: pieces don't encroach on it (all to its left).
-    assert all(p.x + p.width <= biggest.x + 1e-6 for p in layout.placed_pieces)
+    assert all(p.x + p.width <= biggest.x + 1e-6 for p in fill.placed)
     # Pieces end up packed against the left side of the board.
-    assert max(p.x + p.width for p in layout.placed_pieces) < material.width / 2
+    assert max(p.x + p.width for p in fill.placed) < material.width / 2
 
 
-def test_long_offcuts_differs_from_default_layout():
-    """The two strategies produce different layouts for the same input."""
+def test_bottom_left_differs_from_best_area_fit():
+    """The two selections produce different layouts for the same input."""
     material, params, pieces = _example_setup()
-    default = MultiSheetGuillotineOptimizer(
-        material_template=material, cutting_params=params
-    ).optimize(pieces)[0][0]
-    long_off = MultiSheetGuillotineOptimizer(
-        material_template=material,
-        cutting_params=params,
-        strategy=PackingStrategy.LONG_OFFCUTS,
-    ).optimize(pieces)[0][0]
+    spec = _example_spec(material)
+    baf = greedy_fill(pieces, spec, params, _BAF)
+    bottom_left = greedy_fill(pieces, spec, params, _BOTTOM_LEFT)
 
-    default_xs = sorted((p.piece.id, p.x, p.y) for p in default.placed_pieces)
-    long_xs = sorted((p.piece.id, p.x, p.y) for p in long_off.placed_pieces)
-    assert default_xs != long_xs
+    assert baf is not None and bottom_left is not None
+    baf_xs = sorted((p.piece.id, p.x, p.y) for p in baf.placed)
+    bl_xs = sorted((p.piece.id, p.x, p.y) for p in bottom_left.placed)
+    assert baf_xs != bl_xs

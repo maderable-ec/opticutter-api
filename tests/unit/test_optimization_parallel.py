@@ -14,7 +14,7 @@ from concurrent.futures.process import BrokenProcessPool
 
 import pytest
 
-from src.cutting import CuttingParameters, PackingStrategy
+from src.cutting import CuttingParameters
 from src.cutting.models import BinSpec, Piece
 from src.cutting.search import ExactConfig, SearchBudget
 from src.modules.optimizations import parallel
@@ -84,7 +84,6 @@ def _job(key="board", *, pieces=None, offcuts=(), half_spec=None, material=None)
         material=material,
         offcuts=offcuts,
         cutting_params=PARAMS,
-        strategy=PackingStrategy.MAX_EFFICIENCY,
         half_spec=half_spec,
         budget=BUDGET,
         seed=0,
@@ -385,7 +384,6 @@ def test_an_untrimmed_job_crosses_the_pickle_boundary_intact():
         cutting_params=CuttingParameters(
             kerf=3, top_trim=0.0, bottom_trim=0.0, left_trim=0.0, right_trim=0.0
         ),
-        strategy=PackingStrategy.MAX_EFFICIENCY,
         half_spec=None,
         budget=BUDGET,
         seed=0,

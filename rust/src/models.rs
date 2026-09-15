@@ -124,19 +124,21 @@ impl SplitRule {
     }
 }
 
-/// Mirror of `enums.PackingStrategy`, used here as the free-rect *selection*
-/// axis: `MaxEfficiency` is Best-Area-Fit, `LongOffcuts` is Bottom-Left.
+/// Mirror of `enums.Selection`: how the packer picks WHICH free rect a piece
+/// goes into. `BestAreaFit` ranks gaps by leftover area, `BottomLeft` by
+/// position. The discriminants are the FFI contract (`_SELECTION_CODES` in
+/// `rust_backend.py`) and must not move.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Selection {
-    MaxEfficiency = 0,
-    LongOffcuts = 1,
+    BestAreaFit = 0,
+    BottomLeft = 1,
 }
 
 impl Selection {
     pub fn from_code(code: u8) -> Option<Self> {
         match code {
-            0 => Some(Selection::MaxEfficiency),
-            1 => Some(Selection::LongOffcuts),
+            0 => Some(Selection::BestAreaFit),
+            1 => Some(Selection::BottomLeft),
             _ => None,
         }
     }

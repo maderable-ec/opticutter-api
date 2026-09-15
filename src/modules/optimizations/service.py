@@ -42,10 +42,8 @@ from src.modules.optimizations.price_levels import (
 )
 from src.modules.optimizations.pricing import build_pricing
 from src.modules.optimizations.schemas import (
-    STRATEGY_TO_PACKING,
     EdgeBandingSpec,
     EdgeSide,
-    OptimizationStrategy,
     OptimizeRequest,
     OptimizeResponse,
     PricingSummary,
@@ -146,7 +144,6 @@ class OptimizationService:
             id=None,
             client=client,
             optimization_hash=optimization_hash,
-            strategy=payload.get("strategy", OptimizationStrategy.default.value),
             variant=payload.get("variant", 0),
             total_boards_used=payload["total_boards_used"],
             total_boards_cost=payload["total_boards_cost"],
@@ -237,7 +234,6 @@ class OptimizationService:
                 optimization_hash,
             )
 
-        strategy = STRATEGY_TO_PACKING[request.strategy]
         exact_config = _exact_config()
 
         # The pools are independent, so the request should cost the MAX over its
@@ -280,7 +276,6 @@ class OptimizationService:
                     # Pooled offcuts: extra finite stock for this catalog board.
                     offcuts=tuple(pools.get(key) or ()),
                     cutting_params=job_params,
-                    strategy=strategy,
                     half_spec=self._half_spec(resolved[key], half_board_markup_pct),
                     budget=SearchBudget.scaled(
                         len(pieces),
@@ -531,7 +526,6 @@ class OptimizationService:
                 "right_trim": cutting_params.right_trim,
                 "edge_banding_waste_factor": waste_factor,
                 "half_board_markup_pct": half_board_markup_pct,
-                "strategy": request.strategy.value,
                 # Anything that changes the produced geometry must invalidate
                 # cached results: the engine version, the search budget knobs
                 # and the alternative-solution seed.
@@ -904,7 +898,6 @@ class OptimizationService:
         # after a cache read, where no ``CuttingLayout`` exists).
         material_dicts = [rm.to_dict() for rm in resolved.values()]
         return {
-            "strategy": request.strategy.value,
             "variant": request.variant,
             "total_boards_used": total_boards_used,
             "total_boards_cost": total_boards_cost,

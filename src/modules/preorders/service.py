@@ -171,7 +171,6 @@ class PreOrderService(BranchScopedMixin):
                 s.model_dump(mode="json") for s in data.additional_services
             ],
             price_level=data.price_level,
-            strategy=data.strategy.value,
             variant=data.variant,
             source=data.source,
             notes=data.notes,
@@ -229,7 +228,6 @@ class PreOrderService(BranchScopedMixin):
             client_id=source.client_id,
             branch_id=source.branch_id,
             price_level=source.price_level,
-            strategy=source.strategy,
             variant=source.variant or 0,
             notes=source.notes,
             source=source.source,
@@ -291,8 +289,6 @@ class PreOrderService(BranchScopedMixin):
             ]
         if data.price_level is not None:
             preorder.price_level = data.price_level
-        if data.strategy is not None:
-            preorder.strategy = data.strategy.value
         if data.variant is not None:
             preorder.variant = data.variant
         if "notes" in fields:
@@ -332,7 +328,7 @@ class PreOrderService(BranchScopedMixin):
 
         Carries the price level so ``compute`` re-prices the marked boards and
         ``optimize_response`` attaches the ``pricing`` block (it doesn't affect
-        geometry or the hash) and the stored ``strategy`` to reproduce the same
+        geometry or the hash) and the stored ``variant`` to reproduce the same
         layout (this one does affect geometry and the hash).
         """
         return OptimizeRequest(
@@ -340,7 +336,6 @@ class PreOrderService(BranchScopedMixin):
             requirements=preorder.requirements,
             client_id=preorder.client_id,
             price_level=preorder.price_level,
-            strategy=preorder.strategy,
             variant=preorder.variant or 0,
         )
 

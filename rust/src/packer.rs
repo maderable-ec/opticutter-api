@@ -10,10 +10,10 @@ use crate::models::{Cut, CuttingParams, Orientation, PlacedPiece, Piece, Rect, S
 
 /// Fit score of a gap for a piece, lower is better.
 ///
-/// Mirrors the tuple `_place_piece` builds. `MaxEfficiency` compares
-/// `(leftover, secondary)`; `LongOffcuts` compares `(x, y, leftover,
+/// Mirrors the tuple `_place_piece` builds. `BestAreaFit` compares
+/// `(leftover, secondary)`; `BottomLeft` compares `(x, y, leftover,
 /// secondary)`. Both are modelled as four lexicographic slots, with the
-/// unused leading pair held at 0.0 for `MaxEfficiency` — they compare equal on
+/// unused leading pair held at 0.0 for `BestAreaFit` — they compare equal on
 /// every candidate, so they never affect the ordering.
 #[derive(Debug, Clone, Copy)]
 struct Score([f64; 4]);
@@ -102,7 +102,7 @@ impl Packer {
         let piece_h = piece.height;
         let piece_area = piece.area;
         let can_rotate = piece.can_rotate;
-        let long_offcuts = self.selection == Selection::LongOffcuts;
+        let bottom_left = self.selection == Selection::BottomLeft;
 
         for (i, rect) in self.remainders.iter().enumerate() {
             let rect_w = rect.width;
@@ -113,7 +113,7 @@ impl Packer {
             // the same iteration and with a strict `<`, so an exact tie keeps
             // the unrotated orientation — matching the Python.
             if rect_w >= piece_w && rect_h >= piece_h {
-                let score = if long_offcuts {
+                let score = if bottom_left {
                     Score([rect.x, rect.y, leftover, rect_w - piece_w])
                 } else {
                     Score([leftover, rect_w - piece_w, 0.0, 0.0])
@@ -126,7 +126,7 @@ impl Packer {
             }
 
             if can_rotate && rect_w >= piece_h && rect_h >= piece_w {
-                let score = if long_offcuts {
+                let score = if bottom_left {
                     Score([rect.x, rect.y, leftover, rect_w - piece_h])
                 } else {
                     Score([leftover, rect_w - piece_h, 0.0, 0.0])

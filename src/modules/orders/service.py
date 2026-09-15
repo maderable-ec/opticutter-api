@@ -243,7 +243,6 @@ class OrderService(BranchScopedMixin):
             # Carried so ``compute`` re-prices the marked boards at this level
             # before the snapshot is frozen; it does not touch the hash.
             price_level=data.price_level,
-            strategy=data.strategy,
             variant=data.variant,
         )
         payload, optimization_hash = self.optimization_service.compute(opt_request)

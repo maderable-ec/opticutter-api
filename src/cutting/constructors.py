@@ -24,7 +24,7 @@ Two families:
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
-from src.cutting.enums import PackingStrategy, SplitRule
+from src.cutting.enums import Selection, SplitRule
 from src.cutting.models import BinSpec, Cut, Material, Piece, PlacedPiece, Rectangle
 from src.cutting.packer import GuillotineOptimizer
 from src.cutting.parameters import CuttingParameters
@@ -64,9 +64,8 @@ class GreedyConfig:
 
     sort: str
     split: SplitRule
-    # ``MAX_EFFICIENCY`` selects free rects by Best-Area-Fit, ``LONG_OFFCUTS``
-    # by Bottom-Left; reused here as the selection axis of the portfolio.
-    selection: PackingStrategy = PackingStrategy.MAX_EFFICIENCY
+    # Best-Area-Fit or Bottom-Left; see ``Selection``.
+    selection: Selection = Selection.BEST_AREA_FIT
 
 
 # Deterministic portfolio order. Curated: the full cartesian product mostly
@@ -81,7 +80,7 @@ GREEDY_PORTFOLIO: Tuple[GreedyConfig, ...] = tuple(
         SplitRule.MINIMIZE_AREA,
         SplitRule.MAXIMIZE_AREA,
     )
-    for sel in (PackingStrategy.MAX_EFFICIENCY, PackingStrategy.LONG_OFFCUTS)
+    for sel in (Selection.BEST_AREA_FIT, Selection.BOTTOM_LEFT)
 )
 
 
@@ -127,7 +126,7 @@ def greedy_fill(
             material=spec.to_material(),
             cutting_params=cutting_params,
             split_rule=config.split,
-            strategy=config.selection,
+            selection=config.selection,
             min_rect_size=min_rect_size,
         )
     except ValueError:

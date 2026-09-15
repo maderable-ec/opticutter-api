@@ -36,7 +36,6 @@ from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
 
 from src.cutting.consolidate import DEFAULT_MIN_USABLE_OFFCUT, consolidate_layouts
-from src.cutting.enums import PackingStrategy
 from src.cutting.models import BinSpec, CuttingLayout, Piece
 from src.cutting.parameters import CuttingParameters
 from src.cutting.search import ExactConfig, SearchBudget, optimize_bins
@@ -118,7 +117,6 @@ class PoolJob:
     material: ResolvedMaterial
     offcuts: Tuple[ResolvedMaterial, ...]
     cutting_params: CuttingParameters
-    strategy: PackingStrategy
     half_spec: Optional[BinSpec]
     budget: SearchBudget
     seed: int
@@ -165,7 +163,6 @@ def _optimize_job(job: PoolJob) -> Tuple[List[CuttingLayout], List[Piece]]:
             anchor=job.material,
             offcuts=list(job.offcuts),
             cutting_params=job.cutting_params,
-            strategy=job.strategy,
             budget=job.budget,
             seed=job.seed,
             exact_config=job.exact_config,
@@ -177,7 +174,6 @@ def _optimize_job(job: PoolJob) -> Tuple[List[CuttingLayout], List[Piece]]:
             primary=job.material,
             offcuts=list(job.offcuts),
             cutting_params=job.cutting_params,
-            strategy=job.strategy,
             half_spec=job.half_spec,
             budget=job.budget,
             seed=job.seed,
@@ -199,7 +195,6 @@ def _optimize_job(job: PoolJob) -> Tuple[List[CuttingLayout], List[Piece]]:
             pieces,
             bins,
             cutting_params=job.cutting_params,
-            strategy=job.strategy,
             budget=job.budget,
             seed=job.seed,
             exact_config=job.exact_config,

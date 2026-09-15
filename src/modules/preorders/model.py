@@ -92,16 +92,9 @@ class PreOrderModel(TimestampMixin, AuditMixin, Base):
         Integer, default=1, server_default="1", nullable=False
     )
 
-    # Chosen packing heuristic (affects the recompute's geometry): kept so each
-    # read reproduces the same result and the order inherits it upon
-    # confirmation. See OptimizationStrategy (default | longOffcuts).
-    strategy: Mapped[str] = mapped_column(
-        String(32), default="default", server_default="default"
-    )
-
-    # Alternative-solution seed ("Generar otra alternativa"): like ``strategy``
-    # it affects the recompute's geometry and hash, so it's kept for every read
-    # to reproduce the chosen layout and inherited by the order on confirmation.
+    # Alternative-solution seed ("Generar otra alternativa"): it affects the
+    # recompute's geometry and hash, so it's kept for every read to reproduce
+    # the chosen layout and inherited by the order on confirmation.
     variant: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
 
     source: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)

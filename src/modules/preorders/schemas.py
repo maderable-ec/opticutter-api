@@ -8,7 +8,6 @@ from src.modules.clients.schemas import ClientResponse
 from src.modules.optimizations.schemas import (
     AdditionalServiceLine,
     MaterialInput,
-    OptimizationStrategy,
     OptimizeResponse,
     Remainder,
     Requirement,
@@ -44,20 +43,13 @@ class PreOrderCreate(CamelModel):
         le=3,
         description="Catalog price level billed on the marked boards (1 = list)",
     )
-    strategy: OptimizationStrategy = Field(
-        default=OptimizationStrategy.default,
-        description=(
-            "Packing heuristic to remember for the recompute: default | longOffcuts. "
-            "Affects geometry; inherited by the order upon confirmation."
-        ),
-    )
     variant: int = Field(
         default=0,
         ge=0,
         le=1000,
         description=(
-            "Alternative-solution seed remembered for the recompute; like "
-            "strategy it affects geometry and is inherited by the order."
+            "Alternative-solution seed remembered for the recompute. It affects "
+            "geometry and is inherited by the order."
         ),
     )
     notes: Optional[str] = Field(default=None, max_length=512)
@@ -92,7 +84,6 @@ class PreOrderUpdate(CamelModel):
     additional_services: Optional[List[AdditionalServiceLine]] = Field(default=None)
     client_id: Optional[int] = None
     price_level: Optional[int] = Field(default=None, ge=1, le=3)
-    strategy: Optional[OptimizationStrategy] = Field(default=None)
     variant: Optional[int] = Field(default=None, ge=0, le=1000)
     notes: Optional[str] = Field(default=None, max_length=512)
     source: Optional[str] = Field(default=None, max_length=32)
@@ -127,10 +118,6 @@ class PreOrderResponse(CamelModel):
     status: PreOrderStatus
     price_level: int = Field(
         default=1, description="Selected catalog price level (1 = list)"
-    )
-    strategy: OptimizationStrategy = Field(
-        default=OptimizationStrategy.default,
-        description="Packing heuristic remembered for the recompute",
     )
     variant: int = Field(
         default=0, description="Alternative-solution seed remembered for the recompute"
