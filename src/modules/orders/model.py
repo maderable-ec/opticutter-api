@@ -493,6 +493,15 @@ class OrderPieceModel(TimestampMixin, AuditMixin, Base):
     ``product_id`` references the board (``board``-type product) it's cut
     from; it's null when the material is outside the catalog (offcut or
     manual measurement).
+
+    Which is why the material's own identity is frozen here too, exactly as
+    ``OrderBoardModel`` freezes it: ``product_id`` cannot name a client's
+    offcut or a manual measurement, and it cannot tell two pools of the SAME
+    board apart either (one cut with the trims, one without, are two materials
+    sharing a product). ``material_key`` is the identity the rest of the
+    optimization uses, and the requirement carries all three -- they were
+    simply dropped on the way in until the order detail had to group its cut
+    list by material.
     """
 
     __tablename__ = "order_pieces"
@@ -503,9 +512,15 @@ class OrderPieceModel(TimestampMixin, AuditMixin, Base):
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     order_id: Mapped[int] = mapped_column(ForeignKey("orders.id", ondelete="CASCADE"))
+    # Nullable, unlike ``order_boards.material_key``: an order frozen before
+    # this column existed is backfilled from its snapshot, and one whose
+    # snapshot has no requirements has nothing to recover.
+    material_key: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     product_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("products.id"), nullable=True
     )
+    product_code: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    product_name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     label: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     height: Mapped[int] = mapped_column(Integer)
     width: Mapped[int] = mapped_column(Integer)

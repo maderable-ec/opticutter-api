@@ -210,6 +210,56 @@ def _order_with_services(client, db_session, identifier="0100000397"):
     )
 
 
+def _order_on_board_and_offcut(client, db_session, identifier="0100000397"):
+    """Order cut on a catalog board AND on a client's offcut, one piece each.
+
+    The shape the cut list's material is about: an offcut resolves to no catalog
+    product, so every piece cut from it has ``product_id`` NULL and can only be
+    named by its ``material_key``.
+    """
+    c = _create_client(client, identifier=identifier)
+    b = _create_board(client, code=f"MEL{identifier[-4:]}")
+    return _mint_order(
+        client,
+        db_session,
+        {
+            "clientId": c["id"],
+            "branchId": _BRANCH,
+            "materials": [
+                {"key": "b1", "source": "catalog", "productId": b["id"]},
+                {
+                    "key": "r1",
+                    "source": "clientOffcut",
+                    "height": 1200,
+                    "width": 600,
+                    "thickness": 18,
+                    "label": "Retazo del cliente",
+                },
+            ],
+            "requirements": [
+                {
+                    "priority": 0,
+                    "height": 500,
+                    "width": 1000,
+                    "quantity": 1,
+                    "materialKey": "b1",
+                    "label": "Costado",
+                    "canRotate": True,
+                },
+                {
+                    "priority": 0,
+                    "height": 400,
+                    "width": 300,
+                    "quantity": 2,
+                    "materialKey": "r1",
+                    "label": "Tapa",
+                    "canRotate": True,
+                },
+            ],
+        },
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Driving the machine
 # --------------------------------------------------------------------------- #

@@ -1175,3 +1175,27 @@ def test_order_snapshot_keeps_the_refilado_decision(client, db_session):
     resp = client.get(f"/api/v1/orders/{order.id}/document")
     assert resp.status_code == 200
     assert resp.content[:4] == b"%PDF"
+
+
+def test_detail_names_the_material_of_every_piece(client, db_session):
+    """Each cut-list row says which material it is cut from, offcuts included.
+
+    ``product_id`` cannot answer this: it is NULL for everything outside the
+    catalog, which is exactly where the question gets asked (a client's offcut,
+    a manual measurement) -- and it cannot separate two pools of the same board
+    either. The key and the name are frozen next to it at creation, which is
+    what lets the order detail group its cut list by material.
+    """
+    from tests.order_helpers import _order_on_board_and_offcut
+
+    order = _order_on_board_and_offcut(client, db_session, identifier="0100000397")
+
+    by_label = {p["label"]: p for p in order["pieces"]}
+    assert by_label["Costado"]["materialKey"] == "b1"
+    assert by_label["Costado"]["productId"] is not None
+    assert by_label["Costado"]["productName"]
+
+    # The offcut: no catalog product at all, and still named.
+    assert by_label["Tapa"]["materialKey"] == "r1"
+    assert by_label["Tapa"]["productId"] is None
+    assert by_label["Tapa"]["productCode"]
