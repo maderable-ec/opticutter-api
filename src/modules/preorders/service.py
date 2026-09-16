@@ -2,7 +2,7 @@ from datetime import date, datetime, time, timedelta
 from typing import List, Optional, Tuple
 
 from fastapi import Depends
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from src.modules.branches.service import resolve_branch_for_create
 from src.modules.clients.model import ClientModel
@@ -13,6 +13,10 @@ from src.modules.optimizations.schemas import (
     validate_material_graph,
 )
 from src.modules.optimizations.service import OptimizationService
+
+# Model only (never ``orders.service``): the listing reads the order's code, and
+# the two modules' models import neither each other nor any service.
+from src.modules.orders.model import OrderModel
 from src.modules.preorders.model import (
     OPEN_STATUSES,
     TERMINAL_STATUSES,
@@ -90,7 +94,16 @@ class PreOrderService(BranchScopedMixin):
         listing FIFO, and newest-first is what it has always returned.
         """
         self._sweep_expired()
-        query = self.db.query(PreOrderModel)
+        # ``PreOrderSummaryResponse`` embeds the client, the branch and now the
+        # order's code, so without this every row fires three lazy loads.
+        # ``load_only`` on the order is load-bearing: an order carries the frozen
+        # cutting plan in ``optimization_snapshot``, the heaviest JSON in the
+        # system, and all this needs from it is the code.
+        query = self.db.query(PreOrderModel).options(
+            joinedload(PreOrderModel.client),
+            joinedload(PreOrderModel.branch),
+            joinedload(PreOrderModel.order).load_only(OrderModel.id, OrderModel.code),
+        )
         if status:
             query = query.filter(PreOrderModel.status.in_([s.value for s in status]))
         if client_id is not None:

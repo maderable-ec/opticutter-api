@@ -1091,7 +1091,10 @@ def test_list_orders_sort_stalest_puts_closed_orders_last(client, db_session):
     o3 = _create_order(client, db_session, _order_payload(c["id"], b["id"], width=400))
 
     # o3 is cancelled (closed → last), then o1 moves (→ freshest of the live ones).
-    client.patch(f"/api/v1/orders/{o3['id']}/status", json={"status": "cancelled"})
+    client.patch(
+        f"/api/v1/orders/{o3['id']}/status",
+        json={"status": "cancelled", "note": "El cliente desistió"},
+    )
     client.patch(
         f"/api/v1/orders/{o1['id']}/status", json={"status": "queued", **_pay()}
     )

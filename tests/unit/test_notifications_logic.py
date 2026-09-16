@@ -25,25 +25,44 @@ from src.shared.exceptions import EntityNotFoundError
 
 
 # --- resolve_plan: which transitions notify, and whom ----------------------------
+def _audiences(from_status, to_status):
+    return [(p.type, p.audience) for p in resolve_plan(from_status, to_status)]
+
+
 def test_finished_notifies_global_admins_sellers():
     """Normally derived from the last activity closing, so this is what tells
     the office the work is done without anybody pressing a button."""
-    plan = resolve_plan(OrderStatus.in_process, OrderStatus.finished)
-    assert plan is not None
-    assert plan.type is NotificationType.order_completed
-    assert plan.audience is _Audience.GLOBAL_ADMINS_SELLERS
+    assert _audiences(OrderStatus.in_process, OrderStatus.finished) == [
+        (NotificationType.order_completed, _Audience.GLOBAL_ADMINS_SELLERS)
+    ]
 
 
 def test_confirmed_to_queued_notifies_branch_operators():
-    plan = resolve_plan(OrderStatus.confirmed, OrderStatus.queued)
-    assert plan is not None
-    assert plan.type is NotificationType.order_queued
-    assert plan.audience is _Audience.BRANCH_OPERATORS
+    assert _audiences(OrderStatus.confirmed, OrderStatus.queued) == [
+        (NotificationType.order_queued, _Audience.BRANCH_OPERATORS)
+    ]
 
 
 def test_rollback_to_queued_notifies_nobody():
     # Admin rollback ``in_process -> queued`` is not a real enqueue.
-    assert resolve_plan(OrderStatus.in_process, OrderStatus.queued) is None
+    assert resolve_plan(OrderStatus.in_process, OrderStatus.queued) == []
+
+
+def test_every_cancellation_reaches_the_admins():
+    """An order only exists because a client confirmed a quote, so killing one is
+    a sale that died whether or not it ever reached the shop."""
+    assert _audiences(OrderStatus.confirmed, OrderStatus.cancelled) == [
+        (NotificationType.order_cancelled, _Audience.GLOBAL_ADMINS)
+    ]
+
+
+def test_cancelling_from_the_queue_also_reaches_the_branch_operators():
+    """Two disjoint audiences on one transition -- which is why the map returns a
+    list. The card vanishing off the board is the operators' half of it."""
+    assert _audiences(OrderStatus.queued, OrderStatus.cancelled) == [
+        (NotificationType.order_cancelled, _Audience.GLOBAL_ADMINS),
+        (NotificationType.order_cancelled, _Audience.BRANCH_OPERATORS),
+    ]
 
 
 @pytest.mark.parametrize(
@@ -51,11 +70,29 @@ def test_rollback_to_queued_notifies_nobody():
     [
         (OrderStatus.queued, OrderStatus.in_process),
         (OrderStatus.finished, OrderStatus.dispatched),
-        (OrderStatus.confirmed, OrderStatus.cancelled),
     ],
 )
 def test_other_transitions_are_not_notified(from_status, to_status):
-    assert resolve_plan(from_status, to_status) is None
+    assert resolve_plan(from_status, to_status) == []
+
+
+# --- the cancellation copy turns on where it was cancelled from -------------------
+def test_cancelled_copy_names_the_queue_only_when_it_left_one():
+    order = _Order(id=1, code="ORD-2026-0042")
+    from_queue = _render(
+        NotificationType.order_cancelled,
+        order,
+        {"fromStatus": OrderStatus.queued.value},
+    )
+    from_confirmed = _render(
+        NotificationType.order_cancelled,
+        order,
+        {"fromStatus": OrderStatus.confirmed.value},
+    )
+    assert "cola de producción" in from_queue[1]
+    # The office is being told a sale died, not that a board lost a card.
+    assert "cola" not in from_confirmed[1]
+    assert from_queue[0] == from_confirmed[0]
 
 
 # --- mark_read ownership ----------------------------------------------------------

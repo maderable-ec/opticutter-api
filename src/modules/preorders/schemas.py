@@ -130,6 +130,9 @@ class PreOrderResponse(CamelModel):
     order_id: Optional[int] = Field(
         default=None, description="Immutable order, set once the client confirms"
     )
+    order_code: Optional[str] = Field(
+        default=None, description="Code of that order, so the link can be labelled"
+    )
     created_at: datetime
     updated_at: datetime
     sent_at: Optional[datetime] = None
@@ -165,6 +168,7 @@ class PreOrderSummaryResponse(CamelModel):
     )
     source: Optional[str] = None
     order_id: Optional[int] = None
+    order_code: Optional[str] = None
     created_at: datetime
     updated_at: datetime
     expires_at: Optional[datetime] = None

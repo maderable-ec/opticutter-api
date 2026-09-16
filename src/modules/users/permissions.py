@@ -34,6 +34,9 @@ route is protected with ``require_role(*RESOURCE_ROLES[key])`` (see ``dependenci
   does the additional work). The shop floor holds ``orders:transition`` only for
   the order's derived closing; dispatch (``finished -> dispatched``) is a commercial
   act restricted to admin/seller, and every other transition stays off-limits.
+  Cancelling narrows further as the order advances: from ``confirmed`` it is
+  admin/seller (the quote died), but from ``queued`` -- already paid for -- it
+  is ADMIN ONLY, so the seller who raised it cannot undo a collected sale.
 
 The bander doesn't see order detail (no ``orders:read``): only the activity
 endpoint (``orders:activities``) and the self-sufficient shop-floor board

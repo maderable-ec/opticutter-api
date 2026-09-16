@@ -164,7 +164,10 @@ TERMINAL_STATUSES = {
 # drive them by hand once the gates pass.
 TRANSITIONS: dict[OrderStatus, set[OrderStatus]] = {
     OrderStatus.confirmed: {OrderStatus.queued, OrderStatus.cancelled},
-    OrderStatus.queued: {OrderStatus.in_process},
+    # Cancelling from the QUEUE is the exceptional exit: the order is already
+    # paid for (the payment gates the way in) but nobody has touched it yet --
+    # no operator assigned, no piece cut -- so it is still a single write.
+    OrderStatus.queued: {OrderStatus.in_process, OrderStatus.cancelled},
     OrderStatus.in_process: {OrderStatus.finished, OrderStatus.queued},
     OrderStatus.finished: {OrderStatus.dispatched},
     OrderStatus.dispatched: set(),
@@ -178,6 +181,13 @@ TRANSITION_ROLES: dict[tuple[OrderStatus, OrderStatus], tuple[UserRole, ...]] = 
         UserRole.SELLER,
     ),
     (OrderStatus.confirmed, OrderStatus.cancelled): (UserRole.ADMIN, UserRole.SELLER),
+    # Cancelling an order the client already paid for is the exception, not the
+    # normal way out: the seller who raised it does not undo it, and the shop
+    # floor does not cancel work. This row is NOT optional -- the gate reads
+    # ``if allowed and ...``, so a pair MISSING from this table skips the role
+    # check entirely and is open to every role holding ``orders:transition``,
+    # the bander included.
+    (OrderStatus.queued, OrderStatus.cancelled): (UserRole.ADMIN,),
     # Normally derived from starting the cut (the operator taking the order).
     (OrderStatus.queued, OrderStatus.in_process): (
         UserRole.ADMIN,
@@ -368,6 +378,39 @@ class OrderModel(TimestampMixin, AuditMixin, Base):
         cascade="all, delete-orphan",
         order_by="OrderAttachmentModel.id",
     )
+    # Back-reference over the FK the quote already carries (``preorders.order_id``):
+    # the order itself stores nothing, so there is no column and no migration. A
+    # LIST and not a scalar because the link is N:1 -- ``create()`` dedupes, so two
+    # distinct quotes of the same client, branch, hash and totals resolve to ONE
+    # order and both write its id. ``viewonly`` because the quote owns the link
+    # (``PreOrderReviewService.confirm`` is the single writer), and by STRING so
+    # ``orders`` keeps not importing ``preorders`` -- the dependency runs the other
+    # way and must stay that way.
+    preorders: Mapped[list["PreOrderModel"]] = relationship(  # noqa: F821
+        "PreOrderModel",
+        viewonly=True,
+        order_by="PreOrderModel.id",
+    )
+
+    @property
+    def preorder(self) -> Optional["PreOrderModel"]:  # noqa: F821
+        """The quote that minted this order: the OLDEST one pointing at it.
+
+        With the dedupe above, a second quote can land on an order that already
+        existed; the one that actually created it is the first, which is what the
+        order's own detail should link back to.
+        """
+        return self.preorders[0] if self.preorders else None
+
+    @property
+    def preorder_id(self) -> Optional[int]:
+        preorder = self.preorder
+        return preorder.id if preorder is not None else None
+
+    @property
+    def preorder_code(self) -> Optional[str]:
+        preorder = self.preorder
+        return preorder.code if preorder is not None else None
 
     @property
     def additional_services(self) -> list:

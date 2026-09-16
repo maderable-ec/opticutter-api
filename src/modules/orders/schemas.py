@@ -304,6 +304,15 @@ class OrderResponse(CamelModel):
     external_invoice_id: Optional[str] = None
     source: Optional[str] = None
     notes: Optional[str] = None
+    preorder_id: Optional[int] = Field(
+        default=None,
+        description="Quote this order was born from (null if it has none)",
+    )
+    preorder_code: Optional[str] = Field(
+        default=None,
+        description="Code of that quote, so the link can be labelled without a "
+        "second request",
+    )
     is_priority: bool = Field(
         default=False,
         description="Priority attention: the workshop board lists it first",

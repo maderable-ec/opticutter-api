@@ -65,6 +65,10 @@ class PreOrderModel(TimestampMixin, AuditMixin, Base):
         Index("ix_preorders_branch_status", "branch_id", "status"),
         # Per-client open-quote anti-abuse cap counts by client + status.
         Index("ix_preorders_client_status", "client_id", "status"),
+        # The link read BACKWARDS: ``OrderModel.preorders`` resolves the quote an
+        # order came from through this column, once per order listing page. A FK
+        # is not indexed on its own, and this one was only ever read forwards.
+        Index("ix_preorders_order_id", "order_id"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
@@ -118,6 +122,17 @@ class PreOrderModel(TimestampMixin, AuditMixin, Base):
     order: Mapped[Optional["OrderModel"]] = relationship(  # noqa: F821
         "OrderModel", foreign_keys=[order_id]
     )
+
+    @property
+    def order_code(self) -> Optional[str]:
+        """Code of the order this quote became (``None`` while it is open).
+
+        Denormalized onto the response so the dashboard can label the link
+        without a second request -- the same thing the client's public review has
+        always shown (``ReviewPreOrderResponse.order_code``).
+        """
+        return self.order.code if self.order is not None else None
+
     review_links: Mapped[list["PreOrderReviewLinkModel"]] = relationship(
         "PreOrderReviewLinkModel",
         back_populates="preorder",
