@@ -24,7 +24,16 @@ import logging
 from dataclasses import dataclass
 from enum import Enum
 from functools import partial
-from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
 from sqlalchemy.orm import Session
 
@@ -219,6 +228,35 @@ def _render_cancelled(code: str, payload: Mapping[str, Any]) -> Tuple[str, str]:
     )
 
 
+def _clip(value: str, limit: int) -> str:
+    """Shortens a name to a headline-sized budget."""
+    value = (value or "").strip()
+    return value if len(value) <= limit else value[: limit - 1].rstrip() + "\u2026"
+
+
+def _render_low_stock(code: str, payload: Mapping[str, Any]) -> Tuple[str, str]:
+    # Two names have to fit in 255 here, and each can be 128 on its own (a branch
+    # name and a product name are both that wide), so unlike the other renderers
+    # this one cannot just concatenate -- it clips. The full list rides in the
+    # payload for the bell to expand; the body is a headline.
+    names = list(payload.get("productNames") or [])
+    total = int(payload.get("count") or len(names))
+    branch = _clip(payload.get("branchName") or "la sucursal", 40)
+    first = _clip(names[0], 80) if names else "material"
+    more = f" y {total - 1} m\u00e1s" if total > 1 else ""
+    moment = (
+        "entr\u00f3 a la cola"
+        if payload.get("event") == "queued"
+        else "se confirm\u00f3"
+    )
+    noun = "materiales" if total != 1 else "material"
+    return (
+        f"Stock bajo \u00b7 orden {code}",
+        f"La orden {code} ({branch}) {moment} con {total} {noun} "
+        f"bajo el m\u00ednimo: {first}{more}.",
+    )
+
+
 _RENDERERS: Dict[NotificationType, Renderer] = {
     NotificationType.order_completed: _render_completed,
     NotificationType.order_queued: _render_queued,
@@ -226,6 +264,7 @@ _RENDERERS: Dict[NotificationType, Renderer] = {
     NotificationType.order_branch_arrived: _render_branch_arrived,
     NotificationType.order_branch_left: _render_branch_left,
     NotificationType.order_cancelled: _render_cancelled,
+    NotificationType.order_low_stock: _render_low_stock,
 }
 
 
@@ -345,6 +384,56 @@ def notify_order_confirmed(
         data={
             "preorderCode": preorder_code,
             "status": OrderStatus.confirmed.value,
+        },
+    )
+
+
+def notify_order_low_stock(
+    db: Session,
+    order,
+    *,
+    event: str,
+    branch_name: Optional[str] = None,
+    product_names: Sequence[str] = (),
+    actor: Optional[Actor] = None,
+) -> None:
+    """The order consumes material that is running out: tells the admins.
+
+    Not a transition, so it is not in ``resolve_plan`` -- and it could not be,
+    because that map is pure and DB-free on purpose while this event's whole
+    condition is a live inventory reading. The caller does the reading and only
+    calls when there IS something low, which is what makes this a purchasing
+    signal rather than one more "a sale happened" line the office learns to
+    ignore.
+
+    ``product_names`` arrives as plain strings for the same reason the branch
+    names of ``notify_order_branch_changed`` do: this module imports neither
+    ``orders`` nor ``inventory``, and taking the catalog rows would drag one in.
+
+    Audience: the administrators ALONE. Restocking is a purchasing call -- the
+    shop floor cannot act on it and the seller has already sold the thing.
+
+    ``event`` (``"created"`` / ``"queued"``) only changes the copy, the same
+    device ``_render_cancelled`` uses with ``fromStatus``. One type and not two
+    because the fact is one fact: this order needs material nobody has.
+
+    Emitted at both moments on purpose, so an order can legitimately produce two
+    rows -- it was born short and it was still short when the client paid for it.
+    The second is the urgent one (the money is in and the shop is about to cut),
+    and ``data["event"]`` tells them apart.
+    """
+    names = [n for n in product_names if n]
+    _emit(
+        db,
+        order,
+        NotificationType.order_low_stock,
+        _global_admins,
+        actor=actor,
+        data={
+            "event": event,
+            "branchName": branch_name,
+            "productNames": names,
+            "count": len(names),
         },
     )
 

@@ -1,6 +1,6 @@
 from typing import Optional
 
-from sqlalchemy import Boolean, String, text
+from sqlalchemy import Boolean, Integer, String, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from src.shared.database import Base
@@ -31,6 +31,15 @@ class BranchModel(TimestampMixin, AuditMixin, Base):
     address: Mapped[Optional[str]] = mapped_column(String(256))
     phone: Mapped[Optional[str]] = mapped_column(String(32))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    # The vendor's warehouse this branch's stock lives in (``mbodega.cod``, which
+    # is what ``binventario.bod`` points at: 1 = Bodega local/Sucúa, 2 = Macas).
+    # A dedicated column and not ``code``, which is free text the admin edits:
+    # the day somebody renames "SUCUA" the inventory would silently answer for
+    # the wrong warehouse. NULL means "this branch doesn't consult stock" -- the
+    # alert stays quiet and the report skips it, which is the correct answer for
+    # a branch the vendor's system doesn't know about.
+    warehouse_code: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
     # Printing switches (see ``print_jobs.service``). Default ON so the existing
     # branches keep printing after the deploy; the admin unticks the ones with no

@@ -25,6 +25,10 @@ from src.modules.users.model import (  # noqa: E402, F401
 )
 from src.shared.database import SessionLocal  # noqa: E402
 
+# ``warehouse_code`` is the vendor's ``mbodega.cod`` — what ``binventario.bod``
+# points at, so it is how a branch gets its stock. Seeded here and not in a
+# migration because branch rows are DATA, and matching them by ``code`` inside a
+# migration would hardcode the very string the column exists to stop depending on.
 BRANCHES = [
     {
         "code": "SUCUA",
@@ -34,6 +38,7 @@ BRANCHES = [
         "is_active": True,
         "print_labels_enabled": False,
         "print_consolidated_enabled": False,
+        "warehouse_code": 1,  # "Bodega local"
     },
     {
         "code": "MACAS",
@@ -43,6 +48,7 @@ BRANCHES = [
         "is_active": True,
         "print_labels_enabled": False,
         "print_consolidated_enabled": True,
+        "warehouse_code": 2,  # "BODEGA MACAS"
     },
 ]
 
@@ -60,6 +66,9 @@ SETTINGS = {
     "max_open_preorders_per_client": 5,
     # Taxes: catalog prices are net, this is what produces every total.
     "tax_rate": 0.15,
+    # Low-stock thresholds: sheets for boards, linear metres for edge banding.
+    "stock_threshold_board": 5,
+    "stock_threshold_edge_banding": 50,
     # Company letterhead
     "company_name": "MADERABLE",
     "company_tagline": "tableros + accesorios",

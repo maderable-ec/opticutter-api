@@ -169,7 +169,11 @@ def test_status_transitions_valid_and_invalid(client, db_session):
 
     ok = client.patch(
         f"/api/v1/orders/{oid}/status",
-        json={"status": "queued", "payment": {"cashAmount": 100.0}},
+        json={
+            "status": "queued",
+            "payment": {"cashAmount": 100.0},
+            "externalInvoiceId": "FAC-001-42",
+        },
     )
     assert ok.status_code == 200
     assert ok.json()["data"]["status"] == "queued"
@@ -199,6 +203,92 @@ def test_invalid_transition_from_confirmed(client, db_session):
         f"/api/v1/orders/{order['id']}/status", json={"status": "finished"}
     )
     assert bad.status_code == 422
+
+
+def test_queued_requires_the_invoice_number(client, db_session):
+    """The way into the queue is where the sale is collected, so it is where the
+    billing document gets stitched on. Reuses ``externalInvoiceId`` — there is
+    no second invoice field anywhere in the system."""
+    c = _create_client(client)
+    b = _create_board(client)
+    order = _create_order(client, db_session, _order_payload(c["id"], b["id"]))
+    oid = order["id"]
+
+    bad = client.patch(
+        f"/api/v1/orders/{oid}/status",
+        json={"status": "queued", "payment": {"cashAmount": 100.0}},
+    )
+    assert bad.status_code == 422
+    error = bad.json()["errors"][0]
+    assert "factura" in error["message"].lower()
+    # The field rides along so the dashboard hangs the message off the input.
+    assert error["field"] == "externalInvoiceId"
+    assert client.get(f"/api/v1/orders/{oid}").json()["data"]["status"] == "confirmed"
+
+
+def test_queueing_freezes_the_invoice_number(client, db_session):
+    c = _create_client(client)
+    b = _create_board(client)
+    order = _create_order(client, db_session, _order_payload(c["id"], b["id"]))
+    oid = order["id"]
+
+    ok = client.patch(
+        f"/api/v1/orders/{oid}/status",
+        json={
+            "status": "queued",
+            "payment": {"cashAmount": 100.0},
+            "externalInvoiceId": "FAC-001-42",
+        },
+    )
+    assert ok.status_code == 200
+    assert ok.json()["data"]["externalInvoiceId"] == "FAC-001-42"
+    # Same field the billing seam reads, so the export shows it too.
+    export = client.get(f"/api/v1/orders/{oid}/export").json()["data"]
+    assert export["externalInvoiceId"] == "FAC-001-42"
+
+
+def test_an_order_invoiced_beforehand_queues_without_resending_it(client, db_session):
+    """``POST /orders/{id}/invoice`` still exists and still associates one."""
+    c = _create_client(client)
+    b = _create_board(client)
+    order = _create_order(client, db_session, _order_payload(c["id"], b["id"]))
+    oid = order["id"]
+    assert (
+        client.post(
+            f"/api/v1/orders/{oid}/invoice", json={"externalInvoiceId": "FAC-001-42"}
+        ).status_code
+        == 200
+    )
+
+    ok = client.patch(
+        f"/api/v1/orders/{oid}/status",
+        json={"status": "queued", "payment": {"cashAmount": 100.0}},
+    )
+    assert ok.status_code == 200
+    assert ok.json()["data"]["externalInvoiceId"] == "FAC-001-42"
+
+
+def test_queueing_never_replaces_an_issued_invoice(client, db_session):
+    c = _create_client(client)
+    b = _create_board(client)
+    order = _create_order(client, db_session, _order_payload(c["id"], b["id"]))
+    oid = order["id"]
+    client.post(
+        f"/api/v1/orders/{oid}/invoice", json={"externalInvoiceId": "FAC-001-42"}
+    )
+
+    clash = client.patch(
+        f"/api/v1/orders/{oid}/status",
+        json={
+            "status": "queued",
+            "payment": {"cashAmount": 100.0},
+            "externalInvoiceId": "FAC-001-99",
+        },
+    )
+    assert clash.status_code == 409
+    data = client.get(f"/api/v1/orders/{oid}").json()["data"]
+    assert data["status"] == "confirmed"
+    assert data["externalInvoiceId"] == "FAC-001-42"
 
 
 def test_queued_requires_payment(client, db_session):
@@ -241,6 +331,7 @@ def test_queued_records_payment(client, db_session):
                 "transferAmount": 20.0,
                 "creditAmount": 15.0,
             },
+            "externalInvoiceId": "FAC-001-42",
         },
     )
     assert ok.status_code == 200
@@ -266,7 +357,11 @@ def test_queued_payment_single_method(client, db_session):
 
     ok = client.patch(
         f"/api/v1/orders/{oid}/status",
-        json={"status": "queued", "payment": {"creditAmount": 80.0}},
+        json={
+            "status": "queued",
+            "payment": {"creditAmount": 80.0},
+            "externalInvoiceId": "FAC-001-42",
+        },
     )
     assert ok.status_code == 200
     data = ok.json()["data"]
@@ -284,7 +379,11 @@ def test_queued_payment_by_transfer_only(client, db_session):
 
     ok = client.patch(
         f"/api/v1/orders/{oid}/status",
-        json={"status": "queued", "payment": {"transferAmount": 120.0}},
+        json={
+            "status": "queued",
+            "payment": {"transferAmount": 120.0},
+            "externalInvoiceId": "FAC-001-42",
+        },
     )
     assert ok.status_code == 200
     data = ok.json()["data"]
@@ -310,6 +409,7 @@ def test_payment_reflected_in_the_document(client, db_session):
         json={
             "status": "queued",
             "payment": {"cashAmount": 50.0, "transferAmount": 25.0},
+            "externalInvoiceId": "FAC-001-42",
         },
     )
 
@@ -332,7 +432,11 @@ def test_list_orders_filter_by_status(client, db_session):
     # Send the first one to production.
     client.patch(
         f"/api/v1/orders/{o1['id']}/status",
-        json={"status": "queued", "payment": {"cashAmount": 100.0}},
+        json={
+            "status": "queued",
+            "payment": {"cashAmount": 100.0},
+            "externalInvoiceId": "FAC-001-42",
+        },
     )
 
     in_prod = client.get("/api/v1/orders/", params={"status": "queued"}).json()
@@ -352,7 +456,7 @@ def test_list_orders_filter_by_multiple_statuses(client, db_session):
     o3 = _create_order(client, db_session, _order_payload(c["id"], b["id"], width=400))
 
     # o1: confirmed → queued → in_process; o2: stays confirmed; o3: queued.
-    _pay = {"payment": {"cashAmount": 100.0}}
+    _pay = {"payment": {"cashAmount": 100.0}, "externalInvoiceId": "FAC-001-42"}
     client.patch(f"/api/v1/orders/{o1['id']}/status", json={"status": "queued", **_pay})
     client.patch(
         f"/api/v1/orders/{o1['id']}/activities/cutting", json={"status": "in_progress"}
@@ -1036,7 +1140,7 @@ def test_create_order_on_client_offcuts_only(client, db_session):
 
 # --- The status clock in the listing -------------------------------------------
 def _pay():
-    return {"payment": {"cashAmount": 100.0}}
+    return {"payment": {"cashAmount": 100.0}, "externalInvoiceId": "FAC-001-42"}
 
 
 def test_listing_exposes_the_status_clock(client, db_session):

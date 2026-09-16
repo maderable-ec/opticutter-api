@@ -262,6 +262,24 @@ class Config:
     # it was billed at, so raising it never rewrites an existing invoice.
     TAX_RATE = env.float("TAX_RATE", 0.15)
 
+    # Low-stock thresholds, per product type. The UNITS differ and that is the
+    # whole reason there are two: the vendor counts boards in SHEETS and edge
+    # banding in LINEAR METRES, so one number could never serve both (the live
+    # catalog holds 558 sheets of the best-selling board and 19818 metres of
+    # white tape). Like every value above they only seed the `settings`
+    # singleton on its first read; the runtime source of truth is the table
+    # (PATCH /settings/stock), because "how low is low" is a purchasing call
+    # the office retunes, not a deploy.
+    STOCK_THRESHOLD_BOARD = env.float("STOCK_THRESHOLD_BOARD", 5.0)
+    STOCK_THRESHOLD_EDGE_BANDING = env.float("STOCK_THRESHOLD_EDGE_BANDING", 50.0)
+
+    # How long a read of the vendor's `binventario` is reused (seconds). The
+    # query is cheap (~60 ms for both warehouses) but it runs on every quote,
+    # every pre-order read and every order detail, and it hits a third party's
+    # production database. Cached in Redis, which degrades on its own if it is
+    # down. 0 disables the cache (every call reads through).
+    STOCK_CACHE_TTL_SECONDS = env.int("STOCK_CACHE_TTL_SECONDS", 300)
+
     # Maderable frontend base: composes the review link URL the client opens (the
     # origin must also be in CORS_ORIGINS). The dashboard uses HashRouter, hence
     # the base ends in "/#" (route = {base}/review/{token}).

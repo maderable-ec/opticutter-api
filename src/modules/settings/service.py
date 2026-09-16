@@ -2,11 +2,13 @@ from fastapi import Depends
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from src.modules.products.model import ProductType
 from src.modules.settings.model import SETTINGS_ID, SettingsModel
 from src.modules.settings.schemas import (
     CompanySettingsUpdate,
     CuttingSettingsUpdate,
     PreOrderSettingsUpdate,
+    StockSettingsUpdate,
     TaxSettingsUpdate,
 )
 from src.shared.config import config
@@ -22,6 +24,14 @@ _COMPANY_FIELD_MAP = {
     "email": "company_email",
     "phone": "company_phone",
     "branches": "company_branches",
+}
+
+# Low-stock thresholds are exposed (and consumed) keyed by ``ProductType``, and
+# stored one column per type. The map is the single place the two spellings
+# meet, so neither the API contract nor `StockService` ever names a column.
+_STOCK_FIELD_MAP = {
+    ProductType.BOARD.value: "stock_threshold_board",
+    ProductType.EDGE_BANDING.value: "stock_threshold_edge_banding",
 }
 
 
@@ -60,6 +70,8 @@ class SettingsService:
             preorder_validity_days=config.PREORDER_VALIDITY_DAYS,
             max_open_preorders_per_client=config.MAX_OPEN_PREORDERS_PER_CLIENT,
             tax_rate=config.TAX_RATE,
+            stock_threshold_board=config.STOCK_THRESHOLD_BOARD,
+            stock_threshold_edge_banding=(config.STOCK_THRESHOLD_EDGE_BANDING),
             company_name=config.COMPANY_NAME,
             company_tagline=config.COMPANY_TAGLINE,
             company_email=config.COMPANY_EMAIL,
@@ -127,6 +139,31 @@ class SettingsService:
         settings = self.get_or_init()
         for field, value in data.model_dump(exclude_unset=True).items():
             setattr(settings, field, value)
+        self._stamp_updated_by(settings)
+        self.db.commit()
+        self.db.refresh(settings)
+        return settings
+
+    def get_stock_thresholds(self) -> dict:
+        """Low-stock thresholds keyed by ``ProductType`` value.
+
+        The twin of ``get_tax_rate``: the runtime source of truth, read by
+        ``StockService`` for both the quote alert and the low-stock report so
+        neither hardcodes a number nor knows a column name. The units differ by
+        type — sheets for a board, linear metres for edge banding — which is
+        exactly why there is one threshold per type and not one for the shop.
+        """
+        settings = self.get_or_init()
+        return {
+            product_type: getattr(settings, column)
+            for product_type, column in _STOCK_FIELD_MAP.items()
+        }
+
+    def update_stock(self, data: StockSettingsUpdate) -> SettingsModel:
+        """Applies a partial PATCH to the low-stock thresholds."""
+        settings = self.get_or_init()
+        for field, value in data.model_dump(exclude_unset=True).items():
+            setattr(settings, _STOCK_FIELD_MAP[field], value)
         self._stamp_updated_by(settings)
         self.db.commit()
         self.db.refresh(settings)

@@ -44,6 +44,15 @@ class SettingsModel(TimestampMixin, AuditMixin, Base):
     # changing it here never rewrites what was already invoiced.
     tax_rate: Mapped[float] = mapped_column(Float)
 
+    # Low-stock thresholds, per product type (see `src/modules/inventory/`).
+    # Two columns and not one JSON bag because the UNITS differ and that is the
+    # point: a board is counted in SHEETS and edge banding in LINEAR METRES, so
+    # there is no single number. Keyed back to `ProductType` by
+    # `SettingsService.get_stock_thresholds()`, which is what keeps the column
+    # names out of the business logic.
+    stock_threshold_board: Mapped[float] = mapped_column(Float)
+    stock_threshold_edge_banding: Mapped[float] = mapped_column(Float)
+
     # Company data (document letterhead)
     company_name: Mapped[str] = mapped_column(String(128))
     company_tagline: Mapped[str] = mapped_column(String(256))

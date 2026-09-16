@@ -23,3 +23,8 @@ class NotificationType(str, Enum):
     # An admin cancelled an order that was already in the queue: the card
     # vanishes from the shop-floor board, and that needs saying out loud.
     order_cancelled = "order.cancelled"
+    # The order consumes material the branch is running out of. Emitted twice
+    # over an order's life -- when it is born and when it is paid into the queue
+    # -- and ONLY when something is actually low, which is what makes it a
+    # purchasing signal instead of one more "a sale happened" line.
+    order_low_stock = "order.low_stock"

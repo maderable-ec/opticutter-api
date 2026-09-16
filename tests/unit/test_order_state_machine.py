@@ -26,6 +26,7 @@ from src.shared.audit import Actor
 from src.shared.exceptions import (
     AuthorizationError,
     BusinessRuleError,
+    ConflictError,
     ValidationError,
 )
 
@@ -95,10 +96,93 @@ def test_queued_with_payment_freezes_amount_and_commits(mock_session):
         OrderStatus.queued,
         actor=_actor(UserRole.ADMIN),
         payment=OrderPaymentInput(cash_amount=50.0),
+        external_invoice_id="FAC-001-42",
     )
     assert order.status == OrderStatus.queued.value
     assert order.payment_cash_amount == 50.0
     mock_session.commit.assert_called_once()
+
+
+def test_queued_requires_an_invoice_number(mock_session):
+    """The way into the queue is the moment the sale is actually collected, so
+    it is where the billing document gets stitched to the order."""
+    svc = _service(mock_session, _order(OrderStatus.confirmed))
+    with pytest.raises(ValidationError) as exc:
+        svc.transition(
+            1,
+            OrderStatus.queued,
+            actor=_actor(UserRole.ADMIN),
+            payment=OrderPaymentInput(cash_amount=50.0),
+        )
+    # The field rides on the error so the dashboard can hang the message off the
+    # input instead of raising a generic toast.
+    assert exc.value.field == "externalInvoiceId"
+    mock_session.commit.assert_not_called()
+
+
+def test_a_blank_invoice_number_is_not_an_invoice(mock_session):
+    svc = _service(mock_session, _order(OrderStatus.confirmed))
+    with pytest.raises(ValidationError):
+        svc.transition(
+            1,
+            OrderStatus.queued,
+            actor=_actor(UserRole.ADMIN),
+            payment=OrderPaymentInput(cash_amount=50.0),
+            external_invoice_id="   ",
+        )
+
+
+def test_queued_freezes_the_invoice_number(mock_session):
+    order = _order(OrderStatus.confirmed)
+    svc = _service(mock_session, order)
+    svc.transition(
+        1,
+        OrderStatus.queued,
+        actor=_actor(UserRole.ADMIN),
+        payment=OrderPaymentInput(cash_amount=50.0),
+        external_invoice_id="  FAC-001-42  ",
+    )
+    assert order.external_invoice_id == "FAC-001-42"
+
+
+def test_an_order_that_already_has_an_invoice_need_not_resend_it(mock_session):
+    """It may have been associated earlier through POST /orders/{id}/invoice."""
+    order = _order(OrderStatus.confirmed)
+    order.external_invoice_id = "FAC-001-42"
+    svc = _service(mock_session, order)
+    svc.transition(
+        1,
+        OrderStatus.queued,
+        actor=_actor(UserRole.ADMIN),
+        payment=OrderPaymentInput(cash_amount=50.0),
+    )
+    assert order.status == OrderStatus.queued.value
+    assert order.external_invoice_id == "FAC-001-42"
+
+
+def test_queueing_never_replaces_an_issued_invoice(mock_session):
+    order = _order(OrderStatus.confirmed)
+    order.external_invoice_id = "FAC-001-42"
+    svc = _service(mock_session, order)
+    with pytest.raises(ConflictError):
+        svc.transition(
+            1,
+            OrderStatus.queued,
+            actor=_actor(UserRole.ADMIN),
+            payment=OrderPaymentInput(cash_amount=50.0),
+            external_invoice_id="FAC-001-99",
+        )
+    mock_session.commit.assert_not_called()
+
+
+def test_the_admin_rollback_does_not_ask_for_an_invoice(mock_session):
+    """``in_process -> queued`` undoes somebody taking the wrong order: it is not
+    a payment capture, so neither the payment nor the invoice gate applies."""
+    order = _order(OrderStatus.in_process, _activity(ActivityType.cutting))
+    svc = _service(mock_session, order)
+    svc.transition(1, OrderStatus.queued, actor=_actor(UserRole.ADMIN))
+    assert order.status == OrderStatus.queued.value
+    assert order.external_invoice_id is None
 
 
 def test_queued_freezes_every_method_split(mock_session):
@@ -112,6 +196,7 @@ def test_queued_freezes_every_method_split(mock_session):
         payment=OrderPaymentInput(
             cash_amount=10.0, transfer_amount=20.0, credit_amount=5.0
         ),
+        external_invoice_id="FAC-001-42",
     )
     assert order.payment_cash_amount == 10.0
     assert order.payment_transfer_amount == 20.0
@@ -311,6 +396,7 @@ def test_transition_seals_the_status_clock(mock_session):
         OrderStatus.queued,
         actor=_actor(UserRole.ADMIN),
         payment=OrderPaymentInput(cash_amount=10.0),
+        external_invoice_id="FAC-001-42",
     )
     assert order.status_changed_at > datetime(2026, 1, 1)
 

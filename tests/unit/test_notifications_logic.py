@@ -143,9 +143,20 @@ def test_every_notification_type_has_a_renderer():
 
 @pytest.mark.parametrize("notification_type", list(NotificationType))
 def test_renderers_fit_the_column_limits(notification_type):
-    # Worst case: the longest code and a branch name filling its own column.
+    # Worst case: the longest code, a branch name filling its own column
+    # (String(128)) and a product name filling its own (products.name, also 128)
+    # -- the low-stock body has to carry BOTH, which is why it is the one
+    # renderer that clips instead of concatenating.
     order = _Order(id=1, code="O" * 32)
-    payload = {"preorderCode": "P" * 32, "fromBranch": "B" * 128, "toBranch": "B" * 128}
+    payload = {
+        "preorderCode": "P" * 32,
+        "fromBranch": "B" * 128,
+        "toBranch": "B" * 128,
+        "branchName": "B" * 128,
+        "productNames": ["N" * 128, "M" * 128],
+        "count": 99,
+        "event": "queued",
+    }
     title, body = _render(notification_type, order, payload)
     assert 0 < len(title) <= 128  # NotificationModel.title
     assert 0 < len(body) <= 255  # NotificationModel.body
@@ -311,3 +322,102 @@ class _User:
     def __init__(self, id, is_active=True):
         self.id = id
         self.is_active = is_active
+
+
+# --- low stock: the one event a live inventory reading decides -------------------
+def test_low_stock_is_not_a_transition_plan():
+    """It cannot be in ``resolve_plan``: that map is pure and DB-free on purpose,
+    and this event's whole condition is a reading of the vendor's warehouse."""
+    for pair in (
+        (OrderStatus.confirmed, OrderStatus.queued),
+        (OrderStatus.in_process, OrderStatus.finished),
+        (OrderStatus.queued, OrderStatus.cancelled),
+    ):
+        assert all(
+            p.type is not NotificationType.order_low_stock for p in resolve_plan(*pair)
+        )
+
+
+def test_low_stock_copy_says_which_moment_it_is():
+    order = _Order(id=1, code="ORD-2026-0007")
+    payload = {
+        "event": "created",
+        "branchName": "Sucúa",
+        "productNames": ["MDP RH BLANCO NIEVE"],
+        "count": 1,
+    }
+    _, born = _render(NotificationType.order_low_stock, order, payload)
+    _, queued = _render(
+        NotificationType.order_low_stock, order, {**payload, "event": "queued"}
+    )
+    assert "se confirmó" in born
+    assert "entró a la cola" in queued
+    # Both name the order, the branch and the material -- that is the whole
+    # point: the admin has to know what to restock and where.
+    for body in (born, queued):
+        assert "ORD-2026-0007" in body
+        assert "Sucúa" in body
+        assert "MDP RH BLANCO NIEVE" in body
+
+
+def test_low_stock_body_counts_the_rest_instead_of_listing_them():
+    _, body = _render(
+        NotificationType.order_low_stock,
+        _Order(id=1, code="ORD-7"),
+        {
+            "event": "queued",
+            "branchName": "Macas",
+            "productNames": ["Tablero A", "Tablero B", "Tapacanto C"],
+            "count": 3,
+        },
+    )
+    assert "Tablero A" in body
+    assert "y 2 más" in body
+    assert "Tablero B" not in body
+
+
+def test_low_stock_singular_reads_naturally():
+    _, body = _render(
+        NotificationType.order_low_stock,
+        _Order(id=1, code="ORD-7"),
+        {"event": "queued", "branchName": "Macas", "productNames": ["X"], "count": 1},
+    )
+    assert "1 material bajo el mínimo" in body
+    assert "más" not in body
+
+
+def test_low_stock_goes_to_the_admins_alone(mock_session):
+    """Restocking is a purchasing call: the shop floor cannot act on it and the
+    seller has already sold the thing."""
+    from functools import partial
+
+    from src.modules.notifications.emitter import _global_admins, notify_order_low_stock
+
+    captured = {}
+
+    def fake_emit(db, order, notification_type, resolver, actor=None, data=None):
+        captured["type"] = notification_type
+        captured["resolver"] = resolver
+        captured["data"] = data
+
+    import src.modules.notifications.emitter as emitter
+
+    original = emitter._emit
+    emitter._emit = fake_emit
+    try:
+        notify_order_low_stock(
+            mock_session,
+            _Order(id=7, code="ORD-7"),
+            event="queued",
+            branch_name="Sucúa",
+            product_names=["A", "", "B"],
+        )
+    finally:
+        emitter._emit = original
+
+    assert captured["type"] is NotificationType.order_low_stock
+    assert captured["resolver"] is _global_admins
+    # Blank names are dropped, and the count is what actually got carried.
+    assert captured["data"]["productNames"] == ["A", "B"]
+    assert captured["data"]["count"] == 2
+    assert partial  # keeps the import meaningful for readers of this file

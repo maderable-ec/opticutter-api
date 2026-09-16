@@ -14,7 +14,7 @@ from src.modules.orders.service import OrderService
 from src.modules.users.schemas import UserCreate
 from src.modules.users.service import UserService
 from src.shared.security import create_access_token
-from tests.order_helpers import _patch_activity, _to_finished
+from tests.order_helpers import _patch_activity, _patch_status, _to_finished
 
 _PWD = "pw-supersecret"
 _BRANCH = 1  # default branch seeded by conftest
@@ -99,15 +99,6 @@ def _second_branch(db_session):
     db_session.add(branch)
     db_session.commit()
     return branch.id
-
-
-def _patch_status(client, oid, status, note=None, **kw):
-    body = {"status": status}
-    if status == "queued":
-        body["payment"] = {"cashAmount": 100.0}
-    if note is not None:
-        body["note"] = note
-    return client.patch(f"/api/v1/orders/{oid}/status", json=body, **kw)
 
 
 def _unread_count(client, headers):
@@ -391,3 +382,155 @@ def test_reconfirming_does_not_notify_twice(client, db_session):
         assert client.post(f"/api/v1/public/review/{token}/confirm").status_code == 200
 
     assert _unread_count(client, headers) == 1
+
+
+# --------------------------------------------------------------------------- #
+# order.low_stock: the one event a live inventory reading decides
+# --------------------------------------------------------------------------- #
+def _stocked_branch(db_session, quantity):
+    """Points conftest's default branch at a warehouse holding ``quantity``.
+
+    The catalog product created by ``_create_board`` is hand-made and carries no
+    ``external_code``, so it is invisible to the vendor — the test wires one on
+    to make the order's board a SYNCED product, which is the only kind stock can
+    be known for.
+    """
+    from src.modules.branches.model import BranchModel as _Branch
+    from src.modules.inventory.external_inventory import StockRow
+    from src.modules.products.model import ProductModel
+
+    branch = db_session.get(_Branch, _BRANCH)
+    branch.warehouse_code = 1
+    product = (
+        db_session.query(ProductModel)
+        .filter(ProductModel.type == "board")
+        .order_by(ProductModel.id)
+        .first()
+    )
+    product.external_code = "TABLEROS:155"
+    db_session.commit()
+    return [StockRow(external_code="TABLEROS:155", warehouse_code=1, quantity=quantity)]
+
+
+def _serve_stock(monkeypatch, rows):
+    monkeypatch.setattr("src.modules.inventory.service.fetch_stock", lambda: list(rows))
+
+
+def test_low_stock_reaches_the_admins_when_the_order_is_queued(
+    client, db_session, monkeypatch
+):
+    order = _mint_order(client, db_session)
+    admin = _seed_user(db_session, "administrador", "admin2@empresa.com")
+    op1 = _seed_user(db_session, "operador", "op1@empresa.com", branch_id=_BRANCH)
+    _serve_stock(monkeypatch, _stocked_branch(db_session, quantity=1.0))
+
+    assert _patch_status(client, order["id"], "queued").status_code == 200
+
+    items = _list(client, _headers(admin))
+    assert [i["type"] for i in items] == ["order.low_stock"]
+    assert items[0]["orderId"] == order["id"]
+    assert items[0]["data"]["event"] == "queued"
+    assert "entró a la cola" in items[0]["body"]
+    # The shop floor still gets its own, unrelated, "in the queue" notification —
+    # and NOT the restocking one, which it cannot act on.
+    assert [i["type"] for i in _list(client, _headers(op1))] == ["order.queued"]
+
+
+def test_a_well_stocked_order_notifies_nobody_about_stock(
+    client, db_session, monkeypatch
+):
+    """The half of the rule that matters: this is a purchasing signal, so an
+    order that eats into nothing scarce must stay silent."""
+    order = _mint_order(client, db_session)
+    admin = _seed_user(db_session, "administrador", "admin2@empresa.com")
+    _serve_stock(monkeypatch, _stocked_branch(db_session, quantity=500.0))
+
+    assert _patch_status(client, order["id"], "queued").status_code == 200
+    assert _unread_count(client, _headers(admin)) == 0
+
+
+def test_a_branch_without_a_warehouse_notifies_nobody_about_stock(
+    client, db_session, monkeypatch
+):
+    order = _mint_order(client, db_session)
+    admin = _seed_user(db_session, "administrador", "admin2@empresa.com")
+    rows = _stocked_branch(db_session, quantity=1.0)
+    branch = db_session.get(BranchModel, _BRANCH)
+    branch.warehouse_code = None
+    db_session.commit()
+    _serve_stock(monkeypatch, rows)
+
+    assert _patch_status(client, order["id"], "queued").status_code == 200
+    assert _unread_count(client, _headers(admin)) == 0
+
+
+def test_an_unreachable_vendor_never_blocks_the_enqueue(
+    client, db_session, monkeypatch
+):
+    """The payment is already committed by the time this runs: a third party's
+    database being down cannot be allowed to undo it."""
+    from src.shared.exceptions import ExternalServiceError
+
+    order = _mint_order(client, db_session)
+    admin = _seed_user(db_session, "administrador", "admin2@empresa.com")
+    _stocked_branch(db_session, quantity=1.0)
+
+    def _down():
+        raise ExternalServiceError("SIFAC caída")
+
+    monkeypatch.setattr("src.modules.inventory.service.fetch_stock", _down)
+
+    assert _patch_status(client, order["id"], "queued").status_code == 200
+    assert _unread_count(client, _headers(admin)) == 0
+
+
+def test_the_rollback_does_not_re_announce_low_stock(client, db_session, monkeypatch):
+    """``in_process -> queued`` is not a sale reaching the queue, so it is not a
+    restocking moment either."""
+    order = _mint_order(client, db_session)
+    admin = _seed_user(db_session, "administrador", "admin2@empresa.com")
+    _serve_stock(monkeypatch, _stocked_branch(db_session, quantity=1.0))
+
+    assert _patch_status(client, order["id"], "queued").status_code == 200
+    assert (
+        _patch_activity(client, order["id"], "cutting", "in_progress").status_code
+        == 200
+    )
+    client.post("/api/v1/notifications/read-all", headers=_headers(admin))
+
+    assert _patch_status(client, order["id"], "queued").status_code == 200
+    assert _unread_count(client, _headers(admin)) == 0
+
+
+def test_low_stock_reaches_the_admins_when_the_order_is_born(
+    client, db_session, monkeypatch
+):
+    """The confirm is the only door an order comes through — there is no
+    ``POST /orders`` — so it is the only place the "created" half can fire."""
+    seller = _seed_user(db_session, "vendedor", "sell@empresa.com")
+    admin = _seed_user(db_session, "administrador", "admin2@empresa.com")
+    headers = _headers(seller)
+    pre = _preorder_for(client, db_session, headers, "0100000397", "MEL18")
+    _serve_stock(monkeypatch, _stocked_branch(db_session, quantity=1.0))
+
+    _confirm(client, pre["id"], headers)
+
+    # The seller hears the sale closed; the admin hears what has to be restocked.
+    assert [i["type"] for i in _list(client, headers)] == ["order.confirmed"]
+    items = _list(client, _headers(admin))
+    assert [i["type"] for i in items] == ["order.low_stock"]
+    assert items[0]["data"]["event"] == "created"
+    assert "se confirmó" in items[0]["body"]
+
+
+def test_a_well_stocked_new_order_notifies_no_admin(client, db_session, monkeypatch):
+    seller = _seed_user(db_session, "vendedor", "sell@empresa.com")
+    admin = _seed_user(db_session, "administrador", "admin2@empresa.com")
+    headers = _headers(seller)
+    pre = _preorder_for(client, db_session, headers, "0100000397", "MEL18")
+    _serve_stock(monkeypatch, _stocked_branch(db_session, quantity=500.0))
+
+    _confirm(client, pre["id"], headers)
+
+    assert _unread_count(client, _headers(admin)) == 0
+    assert _unread_count(client, headers) == 1  # the sale itself still lands

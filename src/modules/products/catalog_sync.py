@@ -148,11 +148,16 @@ def _parse_iva_rate(iva: str) -> Optional[float]:
     return float(m.group(1)) / 100
 
 
-def _external_code(categoria: str, codigo: str) -> str:
+def build_external_code(categoria: str, codigo: str) -> str:
     """Namespaced match key, e.g. ``"TABLEROS:1033"``.
 
     Namespacing by category is what lets a board and an edge banding share a
     bare code in the vendor's system without colliding here.
+
+    Public because it has a second consumer: the stock reader
+    (``src/modules/inventory/external_inventory.py``) builds the same key to
+    join the vendor's ``binventario`` rows against this catalog. Duplicating
+    the f-string there is exactly how the two would drift apart.
     """
     return f"{categoria}:{codigo}"
 
@@ -491,7 +496,7 @@ def _validate(
             problem(f"CATEGORIA '{row.categoria}' no reconocida")
             continue
 
-        external_code = _external_code(categoria, row.codigo)
+        external_code = build_external_code(categoria, row.codigo)
 
         if external_code in seen_external_codes:
             other = seen_external_codes[external_code]

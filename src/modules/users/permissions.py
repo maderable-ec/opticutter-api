@@ -86,6 +86,10 @@ RESOURCE_ROLES: dict[str, tuple[UserRole, ...]] = {
     # and the bander bands, and splitting it per activity would duplicate that
     # decision in two places.
     "orders:activities": (_ADMIN, _OPERATOR, _BANDER),
+    # The stock question a seller asks while quoting. Same pair as "optimizer"
+    # and "preorders": it is part of building a quote, not a report. The
+    # low-stock REPORT is admin-only and lives under "analytics".
+    "inventory:check": (_ADMIN, _SELLER),
     "analytics": (_ADMIN,),
     # Any authenticated role reads/acks its own notifications; the service scopes
     # every query to the current user's id.

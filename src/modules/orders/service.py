@@ -10,8 +10,10 @@ from src.modules.branches.service import resolve_branch_for_create
 from src.modules.clients.model import ClientModel
 from src.modules.clients.schemas import ClientResponse
 from src.modules.clients.service import require_phone
+from src.modules.inventory.service import StockService
 from src.modules.notifications.emitter import (
     notify_order_branch_changed,
+    notify_order_low_stock,
     notify_order_transition,
 )
 from src.modules.optimizations.patterns import base_label
@@ -419,6 +421,7 @@ class OrderService(BranchScopedMixin):
         actor: Optional[Actor] = None,
         note: Optional[str] = None,
         payment: Optional[OrderPaymentInput] = None,
+        external_invoice_id: Optional[str] = None,
         branch_scope: Optional[int] = None,
     ) -> OrderModel:
         """Validates and applies a state transition, recording the history.
@@ -434,7 +437,12 @@ class OrderService(BranchScopedMixin):
         order = self.get_scoped_or_404(order_id, branch_scope)
         current = OrderStatus(order.status)
         self._transition_unlocked(
-            order, to_status, actor=actor, note=note, payment=payment
+            order,
+            to_status,
+            actor=actor,
+            note=note,
+            payment=payment,
+            external_invoice_id=external_invoice_id,
         )
         self.db.commit()
         self.db.refresh(order)
@@ -443,7 +451,30 @@ class OrderService(BranchScopedMixin):
         # that should react (admins/sellers on completion, branch operators on
         # enqueue). Never raises — a failure here can't undo the commit above.
         notify_order_transition(self.db, order, current, to_status, actor)
+        # And, on the real enqueue only, tell the office if this order eats into
+        # material the branch is running out of. Asked here and not inside the
+        # emitter because the condition is a live inventory reading, which
+        # ``resolve_plan`` is deliberately unable to make. The lookup never
+        # raises (see ``alerts_for_order``): the payment is already committed.
+        if current == OrderStatus.confirmed and to_status == OrderStatus.queued:
+            self._notify_low_stock(order, event="queued", actor=actor)
         return order
+
+    def _notify_low_stock(
+        self, order: OrderModel, *, event: str, actor: Optional[Actor]
+    ) -> None:
+        """Announces the order's low material, if any. Best-effort throughout."""
+        alerts = StockService(self.db).alerts_for_order(order)
+        if not alerts:
+            return
+        notify_order_low_stock(
+            self.db,
+            order,
+            event=event,
+            branch_name=order.branch.name if order.branch else None,
+            product_names=[a.product_name or a.product_code or "" for a in alerts],
+            actor=actor,
+        )
 
     def _transition_unlocked(
         self,
@@ -452,6 +483,7 @@ class OrderService(BranchScopedMixin):
         actor: Actor,
         note: Optional[str] = None,
         payment: Optional[OrderPaymentInput] = None,
+        external_invoice_id: Optional[str] = None,
         now: Optional[datetime] = None,
     ) -> OrderStatus:
         """Every gate and every side-effect of a transition, WITHOUT committing.
@@ -513,6 +545,27 @@ class OrderService(BranchScopedMixin):
                 "para enviar a cola"
             )
 
+        # Invoice gate, the twin of the one above and for the same reason: the
+        # way into the queue is the moment the sale is actually collected, so
+        # that is where the billing document gets stitched to the order. Reuses
+        # ``external_invoice_id`` -- there is no second invoice field, and the
+        # existing ``POST /orders/{id}/invoice`` stays for corrections.
+        # An order that already carries one passes without resending it.
+        invoice = (external_invoice_id or "").strip()
+        if is_payment_capture:
+            if not invoice and not order.external_invoice_id:
+                raise ValidationError(
+                    "Indica el número de factura para enviar a cola",
+                    field="externalInvoiceId",
+                )
+            # Checked HERE and written below, for the same reason the graph
+            # check was hoisted into this function: every gate has to run
+            # before ``_apply_transition``. Raising from the effects block
+            # leaves the order already moved in the session -- uncommitted, but
+            # visible to anything still reading through that session.
+            if invoice:
+                self._ensure_invoice_unclaimed(order, invoice)
+
         # Cancelling is the only move that kills a sale, and the ONLY record of
         # why is the history row's ``note``: there is no cancellation reason nor
         # actor column. Required on BOTH origins -- from ``confirmed`` the quote
@@ -560,6 +613,8 @@ class OrderService(BranchScopedMixin):
             order.payment_cash_amount = payment.cash_amount
             order.payment_transfer_amount = payment.transfer_amount
             order.payment_credit_amount = payment.credit_amount
+            if invoice:
+                self._assign_external_invoice(order, invoice)
             order.queued_at = now
             cut = self._activity(order, ActivityType.cutting)
             if cut is not None and cut.ready_at is None:
@@ -1125,18 +1180,31 @@ class OrderService(BranchScopedMixin):
         raises ``ConflictError`` to avoid overwriting an already-issued invoice.
         """
         order = self.get_scoped_or_404(order_id, branch_scope)
-        if (
-            order.external_invoice_id is not None
-            and order.external_invoice_id != external_invoice_id
-        ):
+        self._assign_external_invoice(order, external_invoice_id)
+        self.db.commit()
+        self.db.refresh(order)
+        return order
+
+    @staticmethod
+    def _ensure_invoice_unclaimed(order: OrderModel, value: str) -> None:
+        """Refuses a value that would overwrite a DIFFERENT issued invoice.
+
+        Split from the write so the queue gate can check before anything moves
+        and still share ONE definition of "already invoiced" with the billing
+        endpoint: re-sending the same id is a no-op, another one is a conflict,
+        and an issued invoice is never silently replaced.
+        """
+        if order.external_invoice_id is not None and order.external_invoice_id != value:
             raise ConflictError(
                 "La orden ya tiene una factura externa asociada "
                 f"({order.external_invoice_id})"
             )
-        order.external_invoice_id = external_invoice_id
-        self.db.commit()
-        self.db.refresh(order)
-        return order
+
+    @staticmethod
+    def _assign_external_invoice(order: OrderModel, value: str) -> None:
+        """Writes the invoice id, refusing to overwrite a different one."""
+        OrderService._ensure_invoice_unclaimed(order, value)
+        order.external_invoice_id = value
 
     def change_branch(
         self,

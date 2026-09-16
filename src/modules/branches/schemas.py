@@ -20,6 +20,14 @@ class BranchBase(CamelModel):
     print_consolidated_enabled: bool = Field(
         True, description="The branch's shop has a sheet printer (consolidated packet)"
     )
+    warehouse_code: Optional[int] = Field(
+        None,
+        ge=1,
+        description=(
+            "The vendor's warehouse this branch's stock lives in "
+            "(SIFAC `mbodega.cod`). Empty = the branch doesn't consult stock"
+        ),
+    )
 
 
 class BranchCreate(BranchBase):
@@ -38,6 +46,7 @@ class BranchUpdate(CamelModel):
     )
     print_labels_enabled: Optional[bool] = None
     print_consolidated_enabled: Optional[bool] = None
+    warehouse_code: Optional[int] = Field(None, ge=1)
 
 
 class BranchResponse(BranchBase):
