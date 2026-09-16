@@ -8,6 +8,7 @@ own notifications (scoped by ``current_user.id``).
 """
 
 from src.modules.branches.model import BranchModel
+from src.modules.notifications.model import NotificationModel
 from src.modules.orders.schemas import OrderCreate
 from src.modules.orders.service import OrderService
 from src.modules.users.schemas import UserCreate
@@ -232,3 +233,90 @@ def test_cannot_mark_another_users_notification(client, db_session):
 
 def test_notifications_require_authentication(anon_client):
     assert anon_client.get("/api/v1/notifications/").status_code == 401
+
+
+# --------------------------------------------------------------------------- #
+# The client confirms the quote: the seller who raised it is told
+# --------------------------------------------------------------------------- #
+def _preorder_for(client, db_session, headers, identifier, code):
+    """Quote raised by the given staff member (that is what ``createdBy`` is)."""
+    c = _create_client(client, identifier=identifier)
+    b = _create_board(client, code=code)
+    pre = client.post(
+        "/api/v1/preorders/",
+        json=_order_payload(c["id"], b["id"]),
+        headers=headers,
+    )
+    assert pre.status_code == 201
+    return pre.json()["data"]
+
+
+def _confirm(client, pre_id, headers):
+    token = client.post(
+        f"/api/v1/preorders/{pre_id}/review-link", headers=headers
+    ).json()["data"]["token"]
+    resp = client.post(f"/api/v1/public/review/{token}/confirm")
+    assert resp.status_code == 200
+    return resp.json()["data"]
+
+
+def test_client_confirmation_notifies_the_quote_owner(client, db_session):
+    seller = _seed_user(db_session, "vendedor", "sell@empresa.com")
+    other = _seed_user(db_session, "vendedor", "sell2@empresa.com")
+    operator = _seed_user(db_session, "operador", "op1@empresa.com")
+    headers = _headers(seller)
+    pre = _preorder_for(client, db_session, headers, "0100000397", "MEL18")
+
+    confirmed = _confirm(client, pre["id"], headers)
+
+    items = _list(client, headers)
+    assert [i["type"] for i in items] == ["order.confirmed"]
+    assert items[0]["data"]["preorderCode"] == pre["code"]
+    assert items[0]["data"]["orderCode"] == confirmed["orderCode"]
+    assert items[0]["orderId"] is not None
+    assert pre["code"] in items[0]["body"]
+
+    # It is addressed to the owner: not to another seller, and not to the shop
+    # floor (the order is born ``confirmed``, nothing is queued yet).
+    assert _unread_count(client, _headers(other)) == 0
+    assert _unread_count(client, _headers(operator)) == 0
+
+
+def test_confirmation_falls_back_when_the_owner_is_inactive(client, db_session):
+    """A closed sale must not be lost to a seller who left the company."""
+    seller = _seed_user(db_session, "vendedor", "sell@empresa.com")
+    headers = _headers(seller)
+    pre = _preorder_for(client, db_session, headers, "0100000298", "MEL19")
+    token = client.post(
+        f"/api/v1/preorders/{pre['id']}/review-link", headers=headers
+    ).json()["data"]["token"]
+    # The seller leaves the company while the quote sits with the client.
+    seller.is_active = False
+    db_session.commit()
+
+    assert client.post(f"/api/v1/public/review/{token}/confirm").status_code == 200
+
+    # The office picks it up; the deactivated owner gets nothing (they cannot
+    # even authenticate any more, so this is checked against the table).
+    admin_items = _list(client, client.headers, unread=True)
+    assert [i["type"] for i in admin_items] == ["order.confirmed"]
+    assert (
+        db_session.query(NotificationModel)
+        .filter(NotificationModel.user_id == seller.id)
+        .count()
+        == 0
+    )
+
+
+def test_reconfirming_does_not_notify_twice(client, db_session):
+    seller = _seed_user(db_session, "vendedor", "sell@empresa.com")
+    headers = _headers(seller)
+    pre = _preorder_for(client, db_session, headers, "0100000306", "MEL20")
+    token = client.post(
+        f"/api/v1/preorders/{pre['id']}/review-link", headers=headers
+    ).json()["data"]["token"]
+
+    for _ in range(2):  # a double click, or a retry after a dropped response
+        assert client.post(f"/api/v1/public/review/{token}/confirm").status_code == 200
+
+    assert _unread_count(client, headers) == 1
