@@ -55,6 +55,11 @@ from src.modules.orders.schemas import (
     PlacedPieceResponse,
     WorkshopQueueItem,
 )
+
+# Model only, never the pre-order service: ``preorders`` imports ``orders`` and
+# not the other way round, and ``preorders/model.py`` imports neither -- which is
+# what keeps this from being a cycle.
+from src.modules.preorders.model import PreOrderModel
 from src.modules.settings.service import SettingsService
 from src.shared.audit import Actor, system_actor
 from src.shared.branch_scope import BranchScopedMixin
@@ -153,6 +158,13 @@ class OrderService(BranchScopedMixin):
             selectinload(OrderModel.pieces),
             selectinload(OrderModel.history),
             selectinload(OrderModel.activities),
+            # ``load_only`` is load-bearing, not tidiness: a pre-order carries the
+            # whole cut list as JSON (``materials``/``requirements``), so without
+            # it a page of 20 orders drags 20 full cut lists into memory to read
+            # one code.
+            selectinload(OrderModel.preorders).load_only(
+                PreOrderModel.id, PreOrderModel.code
+            ),
         )
         if status:
             query = query.filter(OrderModel.status.in_([s.value for s in status]))
@@ -456,10 +468,16 @@ class OrderService(BranchScopedMixin):
         history) then cannot reproduce what the service wrote.
 
         Verifies the actor's role for the specific transition (TRANSITION_ROLES),
-        the payment on entering the queue, and -- closing the order -- that every
-        applicable activity is done.
+        the payment on entering the queue, the reason when cancelling, and --
+        closing the order -- that every applicable activity is done.
+
+        The graph is validated FIRST, ahead of every business gate. It is also
+        checked inside ``_apply_transition`` (the choke point), but a transition
+        that does not exist has to report itself as invalid rather than as a
+        missing reason or a missing payment.
         """
         current = OrderStatus(order.status)
+        self._ensure_valid_transition(current, to_status)
 
         # Per-transition role validation before touching the state.
         if actor.role is not None:
@@ -494,6 +512,13 @@ class OrderService(BranchScopedMixin):
                 "Registra la forma de pago (efectivo, transferencia y/o crédito) "
                 "para enviar a cola"
             )
+
+        # Cancelling is the only move that kills a sale, and the ONLY record of
+        # why is the history row's ``note``: there is no cancellation reason nor
+        # actor column. Required on BOTH origins -- from ``confirmed`` the quote
+        # died, from ``queued`` there is money already collected.
+        if to_status == OrderStatus.cancelled and not (note or "").strip():
+            raise ValidationError("Indica el motivo de la cancelación")
 
         now = now or datetime.utcnow()
         self._apply_transition(order, to_status, actor=actor, note=note, now=now)
@@ -539,6 +564,15 @@ class OrderService(BranchScopedMixin):
             cut = self._activity(order, ActivityType.cutting)
             if cut is not None and cut.ready_at is None:
                 cut.ready_at = order.queued_at
+
+        # Cancelling has NO side-effect block, and that is deliberate.
+        # ``payment_*_amount`` and ``queued_at`` survive: they are the record of
+        # what was collected and of when the order reached the shop, and wiping
+        # them would turn a cancellation into a forged history. The activities
+        # stay ``pending`` (unreachable anyway -- ``ACTIVITY_MUTABLE_ORDER_STATUSES``
+        # is ``{in_process}`` -- and their clocks are sealed-once), and
+        # ``assigned_to_*`` is already NULL in ``queued``. The pre-order is not
+        # reopened either: re-quoting is ``POST /preorders/{id}/duplicate``.
         return current
 
     def get_cutting_plan(
@@ -1025,6 +1059,20 @@ class OrderService(BranchScopedMixin):
             self.db.commit()
             self.db.refresh(order)
 
+    @staticmethod
+    def _ensure_valid_transition(current: OrderStatus, to_status: OrderStatus) -> None:
+        """Rejects a move the state machine does not have (``BusinessRuleError``).
+
+        Called twice on purpose: once at the top of ``_transition_unlocked``, so
+        the business gates (reason, payment, open activities) never answer for a
+        transition that does not exist, and once here, so the choke point stays
+        safe for any future caller.
+        """
+        if to_status not in TRANSITIONS.get(current, set()):
+            raise BusinessRuleError(
+                f"Transición inválida de '{current.value}' a '{to_status.value}'"
+            )
+
     def _apply_transition(
         self,
         order: OrderModel,
@@ -1039,10 +1087,7 @@ class OrderService(BranchScopedMixin):
         review link as used) in a single atomic transaction.
         """
         current = OrderStatus(order.status)
-        if to_status not in TRANSITIONS.get(current, set()):
-            raise BusinessRuleError(
-                f"Transición inválida de '{current.value}' a '{to_status.value}'"
-            )
+        self._ensure_valid_transition(current, to_status)
         # One instant for every record of the same event: the history row, the
         # clock the listing reads and -- when the transition was derived from an
         # activity -- that activity's own timestamps. Stamping them separately left

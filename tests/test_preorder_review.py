@@ -337,6 +337,58 @@ def test_confirm_creates_immutable_order(client):
     assert info["usedAt"] is not None
 
 
+def test_the_order_and_its_quote_link_back_to_each_other(client):
+    """The round trip, on the detail AND on the two listings.
+
+    Both sides carry the id AND the code: the id is the route, the code is the
+    label, and without it the dashboard needs a second request just to name the
+    link it is drawing.
+    """
+    pre = _setup_preorder(client)
+    link = _generate_link(client, pre["id"])
+    client.post(f"/api/v1/public/review/{link['token']}/confirm")
+
+    pre_after = client.get(f"/api/v1/preorders/{pre['id']}").json()["data"]
+    order_id = pre_after["orderId"]
+    assert pre_after["orderCode"].startswith("ORD-")
+
+    order = client.get(f"/api/v1/orders/{order_id}").json()["data"]
+    assert order["preorderId"] == pre["id"]
+    assert order["preorderCode"] == pre_after["code"]
+    assert order["code"] == pre_after["orderCode"]
+
+    # The listings carry the same pair (they are eager-loaded, not lazy).
+    row = next(
+        item
+        for item in client.get("/api/v1/orders/").json()["data"]
+        if item["id"] == order_id
+    )
+    assert (row["preorderId"], row["preorderCode"]) == (pre["id"], pre_after["code"])
+
+    quote_row = next(
+        item
+        for item in client.get("/api/v1/preorders/").json()["data"]
+        if item["id"] == pre["id"]
+    )
+    assert quote_row["orderId"] == order_id
+    assert quote_row["orderCode"] == order["code"]
+
+
+def test_an_open_quote_and_a_direct_order_carry_no_link(client):
+    """Null on both sides until the client confirms."""
+    pre = _setup_preorder(client)
+    assert (
+        client.get(f"/api/v1/preorders/{pre['id']}").json()["data"]["orderCode"] is None
+    )
+
+    quote_row = next(
+        item
+        for item in client.get("/api/v1/preorders/").json()["data"]
+        if item["id"] == pre["id"]
+    )
+    assert quote_row["orderCode"] is None
+
+
 def test_reconfirm_is_benign_and_does_not_duplicate_order(client):
     pre = _setup_preorder(client)
     link = _generate_link(client, pre["id"])

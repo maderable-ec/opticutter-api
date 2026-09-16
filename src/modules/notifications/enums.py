@@ -20,3 +20,6 @@ class NotificationType(str, Enum):
     # disjoint (a user belongs to one branch) and each side reads differently.
     order_branch_arrived = "order.branch_arrived"
     order_branch_left = "order.branch_left"
+    # An admin cancelled an order that was already in the queue: the card
+    # vanishes from the shop-floor board, and that needs saying out loud.
+    order_cancelled = "order.cancelled"

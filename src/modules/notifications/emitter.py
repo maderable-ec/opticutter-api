@@ -52,6 +52,10 @@ class _Audience(Enum):
 
     GLOBAL_ADMINS_SELLERS = "global_admins_sellers"
     BRANCH_OPERATORS = "branch_operators"
+    # Admins ALONE, not the office: a cancellation is a sale that died, which is a
+    # management fact rather than a sales one. The seller who raised it is either
+    # the actor (already excluded) or is told through the order itself.
+    GLOBAL_ADMINS = "global_admins"
 
 
 @dataclass(frozen=True)
@@ -64,27 +68,51 @@ class NotificationPlan:
 
 def resolve_plan(
     from_status: OrderStatus, to_status: OrderStatus
-) -> Optional[NotificationPlan]:
-    """Maps a transition to a notification plan (``None`` if it isn't notified).
+) -> List[NotificationPlan]:
+    """Maps a transition to its notification plans (empty if it isn't notified).
 
     Pure and DB-free (unit-testable): ``-> finished`` notifies the global
-    admins/sellers; the real enqueue ``confirmed -> queued`` notifies the branch
+    admins/sellers and the real enqueue ``confirmed -> queued`` the branch
     operators. The admin rollback ``in_process -> queued`` and every other
     transition produce nothing.
 
     ``-> finished`` normally arrives DERIVED from the last activity closing, so
     this is what tells the office the work is done without anybody pressing a
     button for it.
+
+    A LIST and not one plan, because cancelling concerns two disjoint audiences
+    at once -- which is the same thing that forced the branch change out of this
+    function into ``notify_order_branch_changed``. Here it fits, because a
+    cancellation IS a transition.
     """
     if to_status == OrderStatus.finished:
-        return NotificationPlan(
-            NotificationType.order_completed, _Audience.GLOBAL_ADMINS_SELLERS
-        )
+        return [
+            NotificationPlan(
+                NotificationType.order_completed, _Audience.GLOBAL_ADMINS_SELLERS
+            )
+        ]
     if to_status == OrderStatus.queued and from_status == OrderStatus.confirmed:
-        return NotificationPlan(
-            NotificationType.order_queued, _Audience.BRANCH_OPERATORS
-        )
-    return None
+        return [
+            NotificationPlan(NotificationType.order_queued, _Audience.BRANCH_OPERATORS)
+        ]
+    if to_status == OrderStatus.cancelled:
+        # The admins hear about EVERY cancellation: an order only exists because a
+        # client confirmed a quote, so killing one is a sale that died either way.
+        plans = [
+            NotificationPlan(NotificationType.order_cancelled, _Audience.GLOBAL_ADMINS)
+        ]
+        # The shop floor only hears about the ones that were in its queue: an order
+        # cancelled while ``confirmed`` was never on anybody's board. The two get the
+        # same type because the fact is the same one -- the copy, which reads the
+        # payload's ``fromStatus``, is what says whether a card just vanished.
+        if from_status == OrderStatus.queued:
+            plans.append(
+                NotificationPlan(
+                    NotificationType.order_cancelled, _Audience.BRANCH_OPERATORS
+                )
+            )
+        return plans
+    return []
 
 
 # --------------------------------------------------------------------------- #
@@ -119,10 +147,17 @@ def _quote_owner_or_global(db: Session, user_id: Optional[int]) -> List[UserMode
     return _global_admins_sellers(db)
 
 
+def _global_admins(db: Session) -> List[UserModel]:
+    """Every active administrator, without the sellers."""
+    return UserService(db).list_by_roles([UserRole.ADMIN])
+
+
 def _recipients(db: Session, audience: _Audience, order) -> List[UserModel]:
-    """Adapter for ``resolve_plan``'s two audiences."""
+    """Adapter for ``resolve_plan``'s audiences."""
     if audience is _Audience.GLOBAL_ADMINS_SELLERS:
         return _global_admins_sellers(db)
+    if audience is _Audience.GLOBAL_ADMINS:
+        return _global_admins(db)
     return _branch_operators(db, order.branch_id)
 
 
@@ -172,12 +207,25 @@ def _render_branch_left(code: str, payload: Mapping[str, Any]) -> Tuple[str, str
     )
 
 
+def _render_cancelled(code: str, payload: Mapping[str, Any]) -> Tuple[str, str]:
+    # One type, two situations: from the queue a card just vanished off the board
+    # (and the operators are among the recipients), from ``confirmed`` the order
+    # never reached the shop and only the office is being told.
+    left_the_queue = payload.get("fromStatus") == OrderStatus.queued.value
+    tail = " y salió de la cola de producción" if left_the_queue else ""
+    return (
+        f"Orden {code} cancelada",
+        f"La orden {code} fue cancelada{tail}.",
+    )
+
+
 _RENDERERS: Dict[NotificationType, Renderer] = {
     NotificationType.order_completed: _render_completed,
     NotificationType.order_queued: _render_queued,
     NotificationType.order_confirmed: _render_confirmed,
     NotificationType.order_branch_arrived: _render_branch_arrived,
     NotificationType.order_branch_left: _render_branch_left,
+    NotificationType.order_cancelled: _render_cancelled,
 }
 
 
@@ -245,18 +293,26 @@ def notify_order_transition(
     to_status: OrderStatus,
     actor: Optional[Actor] = None,
 ) -> None:
-    """Fan-out for a just-committed status transition (best-effort)."""
-    plan = resolve_plan(from_status, to_status)
-    if plan is None:
-        return
-    _emit(
-        db,
-        order,
-        plan.type,
-        partial(_recipients, audience=plan.audience, order=order),
-        actor=actor,
-        data={"status": to_status.value},
-    )
+    """Fan-out for a just-committed status transition (best-effort).
+
+    One emission per plan, and they are independent on purpose: the audiences are
+    disjoint (a user holds one role), and if the second fan-out fails the first
+    still stands -- the same trade the branch change makes.
+
+    ``fromStatus`` rides in the payload because the copy of a cancellation turns
+    on it: the same event reads differently depending on whether the order was
+    already in the shop's queue.
+    """
+    data = {"status": to_status.value, "fromStatus": from_status.value}
+    for plan in resolve_plan(from_status, to_status):
+        _emit(
+            db,
+            order,
+            plan.type,
+            partial(_recipients, audience=plan.audience, order=order),
+            actor=actor,
+            data=data,
+        )
 
 
 def notify_order_confirmed(

@@ -101,10 +101,12 @@ def _second_branch(db_session):
     return branch.id
 
 
-def _patch_status(client, oid, status, **kw):
+def _patch_status(client, oid, status, note=None, **kw):
     body = {"status": status}
     if status == "queued":
         body["payment"] = {"cashAmount": 100.0}
+    if note is not None:
+        body["note"] = note
     return client.patch(f"/api/v1/orders/{oid}/status", json=body, **kw)
 
 
@@ -144,6 +146,75 @@ def test_queued_notifies_only_the_order_branch_operators(client, db_session):
     # An operator of another branch and a (global) seller are not notified.
     assert _unread_count(client, _headers(op2)) == 0
     assert _unread_count(client, _headers(seller)) == 0
+
+
+# --------------------------------------------------------------------------- #
+# -> cancelled: the admins always, the branch operators only from the queue
+# --------------------------------------------------------------------------- #
+def test_cancelling_from_the_queue_reaches_admins_and_branch_operators(
+    client, db_session
+):
+    order = _mint_order(client, db_session)
+    branch2 = _second_branch(db_session)
+    admin = _seed_user(db_session, "administrador", "admin2@empresa.com")
+    op1 = _seed_user(db_session, "operador", "op1@empresa.com", branch_id=_BRANCH)
+    op2 = _seed_user(db_session, "operador", "op2@empresa.com", branch_id=branch2)
+    seller = _seed_user(db_session, "vendedor", "sell@empresa.com")
+
+    assert _patch_status(client, order["id"], "queued").status_code == 200
+    # Clear the enqueue notification so what is left is only the cancellation.
+    client.post("/api/v1/notifications/read-all", headers=_headers(op1))
+
+    resp = _patch_status(client, order["id"], "cancelled", note="El cliente desistió")
+    assert resp.status_code == 200
+
+    # Two emissions, two disjoint audiences, one row each.
+    for recipient in (admin, op1):
+        items = _list(client, _headers(recipient), unread=True)
+        assert [i["type"] for i in items] == ["order.cancelled"]
+        assert items[0]["orderId"] == order["id"]
+        assert items[0]["data"]["orderCode"] == order["code"]
+        # The copy names the queue, because this order did leave a board.
+        assert "cola de producción" in items[0]["body"]
+
+    # Another branch's operator never had the card; a seller is not an admin.
+    assert _unread_count(client, _headers(op2)) == 0
+    assert _unread_count(client, _headers(seller)) == 0
+
+
+def test_cancelling_a_confirmed_order_reaches_only_the_admins(client, db_session):
+    """An order exists because a client confirmed a quote, so killing one is a sale
+    that died -- but it never reached the shop, so no board lost a card."""
+    order = _mint_order(client, db_session)
+    admin = _seed_user(db_session, "administrador", "admin2@empresa.com")
+    op1 = _seed_user(db_session, "operador", "op1@empresa.com", branch_id=_BRANCH)
+    seller = _seed_user(db_session, "vendedor", "sell@empresa.com")
+
+    assert (
+        _patch_status(
+            client, order["id"], "cancelled", note="Cotización descartada"
+        ).status_code
+        == 200
+    )
+
+    items = _list(client, _headers(admin), unread=True)
+    assert [i["type"] for i in items] == ["order.cancelled"]
+    # No board was involved, so the copy does not mention one.
+    assert "cola" not in items[0]["body"]
+
+    assert _unread_count(client, _headers(op1)) == 0
+    assert _unread_count(client, _headers(seller)) == 0
+
+
+def test_the_admin_who_cancels_is_not_notified_of_their_own_action(client, db_session):
+    """The ``client`` fixture IS an admin: the actor is excluded even when that
+    leaves the fan-out empty (it does NOT then fall back to anybody else)."""
+    order = _mint_order(client, db_session)
+    assert (
+        _patch_status(client, order["id"], "cancelled", note="motivo").status_code
+        == 200
+    )
+    assert db_session.query(NotificationModel).count() == 0
 
 
 # --------------------------------------------------------------------------- #

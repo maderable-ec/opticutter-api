@@ -180,6 +180,74 @@ def test_admin_and_seller_can_dispatch(mock_session, role):
     mock_session.commit.assert_called_once()
 
 
+# --- Cancellation ----------------------------------------------------------------
+def test_admin_cancels_from_the_queue(mock_session):
+    """The exceptional exit: the order is paid for but nobody has touched it."""
+    order = _order(OrderStatus.queued)
+    order.queued_at = datetime(2026, 1, 1)
+    order.payment_cash_amount = 100.0
+    svc = _service(mock_session, order)
+
+    svc.transition(
+        1,
+        OrderStatus.cancelled,
+        actor=_actor(UserRole.ADMIN),
+        note="El cliente desistió",
+    )
+    assert order.status == OrderStatus.cancelled.value
+    # The record of what was collected and of when it reached the shop survives:
+    # wiping it would turn a cancellation into a forged history.
+    assert order.payment_cash_amount == 100.0
+    assert order.queued_at == datetime(2026, 1, 1)
+    mock_session.commit.assert_called_once()
+
+
+@pytest.mark.parametrize("role", [UserRole.SELLER, UserRole.OPERATOR, UserRole.BANDER])
+def test_only_the_admin_cancels_from_the_queue(mock_session, role):
+    """Not even the seller who raised it: the sale was already collected."""
+    svc = _service(mock_session, _order(OrderStatus.queued))
+    with pytest.raises(AuthorizationError):
+        svc.transition(1, OrderStatus.cancelled, actor=_actor(role), note="motivo")
+    mock_session.commit.assert_not_called()
+
+
+def test_seller_still_cancels_from_confirmed(mock_session):
+    """The older rule did not move: before the payment it is a dead quote."""
+    order = _order(OrderStatus.confirmed)
+    svc = _service(mock_session, order)
+    svc.transition(
+        1, OrderStatus.cancelled, actor=_actor(UserRole.SELLER), note="motivo"
+    )
+    assert order.status == OrderStatus.cancelled.value
+    mock_session.commit.assert_called_once()
+
+
+@pytest.mark.parametrize("status", [OrderStatus.confirmed, OrderStatus.queued])
+@pytest.mark.parametrize("note", [None, "", "   "])
+def test_cancelling_requires_a_reason(mock_session, status, note):
+    """The history row's note is the ONLY record of why a sale died."""
+    order = _order(status)
+    svc = _service(mock_session, order)
+    with pytest.raises(ValidationError):
+        svc.transition(
+            1, OrderStatus.cancelled, actor=_actor(UserRole.ADMIN), note=note
+        )
+    assert order.status == status.value
+    mock_session.commit.assert_not_called()
+
+
+def test_an_impossible_cancellation_reports_itself_as_invalid(mock_session):
+    """Gate order: the graph is checked BEFORE the reason.
+
+    Otherwise cancelling a dispatched order answers "indica el motivo", which
+    says the move would work if only you typed something.
+    """
+    svc = _service(mock_session, _order(OrderStatus.dispatched))
+    with pytest.raises(BusinessRuleError, match="inválida"):
+        svc.transition(1, OrderStatus.cancelled, actor=_actor(UserRole.ADMIN))
+    mock_session.commit.assert_not_called()
+
+
 # --- The admin rollback ----------------------------------------------------------
 def test_rollback_reopens_the_cut_and_clears_the_assignment(mock_session):
     """It undoes somebody taking the wrong order, so the cut never started.

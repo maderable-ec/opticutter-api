@@ -263,11 +263,17 @@ def _order_on_board_and_offcut(client, db_session, identifier="0100000397"):
 # --------------------------------------------------------------------------- #
 # Driving the machine
 # --------------------------------------------------------------------------- #
-def _patch_status(client, oid, status, **kw):
+def _patch_status(client, oid, status, note=None, **kw):
     body = {"status": status}
     if status == "queued":
         # Moving to the queue requires registering the payment method (informational).
         body["payment"] = {"cashAmount": 100.0}
+    if status == "cancelled":
+        # Cancelling requires a reason: the history row's note is the only record
+        # of why a sale died. Tests about the gate itself pass note="" explicitly.
+        body["note"] = "Motivo de prueba" if note is None else note
+    elif note is not None:
+        body["note"] = note
     return client.patch(f"/api/v1/orders/{oid}/status", json=body, **kw)
 
 

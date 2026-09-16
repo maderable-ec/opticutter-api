@@ -58,6 +58,7 @@ def _detail(svc: PreOrderService, preorder: PreOrderModel) -> PreOrderResponse:
         client_note=preorder.client_note,
         source=preorder.source,
         order_id=preorder.order_id,
+        order_code=preorder.order_code,
         created_at=preorder.created_at,
         updated_at=preorder.updated_at,
         sent_at=preorder.sent_at,
