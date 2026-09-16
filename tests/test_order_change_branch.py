@@ -3,8 +3,8 @@
 Load rebalancing when a branch is saturated: admin/seller move a
 ``confirmed``/``queued`` order to another active branch (before the shop floor
 starts). The move reprints documents under the new branch, and a ``queued``
-order re-notifies the new branch's operators. Reuses the catalog/order/token
-helpers of the banding-track suite.
+order tells BOTH shop floors -- it arrived here, it left there. Reuses the
+catalog/order/token helpers of the banding-track suite.
 """
 
 from sqlalchemy.orm import Session
@@ -70,8 +70,17 @@ def test_seller_can_change_branch(client, db_session: Session):
     assert resp.json()["data"]["branch"]["id"] == branch2.id
 
 
-def test_moving_queued_order_notifies_new_branch_operators(client, db_session: Session):
-    """A queued order landing in the new branch notifies that branch's operators."""
+def _notifications(client, headers):
+    return client.get("/api/v1/notifications/", headers=headers).json()["data"]
+
+
+def test_moving_queued_order_notifies_the_destination_operators(client, db_session):
+    """The destination's operators learn the order landed in THEIR queue.
+
+    Not the generic "entered the production queue": the order was already
+    queued somewhere else, and what the operator needs to read is where it
+    came from.
+    """
     order = _order_with_banding(client, db_session, identifier="0100000306")
     assert _patch_status(client, order["id"], "queued").status_code == 200
     branch2 = _make_branch(db_session)
@@ -82,8 +91,42 @@ def test_moving_queued_order_notifies_new_branch_operators(client, db_session: S
 
     assert _change_branch(client, order["id"], branch2.id).status_code == 200
 
-    count = client.get("/api/v1/notifications/unread-count", headers=op2).json()["data"]
-    assert count["count"] >= 1
+    items = _notifications(client, op2)
+    assert [i["type"] for i in items] == ["order.branch_arrived"]
+    assert items[0]["orderId"] == order["id"]
+    assert items[0]["data"]["fromBranch"] == "Casa Matriz"
+
+
+def test_moving_queued_order_notifies_the_origin_operators(client, db_session):
+    """The branch that had it in its board is told the order left."""
+    order = _order_with_banding(client, db_session, identifier="0100000322")
+    assert _patch_status(client, order["id"], "queued").status_code == 200
+    op1 = _token_for(client, db_session, "operador", email="op1@empresa.com")
+    branch2 = _make_branch(db_session)
+
+    assert _change_branch(client, order["id"], branch2.id).status_code == 200
+
+    items = _notifications(client, op1)
+    assert [i["type"] for i in items] == ["order.branch_left"]
+    assert items[0]["orderId"] == order["id"]
+    assert items[0]["data"]["toBranch"] == "Sucursal X"
+
+
+def test_moving_a_confirmed_order_notifies_nobody(client, db_session):
+    """Nobody is waiting on it yet: the origin never had it on its board and
+    the destination cannot take it until it is paid for (which emits its own
+    ``order.queued``)."""
+    order = _order_with_banding(client, db_session, identifier="0100000330")
+    op1 = _token_for(client, db_session, "operador", email="op1@empresa.com")
+    branch2 = _make_branch(db_session)
+    op2 = _token_for(
+        client, db_session, "operador", branch_id=branch2.id, email="op2@empresa.com"
+    )
+
+    assert _change_branch(client, order["id"], branch2.id).status_code == 200
+
+    assert _notifications(client, op1) == []
+    assert _notifications(client, op2) == []
 
 
 def test_cannot_change_branch_once_cutting_started(client, db_session: Session):

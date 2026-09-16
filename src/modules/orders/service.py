@@ -5,11 +5,15 @@ from fastapi import Depends
 from sqlalchemy import case, func
 from sqlalchemy.orm import Session, joinedload, selectinload
 
+from src.modules.branches.model import BranchModel
 from src.modules.branches.service import resolve_branch_for_create
 from src.modules.clients.model import ClientModel
 from src.modules.clients.schemas import ClientResponse
 from src.modules.clients.service import require_phone
-from src.modules.notifications.emitter import notify_order_transition
+from src.modules.notifications.emitter import (
+    notify_order_branch_changed,
+    notify_order_transition,
+)
 from src.modules.optimizations.patterns import base_label
 from src.modules.optimizations.pricing import build_pricing
 from src.modules.optimizations.schemas import OptimizeRequest
@@ -1103,8 +1107,8 @@ class OrderService(BranchScopedMixin):
         those states there is no assigned operator nor cut pieces, so it's a
         single write with no orphans. Documents reprint under the new branch
         automatically (the letterhead is a live lookup; the snapshot has no
-        branch). If the order was already ``queued``, the new branch's operators
-        are notified it landed in their queue.
+        branch). If the order was already ``queued``, BOTH shop floors are told:
+        it arrived at the destination, it left the origin.
         """
         actor = actor or system_actor()
         order = self.get_scoped_or_404(order_id, branch_scope)
@@ -1134,6 +1138,12 @@ class OrderService(BranchScopedMixin):
                 "La sucursal destino ya tiene una orden activa idéntica"
             )
         old_branch = order.branch_id
+        # Branch NAMES for the notification copy, read BEFORE the commit: after
+        # it the instances are expired and ``old_branch`` is no longer reachable
+        # through the order. The target is already in the identity map
+        # (``resolve_branch_for_create`` fetched it), so this costs one SELECT.
+        old_branch_name = self._branch_name(old_branch)
+        target_branch_name = self._branch_name(target)
         order.branch_id = target
         # Audit: a history row with from == to (not a state transition) + note.
         order.history.append(
@@ -1148,12 +1158,25 @@ class OrderService(BranchScopedMixin):
         )
         self.db.commit()
         self.db.refresh(order)
-        # Already in the queue: tell the NEW branch's operators (best-effort).
-        if current == OrderStatus.queued:
-            notify_order_transition(
-                self.db, order, OrderStatus.confirmed, OrderStatus.queued, actor
-            )
+        # Best-effort: tells both shop floors. Whether the move is worth
+        # announcing at all is the emitter's call, like every other "who hears
+        # about this" question.
+        notify_order_branch_changed(
+            self.db,
+            order,
+            order_status=current,
+            from_branch_id=old_branch,
+            to_branch_id=target,
+            from_branch_name=old_branch_name,
+            to_branch_name=target_branch_name,
+            actor=actor,
+        )
         return order
+
+    def _branch_name(self, branch_id: int) -> Optional[str]:
+        """Readable name of a branch (``None`` if it is gone)."""
+        branch = self.db.get(BranchModel, branch_id)
+        return branch.name if branch else None
 
     def set_priority(
         self,

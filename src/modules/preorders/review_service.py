@@ -24,6 +24,7 @@ from fastapi import Depends
 from sqlalchemy.orm import Session
 
 from src.modules.clients.service import require_phone
+from src.modules.notifications.emitter import notify_order_confirmed
 from src.modules.orders.schemas import OrderCreate
 from src.modules.orders.service import OrderService
 from src.modules.preorders.model import (
@@ -144,6 +145,9 @@ class PreOrderReviewService:
         current state without error. The ``(client_id, hash)`` dedupe in
         ``OrderService.create`` prevents duplicate orders from a double click or
         a retry after a crash between the two commits.
+
+        Closing the sale notifies whoever raised the quote (``created_by``),
+        falling back to the office if that user is gone.
         """
         link = self._get_by_token_or_404(token)
         preorder = self.preorders.get_or_404(link.preorder_id)
@@ -182,6 +186,20 @@ class PreOrderReviewService:
         self._mark_used(link, "confirmed", now, note, meta)
         self.db.commit()
         self.db.refresh(preorder)
+        # Best-effort, and only once BOTH commits are down (the order's, in
+        # ``create``, and this one): announcing a confirmation that a crash
+        # could still leave half-written is worse than announcing it late.
+        # Emitted here rather than in ``OrderService.create`` because this is
+        # the only place that knows who raised the quote -- and because
+        # ``create`` returns an existing order on a dedupe hit, which would
+        # notify again for an order that was already announced.
+        notify_order_confirmed(
+            self.db,
+            order,
+            preorder_code=preorder.code,
+            owner_user_id=preorder.created_by,
+            actor=actor,
+        )
         return preorder
 
     def reject(
