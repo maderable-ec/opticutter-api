@@ -20,6 +20,9 @@ from src.modules.analytics.schemas import (
     UserProductivityReport,
 )
 from src.modules.analytics.service import AnalyticsService, analytics_service
+from src.modules.inventory.schemas import LowStockReport
+from src.modules.inventory.service import StockService, stock_service
+from src.modules.products.model import ProductType
 from src.modules.users.dependencies import require_permission
 from src.modules.users.enums import UserRole
 from src.shared.responses import ERROR_RESPONSES, DataResponse, ok
@@ -41,6 +44,12 @@ _BRANCH_QUERY = Query(
 
 _GRANULARITY_QUERY = Query(
     Granularity.day, description="Bucket size: day | week | month"
+)
+
+_PRODUCT_TYPE_QUERY = Query(
+    default=None,
+    alias="type",
+    description="Restricts the low-stock report to one product type (empty = all)",
 )
 
 _ROLE_QUERY = Query(default=None, description="Filters by role (empty = all)")
@@ -132,4 +141,29 @@ def get_attendance(
     """First login time per day and user (clock-in time reference)."""
     return ok(
         svc.attendance(dr, branch_id=branch_id, role=role.value if role else None)
+    )
+
+
+@router.get("/low-stock", response_model=DataResponse[LowStockReport])
+def get_low_stock(
+    branch_id: Optional[int] = _BRANCH_QUERY,
+    product_type: Optional[ProductType] = _PRODUCT_TYPE_QUERY,
+    svc: StockService = Depends(stock_service),
+):
+    """Boards and edge bandings below their configured threshold, per branch.
+
+    The one endpoint here that takes no ``DateRange``, and deliberately: stock
+    is a state right now, not a metric over a window — asking for "low stock
+    last March" has no answer the vendor's system could give.
+
+    Unpaginated like the rest of this module. The worst case is bounded by the
+    catalog (a few hundred rows with everything at zero), and the point of the
+    screen is to be read top to bottom in buying order: branch, then type, then
+    emptiest first.
+    """
+    return ok(
+        svc.low_stock(
+            branch_id=branch_id,
+            product_type=product_type.value if product_type else None,
+        )
     )

@@ -11,6 +11,7 @@ from src.modules.additional_services.router import (
 from src.modules.analytics.router import router as analytics_router
 from src.modules.branches.router import router as branches_router
 from src.modules.clients.router import router as clients_router
+from src.modules.inventory.router import router as inventory_router
 from src.modules.notifications.router import router as notifications_router
 from src.modules.optimization_drafts.router import router as optimization_drafts_router
 from src.modules.optimizations.engine_info import (
@@ -112,6 +113,7 @@ app.include_router(orders_router, prefix="/api/v1")
 app.include_router(print_router, prefix="/api/v1")
 app.include_router(preorders_router, prefix="/api/v1")
 app.include_router(preorders_public_router, prefix="/api/v1")
+app.include_router(inventory_router, prefix="/api/v1")
 app.include_router(analytics_router, prefix="/api/v1")
 app.include_router(notifications_router, prefix="/api/v1")
 app.include_router(settings_router, prefix="/api/v1")

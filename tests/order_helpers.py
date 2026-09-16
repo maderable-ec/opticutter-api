@@ -266,8 +266,12 @@ def _order_on_board_and_offcut(client, db_session, identifier="0100000397"):
 def _patch_status(client, oid, status, note=None, **kw):
     body = {"status": status}
     if status == "queued":
-        # Moving to the queue requires registering the payment method (informational).
+        # Moving to the queue requires registering the payment method
+        # (informational) and the invoice number (the sale is collected here).
+        # Tests about either gate pass ``payment``/``externalInvoiceId``
+        # explicitly through ``kw`` -- see ``_status_body`` below.
         body["payment"] = {"cashAmount": 100.0}
+        body["externalInvoiceId"] = f"FAC-{oid:04d}"
     if status == "cancelled":
         # Cancelling requires a reason: the history row's note is the only record
         # of why a sale died. Tests about the gate itself pass note="" explicitly.

@@ -205,3 +205,37 @@ def test_patch_company_persists(client):
     after = client.get("/api/v1/settings/company").json()["data"]
     assert after["phone"] == "0100000017"
     assert after["branches"][0]["name"] == "Matriz"
+
+
+# --- Low-stock thresholds ---------------------------------------------------------
+def test_get_stock_seeds_from_config(client):
+    response = client.get("/api/v1/settings/stock")
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["board"] == config.STOCK_THRESHOLD_BOARD
+    assert data["edgeBanding"] == config.STOCK_THRESHOLD_EDGE_BANDING
+
+
+def test_patch_stock_persists_and_is_partial(client):
+    assert client.patch("/api/v1/settings/stock", json={"board": 12}).status_code == 200
+    data = client.get("/api/v1/settings/stock").json()["data"]
+    assert data["board"] == 12
+    # Untouched: a PATCH carries only what it names.
+    assert data["edgeBanding"] == config.STOCK_THRESHOLD_EDGE_BANDING
+
+
+def test_patch_stock_rejects_a_negative_threshold(client):
+    response = client.patch("/api/v1/settings/stock", json={"edgeBanding": -1})
+    assert response.status_code == 422
+
+
+def test_stock_thresholds_reach_the_alert(client, db_session):
+    """The settings row is the runtime source of truth for both surfaces: the
+    quote alert and the report read it through ``get_stock_thresholds``."""
+    from src.modules.settings.service import SettingsService
+
+    client.patch("/api/v1/settings/stock", json={"board": 7, "edgeBanding": 99})
+    assert SettingsService(db_session).get_stock_thresholds() == {
+        "board": 7.0,
+        "edge_banding": 99.0,
+    }

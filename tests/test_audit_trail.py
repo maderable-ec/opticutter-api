@@ -77,7 +77,11 @@ def test_order_status_transition_records_staff_actor(client, db_session):
 
     resp = client.patch(
         f"/api/v1/orders/{order.id}/status",
-        json={"status": "queued", "payment": {"cashAmount": 100.0}},
+        json={
+            "status": "queued",
+            "payment": {"cashAmount": 100.0},
+            "externalInvoiceId": "FAC-001-42",
+        },
     )
     assert resp.status_code == 200
 
@@ -95,7 +99,11 @@ def test_mark_piece_cut_records_cut_by(client, db_session):
     admin = _admin(db_session)
     client.patch(
         f"/api/v1/orders/{order.id}/status",
-        json={"status": "queued", "payment": {"cashAmount": 100.0}},
+        json={
+            "status": "queued",
+            "payment": {"cashAmount": 100.0},
+            "externalInvoiceId": "FAC-001-42",
+        },
     )
     # Starting the cut is what puts the order in process AND opens piece marking.
     client.patch(

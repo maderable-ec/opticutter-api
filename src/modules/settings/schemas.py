@@ -73,6 +73,32 @@ class TaxSettingsUpdate(CamelModel):
     tax_rate: Optional[float] = Field(None, ge=0, le=1)
 
 
+# --- Low-stock thresholds ---------------------------------------------------------
+class StockSettingsResponse(CamelModel):
+    """Thresholds below which a product counts as low on stock.
+
+    One per product type because the UNITS are not the same: the vendor counts
+    boards in whole SHEETS and edge banding in LINEAR METRES, so a single
+    number could never mean anything for both.
+    """
+
+    board: float = Field(..., ge=0, description="Boards: sheets in the branch")
+    edge_banding: float = Field(
+        ..., ge=0, description="Edge banding: linear metres in the branch"
+    )
+
+
+class StockSettingsUpdate(CamelModel):
+    """Partial update of the low-stock thresholds.
+
+    Feeds both the quote alert and the low-stock report, so raising one here
+    quiets (or opens) the two at once.
+    """
+
+    board: Optional[float] = Field(None, ge=0)
+    edge_banding: Optional[float] = Field(None, ge=0)
+
+
 # --- Company data -----------------------------------------------------------------
 class Branch(CamelModel):
     """A branch shown on the document letterhead."""

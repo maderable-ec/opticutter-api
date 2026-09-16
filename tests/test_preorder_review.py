@@ -557,7 +557,11 @@ def test_confirmed_order_continues_state_machine(client):
 
     ok = client.patch(
         f"/api/v1/orders/{pre_after['orderId']}/status",
-        json={"status": "queued", "payment": {"cashAmount": 100.0}},
+        json={
+            "status": "queued",
+            "payment": {"cashAmount": 100.0},
+            "externalInvoiceId": "FAC-001-42",
+        },
     )
     assert ok.status_code == 200
     assert ok.json()["data"]["status"] == "queued"

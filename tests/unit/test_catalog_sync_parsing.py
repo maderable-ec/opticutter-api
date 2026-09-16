@@ -18,10 +18,10 @@ from src.modules.products.catalog_sync import (
     _EDGE_DIMS_RE,
     _MEDIO_RE,
     _collect_warnings,
-    _external_code,
     _parse_iva_rate,
     _parse_obs,
     _ValidRow,
+    build_external_code,
 )
 from src.modules.products.model import ProductType
 
@@ -143,8 +143,8 @@ def test_parse_iva_rate_malformed_is_none():
 def test_external_code_is_namespaced_by_category():
     # The key the sync matches on; a board and an edge banding may share a bare
     # code in the vendor's system without colliding here.
-    assert _external_code("TABLEROS", "1033") == "TABLEROS:1033"
-    assert _external_code("TAPACANTOS", "1033") == "TAPACANTOS:1033"
+    assert build_external_code("TABLEROS", "1033") == "TABLEROS:1033"
+    assert build_external_code("TAPACANTOS", "1033") == "TAPACANTOS:1033"
 
 
 # --- Coordination warnings ----------------------------------------------------

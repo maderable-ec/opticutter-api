@@ -24,7 +24,11 @@ from fastapi import Depends
 from sqlalchemy.orm import Session
 
 from src.modules.clients.service import require_phone
-from src.modules.notifications.emitter import notify_order_confirmed
+from src.modules.inventory.service import StockService
+from src.modules.notifications.emitter import (
+    notify_order_confirmed,
+    notify_order_low_stock,
+)
 from src.modules.orders.schemas import OrderCreate
 from src.modules.orders.service import OrderService
 from src.modules.preorders.model import (
@@ -200,6 +204,22 @@ class PreOrderReviewService:
             owner_user_id=preorder.created_by,
             actor=actor,
         )
+        # A second, independent announcement with a different audience and a
+        # different question: the office only hears about this one when the
+        # order actually eats into material the branch is running out of, which
+        # is what makes it a restocking signal and not a duplicate of the sale.
+        # This is where an order is BORN -- there is no POST /orders -- so it is
+        # the only place the "created" half can be emitted from.
+        alerts = StockService(self.db).alerts_for_order(order)
+        if alerts:
+            notify_order_low_stock(
+                self.db,
+                order,
+                event="created",
+                branch_name=order.branch.name if order.branch else None,
+                product_names=[a.product_name or a.product_code or "" for a in alerts],
+                actor=actor,
+            )
         return preorder
 
     def reject(

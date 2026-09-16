@@ -73,7 +73,11 @@ def _to_cutting(client, order_id):
     """
     paid = client.patch(
         f"/api/v1/orders/{order_id}/status",
-        json={"status": "queued", "payment": {"cashAmount": 100.0}},
+        json={
+            "status": "queued",
+            "payment": {"cashAmount": 100.0},
+            "externalInvoiceId": "FAC-001-42",
+        },
     )
     assert paid.status_code == 200
     resp = client.patch(

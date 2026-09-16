@@ -7,6 +7,8 @@ from src.modules.settings.schemas import (
     CuttingSettingsUpdate,
     PreOrderSettingsResponse,
     PreOrderSettingsUpdate,
+    StockSettingsResponse,
+    StockSettingsUpdate,
     TaxSettingsResponse,
     TaxSettingsUpdate,
 )
@@ -83,3 +85,23 @@ def update_tax_settings(
 ):
     """Updates the sales tax rate (admin only)."""
     return ok(svc.update_taxes(data))
+
+
+@router.get("/stock", response_model=DataResponse[StockSettingsResponse])
+def get_stock_settings(svc: SettingsService = Depends(settings_service)):
+    """Returns the low-stock thresholds (seeded from config if missing).
+
+    Read straight off the singleton row: the response field names are the
+    column names minus the ``stock_threshold_`` prefix, which is what
+    ``_STOCK_FIELD_MAP`` translates on the way in.
+    """
+    return ok(svc.get_stock_thresholds())
+
+
+@router.patch("/stock", response_model=DataResponse[StockSettingsResponse])
+def update_stock_settings(
+    data: StockSettingsUpdate, svc: SettingsService = Depends(settings_service)
+):
+    """Partially updates the low-stock thresholds (admin only)."""
+    svc.update_stock(data)
+    return ok(svc.get_stock_thresholds())
