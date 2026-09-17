@@ -20,12 +20,14 @@ from tests.order_helpers import (
     _cut_piece,
     _order_mixed_pieces,
     _order_with_banding,
+    _order_with_billed_service_only,
     _order_with_services,
     _order_without_banding,
     _patch_activity,
     _patch_status,
     _to_in_process,
     _token_for,
+    _worked_pieces,
 )
 
 
@@ -54,14 +56,21 @@ def test_edge_banding_adds_the_banding_activity(client, db_session):
     assert _activity(order, "banding")["status"] == "pending"
 
 
-def test_additional_services_add_the_additional_activity(client, db_session):
-    """The activity exists because a service was registered, not because of geometry."""
+def test_workshop_codes_add_the_additional_activity(client, db_session):
+    """The activity exists because a piece carries a workshop code."""
     order = _order_with_services(client, db_session)
     assert _types(order) == ["additional", "banding", "cutting"]
     assert _activity(order, "additional")["status"] == "pending"
 
 
-def test_an_order_without_services_has_no_additional_activity(client, db_session):
+def test_a_billed_service_alone_is_not_work_for_the_shop(client, db_session):
+    """The billed services are lines on the bill: they open no activity."""
+    order = _order_with_billed_service_only(client, db_session)
+    assert order["additionalServices"]
+    assert _types(order) == ["cutting"]
+
+
+def test_an_order_without_codes_has_no_additional_activity(client, db_session):
     """A missing row is the old ``not_applicable``: nothing to move, nothing to gate."""
     order = _order_with_banding(client, db_session)
     assert _activity(order, "additional") is None
@@ -260,49 +269,81 @@ def test_banding_finish_allowed_with_plain_pieces_still_uncut(client, db_session
     assert "2 pieza(s) por cortar" in still_cutting.json()["errors"][0]["message"]
 
 
-def test_additional_starts_from_the_first_piece_of_any_kind(client, db_session):
-    """Its set is EVERY piece, so a plain one is enough to unblock it."""
+def test_additional_starts_from_the_first_worked_piece(client, db_session):
+    """Its set is the pieces carrying a code: a banded one releases nothing."""
     order = _order_with_services(client, db_session)
     _to_in_process(client, order["id"])
 
     blocked = _patch_activity(client, order["id"], "additional", "in_progress")
     assert blocked.status_code == 422
-    assert "ninguna pieza" in blocked.json()["errors"][0]["message"].lower()
-
-    assert (
-        _cut_piece(
-            client, order["id"], _plain_pieces(client, order["id"])[0]
-        ).status_code
-        == 200
+    assert blocked.json()["errors"][0]["message"] == (
+        "Aún no se ha cortado ninguna pieza con trabajo de taller"
     )
+
+    _cut_first_banded_piece(client, order["id"])
+    assert (
+        _patch_activity(client, order["id"], "additional", "in_progress").status_code
+        == 422
+    )
+
+    worked = _worked_pieces(client, order["id"])
+    assert len(worked) == 2
+    assert _cut_piece(client, order["id"], worked[0]).status_code == 200
     assert (
         _patch_activity(client, order["id"], "additional", "in_progress").status_code
         == 200
     )
 
 
-def test_additional_closes_free_with_pieces_still_uncut(client, db_session):
-    """Deliberately no finish floor: there is no per-service piece data to check.
+def test_additional_finish_needs_every_worked_piece(client, db_session):
+    """No longer free: nobody hinges or grooves a piece still on the saw.
 
-    The bander closes their own work on their word, and the order still waits for
-    the cut -- which is what makes the freedom safe.
+    The banded pieces stay uncut throughout, which is the parallel track: they
+    are not the additional work's pieces, so they never hold it back.
     """
     order = _order_with_services(client, db_session)
     _to_in_process(client, order["id"])
-    assert (
-        _cut_piece(
-            client, order["id"], _plain_pieces(client, order["id"])[0]
-        ).status_code
-        == 200
-    )
+    first, second = _worked_pieces(client, order["id"])
+    assert _cut_piece(client, order["id"], first).status_code == 200
     assert (
         _patch_activity(client, order["id"], "additional", "in_progress").status_code
         == 200
     )
 
+    blocked = _patch_activity(client, order["id"], "additional", "done")
+    assert blocked.status_code == 422
+    assert blocked.json()["errors"][0]["message"] == (
+        "Faltan 1 pieza(s) con trabajo de taller por cortar"
+    )
+
+    assert _cut_piece(client, order["id"], second).status_code == 200
     closed = _patch_activity(client, order["id"], "additional", "done")
     assert closed.status_code == 200
+    assert closed.json()["data"]["activity"]["progress"] == {
+        "cutPieces": 2,
+        "totalPieces": 2,
+    }
     assert closed.json()["data"]["orderStatus"] == "in_process"
+
+
+def test_additional_is_ready_when_the_first_worked_piece_is_cut(client, db_session):
+    """Its clock starts with ITS first piece, not with any piece at all."""
+    order = _order_with_services(client, db_session)
+    _to_in_process(client, order["id"])
+
+    _cut_first_banded_piece(client, order["id"])
+    detail = _order_row(client, order["id"])
+    assert _activity(detail, "banding")["readyAt"] is not None
+    assert _activity(detail, "additional")["readyAt"] is None
+
+    assert (
+        _cut_piece(
+            client, order["id"], _worked_pieces(client, order["id"])[0]
+        ).status_code
+        == 200
+    )
+    detail = _order_row(client, order["id"])
+    assert _activity(detail, "additional")["readyAt"] is not None
 
 
 def test_marking_pieces_is_blocked_once_the_cut_is_closed(client, db_session):
@@ -379,6 +420,7 @@ def test_each_role_only_registers_its_own_activities(client, db_session):
     order = _order_with_services(client, db_session)
     _to_in_process(client, order["id"])
     _cut_first_banded_piece(client, order["id"])
+    _cut_piece(client, order["id"], _worked_pieces(client, order["id"])[0])
     operator = _token_for(client, db_session, "operador")
     bander = _token_for(client, db_session, "canteador")
 

@@ -3,7 +3,7 @@ import hashlib
 import json
 import logging
 import time
-from collections import Counter, defaultdict
+from collections import defaultdict
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from fastapi import Depends
@@ -33,6 +33,7 @@ from src.modules.optimizations.patterns import (
     base_label,
     group_layouts,
     order_sheets,
+    piece_instance_ids,
 )
 from src.modules.optimizations.price_levels import (
     apply_price_level,
@@ -42,6 +43,7 @@ from src.modules.optimizations.price_levels import (
 )
 from src.modules.optimizations.pricing import build_pricing
 from src.modules.optimizations.schemas import (
+    WORKSHOP_CODE_FIELDS,
     EdgeBandingSpec,
     EdgeSide,
     OptimizeRequest,
@@ -78,6 +80,21 @@ CCW_ROTATION = {v: k for k, v in _CW_ROTATION.items()}
 
 # Canonical order the banded sides are listed in, whichever frame they're in.
 _SIDE_ORDER = ("top", "bottom", "left", "right")
+
+
+def hashable_requirements(requirements: Sequence[Requirement]) -> List[dict]:
+    """The requirements as the optimization hash sees them: without the codes.
+
+    The workshop codes move no piece and no price, and editing one must not
+    re-run a search that costs seconds with the client at the counter. Excluded
+    rather than defaulted, which is also what keeps the canonical JSON of every
+    quote byte-identical to the one this hash produced before the codes existed
+    -- a new ``null`` key would have invalidated every Redis entry on deploy.
+    """
+    return [
+        r.model_dump(mode="json", exclude=set(WORKSHOP_CODE_FIELDS))
+        for r in requirements
+    ]
 
 
 def _exact_config() -> ExactConfig:
@@ -517,7 +534,7 @@ class OptimizationService:
         }
         digest_input = {
             "materials": materials,
-            "requirements": [r.model_dump(mode="json") for r in request.requirements],
+            "requirements": hashable_requirements(request.requirements),
             "params": {
                 "kerf": cutting_params.kerf,
                 "top_trim": cutting_params.top_trim,
@@ -609,38 +626,30 @@ class OptimizationService:
         net length is per instance (``width`` for ``top/bottom``, ``height`` for
         ``left/right``, independent of rotation), not multiplied by quantity.
         """
-        base = [p.label or f"piece_{i+1}" for i, p in enumerate(reqs)]
-        totals: Counter = Counter()
-        for label, p in zip(base, reqs):
-            totals[label] += p.quantity
-
-        seen: Counter = Counter()
         pieces: List[Piece] = []
         edge_map: Dict[str, EdgeBandingSpec] = {}
         net_map: Dict[str, float] = {}
-        for i, p in enumerate(reqs):
-            for _ in range(p.quantity):
-                seen[base[i]] += 1
-                uid = f"{base[i]}#{seen[base[i]]}" if totals[base[i]] > 1 else base[i]
-                try:
-                    pieces.append(
-                        Piece(
-                            id=uid,
-                            width=p.width,
-                            height=p.height,
-                            quantity=1,
-                            can_rotate=p.can_rotate,
-                            priority=p.priority,
-                        )
+        for i, uid in piece_instance_ids([(p.label, p.quantity) for p in reqs]):
+            p = reqs[i]
+            try:
+                pieces.append(
+                    Piece(
+                        id=uid,
+                        width=p.width,
+                        height=p.height,
+                        quantity=1,
+                        can_rotate=p.can_rotate,
+                        priority=p.priority,
                     )
-                except ValueError as e:
-                    raise ValidationError(f"Pieza {i} tiene valores inválidos: {e}")
-                if p.edge_banding is not None:
-                    edge_map[uid] = p.edge_banding
-                    net_map[uid] = sum(
-                        p.width if side in (EdgeSide.top, EdgeSide.bottom) else p.height
-                        for side in p.edge_banding.sides
-                    )
+                )
+            except ValueError as e:
+                raise ValidationError(f"Pieza {i} tiene valores inválidos: {e}")
+            if p.edge_banding is not None:
+                edge_map[uid] = p.edge_banding
+                net_map[uid] = sum(
+                    p.width if side in (EdgeSide.top, EdgeSide.bottom) else p.height
+                    for side in p.edge_banding.sides
+                )
         return pieces, edge_map, net_map
 
     def _geometric_edges(
@@ -780,7 +789,10 @@ class OptimizationService:
         rm = resolved.get(req.material_key)
         material_label = (rm.code or rm.name) if rm else None
         data = {
-            **req.model_dump(mode="json"),
+            # The workshop codes never enter the cached payload: they are not
+            # in the hash, so a cache hit would hand back another request's.
+            # The order adds its own (``OrderService.create``).
+            **req.model_dump(mode="json", exclude=set(WORKSHOP_CODE_FIELDS)),
             "product_code": material_label or req.material_key,
             "product_name": (rm.name if rm else None),
         }

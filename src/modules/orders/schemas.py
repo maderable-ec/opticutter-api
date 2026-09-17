@@ -218,6 +218,15 @@ class OrderPieceResponse(CamelModel):
     edges: Optional[dict] = Field(
         default=None, description="Edge banding spec (nominal sides + product)"
     )
+    hinging_code: Optional[str] = Field(
+        default=None, description="Abisagrado: workshop code (null = no such work)"
+    )
+    assembly_code: Optional[str] = Field(
+        default=None, description="Ensamble: workshop code (null = no such work)"
+    )
+    grooving_code: Optional[str] = Field(
+        default=None, description="Ranurado: workshop code (null = no such work)"
+    )
 
 
 class OrderStatusHistoryResponse(CamelModel):
@@ -248,7 +257,8 @@ class OrderActivityResponse(CamelModel):
     """One activity of an order in process, with its clocks and its own progress.
 
     ``progress`` counts the pieces of THIS activity's set (every piece for the
-    cut and for the additional work, only the banded ones for the banding), so
+    cut, the banded ones for the banding, the ones carrying a workshop code for
+    the additional work), so
     the card can say how many are missing before the activity may close. It is
     optional because the order detail serializes these rows straight from the
     table; see the field.
@@ -281,7 +291,8 @@ class OrderActivityResponse(CamelModel):
     progress: Optional[CuttingProgress] = Field(
         default=None,
         description="Cut pieces out of the total among THIS activity's pieces: "
-        "every piece for cut/additional, only the banded ones for banding. Filled "
+        "every piece for cut, the banded ones for banding, the ones carrying a "
+        "workshop code for additional. Filled "
         "by the three shop-floor surfaces (board, cutting plan, activity result), "
         "which is where it is the gate signal; NULL on the order detail, whose "
         "rows are serialized straight from the table and would each cost a count",
@@ -373,7 +384,8 @@ class OrderResponse(CamelModel):
         default_factory=list,
         description="The parallel work of an order in process: one entry per "
         "APPLICABLE activity (cut always; banding with edge banding; additional "
-        "with additional services). A missing entry means the activity does not "
+        "when a piece carries a workshop code -- never because of a billed "
+        "service). A missing entry means the activity does not "
         "apply to this order",
     )
     lines: List[OrderLineResponse] = Field(default_factory=list)
@@ -396,6 +408,15 @@ class PlacedPieceResponse(CamelModel):
     rotated: bool
     edges: Optional[dict] = Field(
         default=None, description="Geometric edge-banded sides (as drawn)"
+    )
+    hinging_code: Optional[str] = Field(
+        default=None, description="Abisagrado: workshop code (null = no such work)"
+    )
+    assembly_code: Optional[str] = Field(
+        default=None, description="Ensamble: workshop code (null = no such work)"
+    )
+    grooving_code: Optional[str] = Field(
+        default=None, description="Ranurado: workshop code (null = no such work)"
     )
     cut: bool = Field(..., description="Whether the piece was already cut")
     cut_at: Optional[datetime] = None

@@ -29,7 +29,10 @@ from reportlab.platypus import (
 )
 
 from src.modules.optimizations.carrier import DocumentCarrier
-from src.modules.optimizations.labels import edge_banding_notation
+from src.modules.optimizations.labels import (
+    edge_banding_notation,
+    workshop_codes_line,
+)
 from src.modules.optimizations.patterns import group_layouts
 from src.modules.optimizations.schemas import MaterialSource
 from src.modules.optimizations.visualization import VisualizationService
@@ -645,39 +648,44 @@ class DocumentService:
     @staticmethod
     def _build_requirements_table(carrier: DocumentCarrier, cell_style) -> Table:
         requirements = carrier.requirements
+        if not isinstance(requirements, list):
+            requirements = []
+        # "Taller" only exists when some piece carries a workshop code: every
+        # order issued before the codes (and every order without that work)
+        # keeps printing exactly the table it always did.
+        lines = [workshop_codes_line(req) for req in requirements]
+        with_workshop = any(lines)
         # "Material", not "Tablero": the row can name a retazo, and a quote can be
         # made of nothing else.
-        req_data = [["#", "Alto", "Ancho", "Cant.", "Material", "Cantos", "Etiqueta"]]
-        if isinstance(requirements, list):
-            for idx, req in enumerate(requirements, 1):
-                req_data.append(
-                    [
-                        str(idx),
-                        f"{req.get('height', 0)} mm",
-                        f"{req.get('width', 0)} mm",
-                        str(req.get("quantity", 1)),
-                        req.get("product_code") or "N/A",
-                        Paragraph(_edge_banding_notation(req), cell_style),
-                        Paragraph(req.get("label") or "-", cell_style),
-                    ]
-                )
+        header = ["#", "Alto", "Ancho", "Cant.", "Material", "Cantos"]
+        header += ["Taller", "Etiqueta"] if with_workshop else ["Etiqueta"]
+        req_data = [header]
+        for idx, (req, line) in enumerate(zip(requirements, lines), 1):
+            row = [
+                str(idx),
+                f"{req.get('height', 0)} mm",
+                f"{req.get('width', 0)} mm",
+                str(req.get("quantity", 1)),
+                req.get("product_code") or "N/A",
+                Paragraph(_edge_banding_notation(req), cell_style),
+            ]
+            if with_workshop:
+                # Free text the seller typed: ``Paragraph`` reads mini-HTML.
+                row.append(Paragraph(escape(line) or "-", cell_style))
+            row.append(Paragraph(req.get("label") or "-", cell_style))
+            req_data.append(row)
 
-        req_table = Table(
-            req_data,
-            colWidths=[
-                0.35 * inch,
-                0.8 * inch,
-                0.8 * inch,
-                0.55 * inch,
-                1.25 * inch,
-                # "Cantos" now carries the alias too ("2L1C CS CSH" =
-                # 58pt at 9pt Helvetica, against 12pt of cell padding), so it
-                # takes 0.15" from the flexible "Etiqueta" column for headroom.
-                1.25 * inch,
-                CONTENT_WIDTH - 5.0 * inch,
-            ],
-            repeatRows=1,
-        )
+        # "Cantos" now carries the alias too ("2L1C CS CSH" = 58pt at 9pt
+        # Helvetica, against 12pt of cell padding), so it takes 0.15" from the
+        # flexible "Etiqueta" column for headroom. "Taller" takes its width from
+        # the same place, and wraps a full "Abis · Ens · Ran" onto two lines.
+        workshop_width = 1.2 * inch if with_workshop else 0.0
+        col_widths = [0.35 * inch, 0.8 * inch, 0.8 * inch, 0.55 * inch]
+        col_widths += [1.25 * inch, 1.25 * inch]
+        if with_workshop:
+            col_widths.append(workshop_width)
+        col_widths.append(CONTENT_WIDTH - 5.0 * inch - workshop_width)
+        req_table = Table(req_data, colWidths=col_widths, repeatRows=1)
         req_table.setStyle(_data_table_style())
         return req_table
 
