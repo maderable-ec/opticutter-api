@@ -386,7 +386,10 @@ def _worked_pieces(client, oid):
         p
         for board in plan["boards"]
         for p in board["pieces"]
-        if p["hingingCode"] or p["assemblyCode"] or p["groovingCode"]
+        if p["hingingCode"]
+        or p["groovingCode"]
+        or p["assemblyCode"]
+        or p["divisionCode"]
     ]
 
 

@@ -60,17 +60,19 @@ def edge_banding_notation(
 # the operator's board all read alike.
 _WORKSHOP_CODE_ABBR = (
     ("hinging_code", "Abis"),
-    ("assembly_code", "Ens"),
     ("grooving_code", "Ran"),
+    ("assembly_code", "Ens"),
+    ("division_code", "Div"),
 )
 
 
 def workshop_codes_line(codes: Mapping[str, Optional[str]]) -> str:
-    """The workshop codes of a piece as one line: ``'Abis X1 · Ens E3 · Ran R2'``.
+    """The workshop codes of a piece as one line.
 
-    Only the codes present are written, each after the service it belongs to --
-    a code alone would not say whether the piece is hinged or grooved. Returns
-    ``''`` for a piece with none.
+    ``'Abis X1 · Ran R2 · Ens E3 · Div D1'``: abisagrado, ranurado, ensamble,
+    división, in that order. Only the codes present are written, each after the
+    service it belongs to -- a code alone would not say whether the piece is
+    hinged or grooved. Returns ``''`` for a piece with none.
     """
     return " · ".join(
         f"{abbr} {codes[field]}"
