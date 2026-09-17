@@ -471,6 +471,50 @@ class Requirement(CamelModel):
     edge_banding: Optional[EdgeBandingSpec] = Field(
         default=None, description="Optional edge banding for this piece"
     )
+    # The shop's own work on the piece, as the codes the workshop already knows.
+    # Free text on purpose: the seller types what the bander reads, and this
+    # system has no opinion on what a code means. They are production data, not
+    # geometry and not billing (the billed services are a separate list), so
+    # they stay OUT of the optimization hash and the cached payload -- see
+    # ``WORKSHOP_CODE_FIELDS``. Any of them set is what makes the order carry
+    # the ``additional`` activity.
+    hinging_code: Optional[str] = Field(
+        default=None, max_length=32, description="Abisagrado: workshop code"
+    )
+    assembly_code: Optional[str] = Field(
+        default=None, max_length=32, description="Ensamble: workshop code"
+    )
+    grooving_code: Optional[str] = Field(
+        default=None, max_length=32, description="Ranurado: workshop code"
+    )
+
+    @field_validator("hinging_code", "assembly_code", "grooving_code", mode="before")
+    @classmethod
+    def _blank_code_is_none(cls, value):
+        """One spelling of "no work": a blank code is ``None``, everywhere.
+
+        Stripped before ``max_length`` runs, so padding never costs a
+        character. It is what lets the order ask "does this piece carry work"
+        with a plain ``IS NOT NULL``.
+        """
+        if isinstance(value, str):
+            value = value.strip()
+            return value or None
+        return value
+
+
+# The workshop codes of a requirement, in the order the documents print them.
+# The single list the hash, the cached payload, the order and the PDF read: a
+# code is never in the hash (editing one must not re-run a search that costs
+# seconds with the client at the counter) and never in the cached payload (a
+# cache hit would hand back another request's codes). The order takes them
+# from its own request instead.
+WORKSHOP_CODE_FIELDS = ("hinging_code", "assembly_code", "grooving_code")
+
+
+def has_workshop_codes(requirement: dict) -> bool:
+    """Whether a dumped requirement carries any workshop code."""
+    return any(requirement.get(f) for f in WORKSHOP_CODE_FIELDS)
 
 
 class OptimizeRequest(CamelModel):

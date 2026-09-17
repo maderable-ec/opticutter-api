@@ -170,7 +170,15 @@ def _order_without_banding(client, db_session, identifier="0100000397"):
 
 
 def _order_with_services(client, db_session, identifier="0100000397"):
-    """Order with edge banding AND an additional service: all three activities."""
+    """Order with edge banding AND workshop codes: all three activities.
+
+    The two "Costado" are banded and carry no code; the two "Fondo" carry a code
+    and no banding -- so the banding's and the additional work's piece sets are
+    disjoint, and each floor can be shown not to read the other's. It also bills
+    a service, which is NOT what makes the third activity (see
+    ``_order_with_billed_service_only``) but keeps the snapshot the
+    ``000000000003`` backfill reads.
+    """
     c = _create_client(client, identifier=identifier)
     suffix = identifier[-4:]
     b = _create_board(client, code=f"MEL{suffix}")
@@ -201,7 +209,38 @@ def _order_with_services(client, db_session, identifier="0100000397"):
                     "materialKey": "b1",
                     "label": "Fondo",
                     "canRotate": True,
+                    "hingingCode": "B2",
+                    "groovingCode": "R1",
                 },
+            ],
+            "additionalServices": [
+                {"name": "Perforación", "unitPrice": 5.0, "quantity": 1}
+            ],
+        },
+    )
+
+
+def _order_with_billed_service_only(client, db_session, identifier="0100000397"):
+    """Order that BILLS an additional service but has no workshop code at all."""
+    c = _create_client(client, identifier=identifier)
+    b = _create_board(client, code=f"MEL{identifier[-4:]}")
+    return _mint_order(
+        client,
+        db_session,
+        {
+            "clientId": c["id"],
+            "branchId": _BRANCH,
+            "materials": [{"key": "b1", "source": "catalog", "productId": b["id"]}],
+            "requirements": [
+                {
+                    "priority": 0,
+                    "height": 400,
+                    "width": 600,
+                    "quantity": 1,
+                    "materialKey": "b1",
+                    "label": "Puerta",
+                    "canRotate": True,
+                }
             ],
             "additionalServices": [
                 {"name": "Perforación", "unitPrice": 5.0, "quantity": 1}
@@ -338,6 +377,17 @@ def _cut_piece(client, oid, piece, cut=True):
         f"/api/v1/orders/{oid}/cutting-plan/pieces/{piece['id']}",
         json={"cut": cut},
     )
+
+
+def _worked_pieces(client, oid):
+    """Placed pieces carrying a workshop code, in cutting-plan order."""
+    plan = client.get(f"/api/v1/orders/{oid}/cutting-plan").json()["data"]
+    return [
+        p
+        for board in plan["boards"]
+        for p in board["pieces"]
+        if p["hingingCode"] or p["assemblyCode"] or p["groovingCode"]
+    ]
 
 
 def _cut_banded_pieces(client, oid):

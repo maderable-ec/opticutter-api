@@ -67,9 +67,11 @@ class ActivityType(str, Enum):
     """The parallel activities of an order in process.
 
     ``cutting`` is on every order; ``banding`` only when it carries edge
-    banding; ``additional`` only when it registers additional services
-    (perforación, armado, bisagras...). The operator cuts; the bander does
-    banding AND additional.
+    banding; ``additional`` only when some piece of its cut list carries a
+    workshop code (abisagrado, ensamble, ranurado). The billed additional
+    services have nothing to do with it: they are lines on the bill, not work
+    on the shop floor. The operator cuts; the bander does banding AND
+    additional.
     """
 
     cutting = "cutting"
@@ -110,14 +112,15 @@ ACTIVITY_ROLES: dict[ActivityType, tuple[UserRole, ...]] = {
     ActivityType.additional: (UserRole.ADMIN, UserRole.BANDER),
 }
 
-# Which placed pieces each activity works on: every piece, or only the banded
-# ones. It is the set the two floors below are measured against, and it is what
-# keeps the tracks PARALLEL: banding closes once every BANDED piece is cut, even
-# with plain pieces still on the saw.
+# Which placed pieces each activity works on: every piece, only the banded ones,
+# or only the ones carrying a workshop code. It is the set the two floors below
+# are measured against, and it is what keeps the tracks PARALLEL: banding closes
+# once every BANDED piece is cut, the additional work once every WORKED piece
+# is, even with plain pieces still on the saw.
 ACTIVITY_PIECES: dict[ActivityType, str] = {
     ActivityType.cutting: "all",
     ActivityType.banding: "banded",
-    ActivityType.additional: "all",
+    ActivityType.additional: "worked",
 }
 
 # Starting needs at least ONE piece of that set cut: there has to be something
@@ -128,13 +131,14 @@ ACTIVITY_START_NEEDS_A_CUT_PIECE: dict[ActivityType, bool] = {
     ActivityType.additional: True,
 }
 
-# Finishing needs EVERY piece of that set cut. ``additional`` is deliberately
-# free: the bander closes it when their own work is done, and the order still
-# waits for the cut to reach ``finished`` anyway.
+# Finishing needs EVERY piece of that set cut: nobody hinges, assembles or
+# grooves a piece still on the saw. ``additional`` used to close free, on the
+# bander's word, because nothing said which pieces carried the work; the
+# workshop codes say exactly that now.
 ACTIVITY_FINISH_NEEDS_EVERY_PIECE: dict[ActivityType, bool] = {
     ActivityType.cutting: True,
     ActivityType.banding: True,
-    ActivityType.additional: False,
+    ActivityType.additional: True,
 }
 
 # Order statuses in which an activity can be registered -- just one, now that
@@ -427,7 +431,7 @@ class OrderActivityModel(TimestampMixin, AuditMixin, Base):
 
     There is a row per APPLICABLE activity and only per applicable activity:
     ``cutting`` always, ``banding`` when the order carries edge banding,
-    ``additional`` when it registers additional services. A missing row is what
+    ``additional`` when a piece carries a workshop code. A missing row is what
     the old ``BandingStatus.not_applicable`` used to say, which is why nothing
     here has such a value -- an activity that does not apply cannot be started,
     cannot be finished and does not hold the order back.
@@ -437,7 +441,7 @@ class OrderActivityModel(TimestampMixin, AuditMixin, Base):
     independent, though -- see ``ACTIVITY_START_NEEDS_A_CUT_PIECE`` /
     ``ACTIVITY_FINISH_NEEDS_EVERY_PIECE`` for the floors, which are measured
     against the activity's own piece set so plain pieces never hold the banding
-    back.
+    or the additional work back.
     """
 
     __tablename__ = "order_activities"
@@ -573,6 +577,11 @@ class OrderPieceModel(TimestampMixin, AuditMixin, Base):
     # Piece edge banding (nominal sides + product), e.g.
     # ``{"product_id": 42, "sides": ["top", "left"]}``. Null if not banded.
     edges: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    # Workshop codes the seller typed on the cut list (abisagrado, ensamble,
+    # ranurado). NULL = no such work; a blank never reaches the table.
+    hinging_code: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    assembly_code: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    grooving_code: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
 
     order: Mapped["OrderModel"] = relationship("OrderModel", back_populates="pieces")
 
@@ -651,6 +660,13 @@ class OrderPlacedPieceModel(TimestampMixin, AuditMixin, Base):
     rotated: Mapped[bool] = mapped_column(Boolean, default=False)
     # Geometric banded sides, as-is from the snapshot (null if not banded).
     edges: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    # The workshop codes of the cut-list row this instance comes from. Columns
+    # and not a JSON bag: the additional work's floors count these pieces in
+    # SQL, and a plain ``IS NOT NULL`` is only correct on a real column (see
+    # ``_is_banded`` for what the JSON version of that check does).
+    hinging_code: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    assembly_code: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    grooving_code: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     cut_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     # Who marked the piece as cut: FK to the operator + frozen label.
     # NULL while pending (in sync with ``cut_at``).

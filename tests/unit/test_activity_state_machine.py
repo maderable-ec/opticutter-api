@@ -45,18 +45,20 @@ def _order(
 
 
 def _service(
-    mock_session, order: OrderModel, *, banded=(1, 1), pieces=(1, 1)
+    mock_session, order: OrderModel, *, banded=(1, 1), worked=(1, 1), pieces=(1, 1)
 ) -> OrderService:
-    """``banded``/``pieces`` = (cut, total). The defaults clear every floor."""
+    """``banded``/``worked``/``pieces`` = (cut, total). The defaults clear every floor."""
     svc = OrderService(mock_session)
     svc.get_scoped_or_404 = lambda *a, **k: order
     svc._ensure_cutting_plan = lambda *a, **k: None
-    svc._banded_progress = lambda *a, **k: CuttingProgress(
-        cut_pieces=banded[0], total_pieces=banded[1]
-    )
-    svc._cutting_progress = lambda *a, **k: CuttingProgress(
-        cut_pieces=pieces[0], total_pieces=pieces[1]
-    )
+    svc._set_progress = lambda *a, **k: {
+        name: CuttingProgress(cut_pieces=cut, total_pieces=total)
+        for name, (cut, total) in (
+            ("all", pieces),
+            ("banded", banded),
+            ("worked", worked),
+        )
+    }
     return svc
 
 
@@ -204,26 +206,41 @@ def test_banding_finish_allowed_with_plain_pieces_uncut(mock_session):
     mock_session.commit.assert_called_once()
 
 
-def test_additional_start_blocked_without_any_cut_piece(mock_session):
-    """Its set is every piece, so any one of them unblocks it."""
+def test_additional_start_blocked_without_a_cut_worked_piece(mock_session):
+    """Plain pieces on the saw release nothing: it waits for a piece with a code."""
     order = _order(
         _cut(ActivityStatus.in_progress), _additional(ActivityStatus.pending)
     )
-    svc = _service(mock_session, order, pieces=(0, 4))
-    with pytest.raises(BusinessRuleError):
+    svc = _service(mock_session, order, pieces=(3, 9), worked=(0, 2))
+    with pytest.raises(BusinessRuleError) as exc:
         svc.transition_activity(
             1, ActivityType.additional, ActivityStatus.in_progress, actor=_BANDER
         )
+    assert "con trabajo de taller" in str(exc.value)
     mock_session.commit.assert_not_called()
 
 
-def test_additional_finish_is_free(mock_session):
-    """No finish floor: there is no per-service piece data to check, and the
-    order still waits for the cut before it can be finished."""
+def test_additional_finish_blocked_while_worked_pieces_remain(mock_session):
+    """It used to close free; the codes say which pieces the work is on now."""
     order = _order(
         _cut(ActivityStatus.in_progress), _additional(ActivityStatus.in_progress)
     )
-    svc = _service(mock_session, order, pieces=(1, 9))
+    svc = _service(mock_session, order, pieces=(9, 9), worked=(1, 2))
+    with pytest.raises(BusinessRuleError) as exc:
+        svc.transition_activity(
+            1, ActivityType.additional, ActivityStatus.done, actor=_BANDER
+        )
+    assert "1 pieza(s) con trabajo de taller por cortar" in str(exc.value)
+    mock_session.commit.assert_not_called()
+
+
+def test_additional_finish_allowed_with_plain_pieces_uncut(mock_session):
+    """The parallel track, as for the banding: only the WORKED count gates it,
+    and the order still waits for the cut."""
+    order = _order(
+        _cut(ActivityStatus.in_progress), _additional(ActivityStatus.in_progress)
+    )
+    svc = _service(mock_session, order, pieces=(2, 9), worked=(2, 2))
     resp = svc.transition_activity(
         1, ActivityType.additional, ActivityStatus.done, actor=_BANDER
     )

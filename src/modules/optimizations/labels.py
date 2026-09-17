@@ -1,6 +1,6 @@
-"""Workshop notation for a piece's edge banding (tapacantos)."""
+"""Workshop notation for a piece: its edge banding (tapacantos) and its codes."""
 
-from typing import Iterable, Optional
+from typing import Iterable, Mapping, Optional
 
 # Edge-type abbreviation: Soft→CS, Hard→CD (BandType canonical values).
 _BAND_TYPE_ABBR = {"Soft": "CS", "Hard": "CD"}
@@ -52,3 +52,28 @@ def edge_banding_notation(
     tag = (alias or "").strip().upper()
     suffixes = [s for s in (_BAND_TYPE_ABBR.get(band_type), tag) if s]
     return " ".join([parts, *suffixes])
+
+
+# How each workshop code is named where it is printed, in printing order. Keyed
+# by the requirement's own field names (``WORKSHOP_CODE_FIELDS``). The web's
+# ``workshopCodesLine`` writes the same words, so the PDF, the order detail and
+# the operator's board all read alike.
+_WORKSHOP_CODE_ABBR = (
+    ("hinging_code", "Abis"),
+    ("assembly_code", "Ens"),
+    ("grooving_code", "Ran"),
+)
+
+
+def workshop_codes_line(codes: Mapping[str, Optional[str]]) -> str:
+    """The workshop codes of a piece as one line: ``'Abis X1 · Ens E3 · Ran R2'``.
+
+    Only the codes present are written, each after the service it belongs to --
+    a code alone would not say whether the piece is hinged or grooved. Returns
+    ``''`` for a piece with none.
+    """
+    return " · ".join(
+        f"{abbr} {codes[field]}"
+        for field, abbr in _WORKSHOP_CODE_ABBR
+        if codes.get(field)
+    )

@@ -7,7 +7,8 @@ physical board count.
 """
 
 import re
-from typing import List, Sequence, Tuple, TypeVar
+from collections import Counter
+from typing import Iterator, List, Optional, Sequence, Tuple, TypeVar
 
 SheetT = TypeVar("SheetT")
 
@@ -52,6 +53,35 @@ def _is_half(layout) -> bool:
 def base_label(piece_id: str) -> str:
     """Returns the base label, stripping a single ``#N`` instance suffix."""
     return _INSTANCE_SUFFIX.sub("", piece_id or "")
+
+
+def piece_instance_ids(
+    entries: Sequence[Tuple[Optional[str], int]],
+) -> Iterator[Tuple[int, str]]:
+    """Names every physical instance of ONE material group's cut list.
+
+    ``entries`` are ``(label, quantity)`` per requirement, in request order and
+    for one material group. Yields ``(index, instance_id)`` once per instance,
+    where ``index`` is the requirement's position inside ``entries``.
+
+    The single place the naming rule lives: the optimizer builds its pieces
+    from it and the order maps every placed piece back to its cut-list row with
+    it, so the two cannot drift. The base is the label, or ``piece_{i+1}`` with
+    ``i`` relative to the GROUP; a ``#N`` suffix is added when that base has
+    more than one instance in the group, whether from ``quantity > 1`` or from
+    repeated labels. Renaming a single instance here renames it in every cached
+    payload, which is why ``test_piece_instances`` pins it against the loop it
+    was extracted from.
+    """
+    base = [label or f"piece_{i+1}" for i, (label, _) in enumerate(entries)]
+    totals: Counter = Counter()
+    for name, (_, quantity) in zip(base, entries):
+        totals[name] += quantity
+    seen: Counter = Counter()
+    for i, (_, quantity) in enumerate(entries):
+        for _ in range(quantity):
+            seen[base[i]] += 1
+            yield i, (f"{base[i]}#{seen[base[i]]}" if totals[base[i]] > 1 else base[i])
 
 
 def layout_signature(layout: dict) -> Tuple:

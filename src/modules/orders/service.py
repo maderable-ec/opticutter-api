@@ -2,7 +2,7 @@ from datetime import date, datetime, time, timedelta
 from typing import List, Optional, Tuple
 
 from fastapi import Depends
-from sqlalchemy import case, func
+from sqlalchemy import and_, case, func, or_
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from src.modules.branches.model import BranchModel
@@ -16,9 +16,14 @@ from src.modules.notifications.emitter import (
     notify_order_low_stock,
     notify_order_transition,
 )
-from src.modules.optimizations.patterns import base_label
+from src.modules.optimizations.patterns import base_label, piece_instance_ids
 from src.modules.optimizations.pricing import build_pricing
-from src.modules.optimizations.schemas import OptimizeRequest
+from src.modules.optimizations.schemas import (
+    WORKSHOP_CODE_FIELDS,
+    OptimizeRequest,
+    Requirement,
+    has_workshop_codes,
+)
 from src.modules.optimizations.service import OptimizationService
 from src.modules.orders.model import (
     ACTIVITY_FINISH_NEEDS_EVERY_PIECE,
@@ -305,6 +310,12 @@ class OrderService(BranchScopedMixin):
         # self-contained.
         snapshot = {
             **payload,
+            # The workshop codes are the one thing the order must take from its
+            # own request and not from the payload: they are outside the hash,
+            # so the payload never carries them (see ``WORKSHOP_CODE_FIELDS``).
+            "requirements": _with_workshop_codes(
+                payload["requirements"], data.requirements
+            ),
             "pricing": pricing,
             "additional_services": additional_services,
         }
@@ -380,16 +391,26 @@ class OrderService(BranchScopedMixin):
                 priority=r.get("priority", 0),
                 can_rotate=r.get("can_rotate", True),
                 edges=r.get("edge_banding"),
+                **{f: r.get(f) for f in WORKSHOP_CODE_FIELDS},
             )
-            for r in payload["requirements"]
+            for r in snapshot["requirements"]
         ]
         # Cutting plan = physical boards with each placed piece (the unit the
         # operator marks in the workshop; mutable state outside the snapshot).
-        _attach_cutting_plan(order, payload)
+        # The anchors are read off the request because the payload does not
+        # keep ``pool_key``, and a piece cut on a pooled retazo is named after
+        # its anchor's cut list.
+        _attach_cutting_plan(
+            order,
+            snapshot,
+            anchor_of={
+                m.key: getattr(m, "pool_key", None) or m.key for m in data.materials
+            },
+        )
         # The work of ``in_process``, one row per APPLICABLE activity: the cut
         # always, the banding when something is billed as edge banding, the
-        # additional work when a service was registered. A missing row is the
-        # old ``not_applicable`` -- it cannot be started and never holds the
+        # additional work when a piece carries a workshop code. A missing row is
+        # the old ``not_applicable`` -- it cannot be started and never holds the
         # closing gate.
         order.activities = _build_activities(snapshot)
         order.history = [
@@ -704,9 +725,9 @@ class OrderService(BranchScopedMixin):
             piece.cut_by = actor.user_id
             piece.cut_by_label = actor.label
             # This piece may be the one that UNBLOCKS the bander: banding waits
-            # for the first BANDED piece, the additional work for any piece at
-            # all (its set is every piece). Sealed once -- unmarking the piece
-            # does not give back the time already waited.
+            # for the first BANDED piece, the additional work for the first one
+            # carrying a workshop code. Sealed once -- unmarking the piece does
+            # not give back the time already waited.
             self._seal_activity_ready(order, piece)
         elif not cut:
             piece.cut_at = None
@@ -765,12 +786,11 @@ class OrderService(BranchScopedMixin):
             OrderModel.id.asc(),
         ).all()
         order_ids = [o.id for o in orders]
-        progress_by_order = self._cutting_progress_by_order(order_ids)
-        banded_by_order = self._banded_progress_by_order(order_ids)
+        progress_by_order = self._set_progress_by_order(order_ids)
         items = []
-        zero = CuttingProgress(cut_pieces=0, total_pieces=0)
         for o in orders:
             snapshot = o.optimization_snapshot or {}
+            progress = progress_by_order.get(o.id) or _zero_set_progress()
             items.append(
                 WorkshopQueueItem(
                     order_id=o.id,
@@ -784,101 +804,66 @@ class OrderService(BranchScopedMixin):
                     client=ClientResponse.model_validate(o.client),
                     board_usage=_board_usage(snapshot),
                     banding_usage=_banding_usage(snapshot),
-                    progress=progress_by_order.get(o.id, zero),
-                    activities=_activity_responses(
-                        o.activities,
-                        all_progress=progress_by_order.get(o.id, zero),
-                        banded_progress=banded_by_order.get(o.id, zero),
-                    ),
+                    progress=progress["all"],
+                    activities=_activity_responses(o.activities, progress),
                     print_consolidated_enabled=o.branch.print_consolidated_enabled,
                 )
             )
         return items
 
-    def _cutting_progress_by_order(
+    def _set_progress_by_order(
         self, order_ids: List[int]
-    ) -> dict[int, CuttingProgress]:
-        """Cut/total placed-piece counts per order in a single grouped query.
+    ) -> dict[int, dict[str, CuttingProgress]]:
+        """Cut/total counts of EVERY piece set, per order, in one grouped query.
 
-        Avoids N+1: ``count(cut_at)`` tallies only non-null timestamps (cut pieces).
-        Orders with no materialized pieces are absent from the map (caller → 0/0).
+        One pass over ``order_placed_pieces`` answers the three sets at once
+        (``_PIECE_SET_FILTERS``): a conditional ``count`` per set, where
+        ``count`` skips the NULLs ``case`` yields for a piece outside it. The
+        board renders one card per order, so a query per set per card would be
+        the N+1 this exists to avoid. Orders with no materialized pieces are
+        absent from the map (caller -> ``_zero_set_progress``).
         """
         if not order_ids:
             return {}
+        piece_id = OrderPlacedPieceModel.id
+        is_cut = OrderPlacedPieceModel.cut_at.isnot(None)
+        columns = []
+        for name, predicate in _PIECE_SET_FILTERS.items():
+            if predicate is None:
+                total = func.count(piece_id)
+                cut = func.count(OrderPlacedPieceModel.cut_at)
+            else:
+                total = func.count(case((predicate(), piece_id)))
+                cut = func.count(case((and_(predicate(), is_cut), piece_id)))
+            columns += [total.label(f"{name}_total"), cut.label(f"{name}_cut")]
         rows = (
-            self.db.query(
-                OrderPlacedPieceModel.order_id,
-                func.count(OrderPlacedPieceModel.id).label("total"),
-                func.count(OrderPlacedPieceModel.cut_at).label("cut"),
-            )
+            self.db.query(OrderPlacedPieceModel.order_id, *columns)
             .filter(OrderPlacedPieceModel.order_id.in_(order_ids))
             .group_by(OrderPlacedPieceModel.order_id)
             .all()
         )
         return {
-            row.order_id: CuttingProgress(cut_pieces=row.cut, total_pieces=row.total)
+            row.order_id: {
+                name: CuttingProgress(
+                    cut_pieces=getattr(row, f"{name}_cut"),
+                    total_pieces=getattr(row, f"{name}_total"),
+                )
+                for name in _PIECE_SET_FILTERS
+            }
             for row in rows
         }
 
-    def _cutting_progress(self, order_id: int) -> CuttingProgress:
-        """Cut/total counts over EVERY placed piece of one order.
+    def _set_progress(self, order_id: int) -> dict[str, CuttingProgress]:
+        """``_set_progress_by_order`` for one order: every set's counts.
 
-        The set the cut and the additional work are measured against (the
-        banding has its own, ``_banded_progress``).
+        The floors and the activity responses read this. Banded pieces are told
+        apart by ``edges`` (copied verbatim from the snapshot) and worked ones by
+        the workshop-code columns, so the table itself answers both questions.
         """
-        row = (
-            self.db.query(
-                func.count(OrderPlacedPieceModel.id).label("total"),
-                func.count(OrderPlacedPieceModel.cut_at).label("cut"),
-            )
-            .filter(OrderPlacedPieceModel.order_id == order_id)
-            .one()
+        return (
+            self._set_progress_by_order([order_id]).get(order_id)
+            or _zero_set_progress()
         )
-        return CuttingProgress(cut_pieces=row.cut, total_pieces=row.total)
-
-    def _banded_progress(self, order_id: int) -> CuttingProgress:
-        """Cut/total counts over the pieces that carry edge banding.
-
-        The bander's floor: ``edges`` is copied verbatim from the snapshot at
-        materialization, so the column itself says which pieces are banded (see
-        ``_is_banded`` for why that is not a plain NULL check) -- no extra column
-        and no migration. Cut is derived from ``cut_at`` as usual.
-        """
-        row = (
-            self.db.query(
-                func.count(OrderPlacedPieceModel.id).label("total"),
-                func.count(OrderPlacedPieceModel.cut_at).label("cut"),
-            )
-            .filter(OrderPlacedPieceModel.order_id == order_id, _is_banded())
-            .one()
-        )
-        return CuttingProgress(cut_pieces=row.cut, total_pieces=row.total)
-
-    def _banded_progress_by_order(
-        self, order_ids: List[int]
-    ) -> dict[int, CuttingProgress]:
-        """``_banded_progress`` for many orders in a single grouped query.
-
-        Feeds the shop-floor card: the board has to say WHY the banding button
-        is greyed out, and the plain ``progress`` can't -- it counts every piece,
-        banded or not. Orders with no banded pieces are absent (caller -> 0/0).
-        """
-        if not order_ids:
-            return {}
-        rows = (
-            self.db.query(
-                OrderPlacedPieceModel.order_id,
-                func.count(OrderPlacedPieceModel.id).label("total"),
-                func.count(OrderPlacedPieceModel.cut_at).label("cut"),
-            )
-            .filter(OrderPlacedPieceModel.order_id.in_(order_ids), _is_banded())
-            .group_by(OrderPlacedPieceModel.order_id)
-            .all()
-        )
-        return {
-            row.order_id: CuttingProgress(cut_pieces=row.cut, total_pieces=row.total)
-            for row in rows
-        }
 
     def transition_activity(
         self,
@@ -901,12 +886,11 @@ class OrderService(BranchScopedMixin):
         the operator releases, without waiting for the whole board -- but not
         INDEPENDENTLY: each one's floors are measured against its own piece set
         (``ACTIVITY_PIECES``). Starting needs one of its pieces cut, finishing
-        needs them all, except the additional work, which the bander closes on
-        their own word (there is no per-service piece data to check, and the
-        order still waits for the cut to reach ``finished`` anyway). Without the
-        start floor the bander could open an order the instant the operator took
-        it and declare the work done with nothing cut, and ``done`` is terminal:
-        it would satisfy the closing gate for good.
+        needs them all -- the banded pieces for the banding, the ones carrying a
+        workshop code for the additional work. Without the start floor the
+        bander could open an order the instant the operator took it and declare
+        the work done with nothing cut, and ``done`` is terminal: it would
+        satisfy the closing gate for good.
 
         Forward-only; re-applying the current status is a no-op. Seals
         start/finish with a timestamp + actor.
@@ -1008,37 +992,23 @@ class OrderService(BranchScopedMixin):
         three piece sets, and writing it as three ``if`` blocks is how the sets
         and the floors drift apart.
         """
-        banded = ACTIVITY_PIECES[activity_type] == "banded"
+        piece_set = ACTIVITY_PIECES[activity_type]
+        # "" for every piece, so the cut's messages read as they always did.
+        which = _PIECE_SET_QUALIFIER[piece_set]
         if to_status == ActivityStatus.in_progress:
             if not ACTIVITY_START_NEEDS_A_CUT_PIECE[activity_type]:
                 return
-            progress = (
-                self._banded_progress(order.id)
-                if banded
-                else self._cutting_progress(order.id)
-            )
+            progress = self._set_progress(order.id)[piece_set]
             if progress.cut_pieces == 0:
-                raise BusinessRuleError(
-                    "Aún no se ha cortado ninguna pieza con canto"
-                    if banded
-                    else "Aún no se ha cortado ninguna pieza"
-                )
+                raise BusinessRuleError(f"Aún no se ha cortado ninguna pieza{which}")
             return
         if to_status == ActivityStatus.done:
             if not ACTIVITY_FINISH_NEEDS_EVERY_PIECE[activity_type]:
                 return
-            progress = (
-                self._banded_progress(order.id)
-                if banded
-                else self._cutting_progress(order.id)
-            )
+            progress = self._set_progress(order.id)[piece_set]
             pending = progress.total_pieces - progress.cut_pieces
             if pending:
-                raise BusinessRuleError(
-                    f"Faltan {pending} pieza(s) con canto por cortar"
-                    if banded
-                    else f"Faltan {pending} pieza(s) por cortar"
-                )
+                raise BusinessRuleError(f"Faltan {pending} pieza(s){which} por cortar")
 
     def _activity(
         self, order: OrderModel, activity_type: ActivityType
@@ -1071,35 +1041,26 @@ class OrderService(BranchScopedMixin):
         time somebody already waited (same reason ``queued_at`` survives the
         rollback).
         """
-        piece_is_banded = _piece_is_banded(piece)
         for activity in order.activities:
             activity_type = ActivityType(activity.type)
             if activity.ready_at is not None:
                 continue
             if not ACTIVITY_START_NEEDS_A_CUT_PIECE[activity_type]:
                 continue
-            if ACTIVITY_PIECES[activity_type] == "banded" and not piece_is_banded:
+            if not _PIECE_IN_SET[ACTIVITY_PIECES[activity_type]](piece):
                 continue
             activity.ready_at = piece.cut_at
 
     def _activity_response(
         self, order: OrderModel, activity: OrderActivityModel
     ) -> OrderActivityResponse:
-        """One activity with the progress of ITS pieces (two aggregates at most)."""
-        return _activity_responses(
-            [activity],
-            all_progress=self._cutting_progress(order.id),
-            banded_progress=self._banded_progress(order.id),
-        )[0]
+        """One activity with the progress of ITS pieces (one aggregate query)."""
+        return _activity_responses([activity], self._set_progress(order.id))[0]
 
     def _activity_responses(self, order: OrderModel) -> List[OrderActivityResponse]:
         """Every activity of the order, with each one's piece progress."""
         self._ensure_activities(order)
-        return _activity_responses(
-            order.activities,
-            all_progress=self._cutting_progress(order.id),
-            banded_progress=self._banded_progress(order.id),
-        )
+        return _activity_responses(order.activities, self._set_progress(order.id))
 
     def _ensure_cutting_plan(self, order: OrderModel) -> None:
         """Materializes the cutting plan from the snapshot if it doesn't exist yet.
@@ -1409,17 +1370,68 @@ class OrderService(BranchScopedMixin):
         )
 
 
-def _attach_cutting_plan(order: OrderModel, payload: dict) -> None:
+def _with_workshop_codes(
+    dumped: List[dict], requirements: List[Requirement]
+) -> List[dict]:
+    """The payload's requirements with each one's workshop codes put back.
+
+    Paired BY POSITION: ``_build_result_payload`` dumps one entry per request
+    requirement, in order -- the same pairing the ``order_pieces`` backfill
+    relies on. A new list of new dicts, so a payload that came out of the cache
+    is never mutated.
+    """
+    return [
+        {**r, **{f: getattr(req, f) for f in WORKSHOP_CODE_FIELDS}}
+        for r, req in zip(dumped, requirements, strict=True)
+    ]
+
+
+def _workshop_codes_by_instance(
+    requirements: List[dict],
+) -> dict[Tuple[str, str], dict]:
+    """``(material_key, instance_id) -> codes`` for every piece that carries any.
+
+    Instance ids are only unique inside ONE material group (two materials can
+    both cut a "Puerta"), so the group is part of the key, and each group is
+    named exactly as the optimizer named it: same grouping (by ``material_key``,
+    request order) and the same ``piece_instance_ids``.
+    """
+    groups: dict[str, List[dict]] = {}
+    for r in requirements:
+        groups.setdefault(r.get("material_key"), []).append(r)
+    out: dict[Tuple[str, str], dict] = {}
+    for key, reqs in groups.items():
+        entries = [(r.get("label"), r.get("quantity", 1)) for r in reqs]
+        for i, uid in piece_instance_ids(entries):
+            if has_workshop_codes(reqs[i]):
+                out[(key, uid)] = {f: reqs[i].get(f) for f in WORKSHOP_CODE_FIELDS}
+    return out
+
+
+def _attach_cutting_plan(
+    order: OrderModel, payload: dict, anchor_of: Optional[dict[str, str]] = None
+) -> None:
     """Expands ``payload["layouts"]`` into physical boards + placed pieces.
 
     Each layout in the snapshot is a real sheet; ``sheet_number`` is
     reassigned as a global sequence (the snapshot's resets per material).
     Pieces are also linked directly to the order to count progress without joins.
+
+    Each placed piece also takes the workshop codes of the cut-list row it came
+    from. ``anchor_of`` maps a material to the anchor whose cut list its pieces
+    belong to (a pooled retazo cuts its anchor's pieces); without it every
+    material is its own anchor, which is exact for any job with no pool and
+    harmless for the orders the lazy path rebuilds, none of which carry codes.
     """
+    anchor_of = anchor_of or {}
+    codes_by_instance = _workshop_codes_by_instance(payload.get("requirements") or [])
     materials_by_key = {m["material_key"]: m for m in payload.get("materials", [])}
     for seq, layout in enumerate(payload.get("layouts", []), start=1):
         material = layout.get("material", {})
         resolved = materials_by_key.get(material.get("material_key"), {})
+        anchor = anchor_of.get(material.get("material_key")) or material.get(
+            "material_key"
+        )
         board = OrderBoardModel(
             sheet_number=seq,
             material_key=material.get("material_key", ""),
@@ -1436,6 +1448,7 @@ def _attach_cutting_plan(order: OrderModel, payload: dict) -> None:
         )
         for placed in layout.get("placed_pieces", []):
             piece_id = str(placed.get("piece_id", ""))
+            codes = codes_by_instance.get((anchor, piece_id), {})
             board.pieces.append(
                 OrderPlacedPieceModel(
                     order=order,
@@ -1449,6 +1462,7 @@ def _attach_cutting_plan(order: OrderModel, payload: dict) -> None:
                     original_height=placed.get("original_height", placed["height"]),
                     rotated=bool(placed.get("rotated", False)),
                     edges=placed.get("edges"),
+                    **codes,
                 )
             )
         order.boards.append(board)
@@ -1564,18 +1578,61 @@ def _piece_is_banded(piece: OrderPlacedPieceModel) -> bool:
     return bool(piece.edges)
 
 
+def _is_worked():
+    """SQL predicate for "this placed piece carries shop work".
+
+    A plain ``IS NOT NULL`` per code, and correct here where it is not for
+    ``edges``: these are ``String`` columns, and ``Requirement`` turns a blank
+    code into ``None`` before anything is stored.
+    """
+    return or_(
+        *(getattr(OrderPlacedPieceModel, f).isnot(None) for f in WORKSHOP_CODE_FIELDS)
+    )
+
+
+def _piece_is_worked(piece: OrderPlacedPieceModel) -> bool:
+    """In-Python twin of :func:`_is_worked`, for a piece already in the session."""
+    return any(getattr(piece, f) for f in WORKSHOP_CODE_FIELDS)
+
+
+# The piece sets ``ACTIVITY_PIECES`` names, three ways: the SQL filter the counts
+# run under (``None`` = every piece), the in-Python membership test for a piece
+# already loaded, and how a floor's message names the set to the shop floor.
+_PIECE_SET_FILTERS = {"all": None, "banded": _is_banded, "worked": _is_worked}
+_PIECE_IN_SET = {
+    "all": lambda piece: True,
+    "banded": _piece_is_banded,
+    "worked": _piece_is_worked,
+}
+_PIECE_SET_QUALIFIER = {
+    "all": "",
+    "banded": " con canto",
+    "worked": " con trabajo de taller",
+}
+
+
+def _zero_set_progress() -> dict[str, CuttingProgress]:
+    """Every set at 0/0: an order whose cutting plan holds no piece at all."""
+    return {
+        name: CuttingProgress(cut_pieces=0, total_pieces=0)
+        for name in _PIECE_SET_FILTERS
+    }
+
+
 def _build_activities(snapshot: dict) -> List[OrderActivityModel]:
     """The activity rows an order needs, from its frozen snapshot.
 
     One row per APPLICABLE activity and no row for the rest -- the cut always,
     the banding when something is billed as edge banding, the additional work
-    when a service was registered. Both sources are the ones the documents
-    already read, so nothing new is stored to answer "does this apply".
+    when some piece of the cut list carries a workshop code. The billed
+    additional services are deliberately NOT a source: they are lines on the
+    bill, and a line on the bill is not work on the shop floor. Both sources are
+    read off the snapshot, so nothing new is stored to answer "does this apply".
     """
     types = [ActivityType.cutting]
     if snapshot.get("edge_bandings_summary"):
         types.append(ActivityType.banding)
-    if snapshot.get("additional_services"):
+    if any(has_workshop_codes(r) for r in snapshot.get("requirements") or []):
         types.append(ActivityType.additional)
     return [
         OrderActivityModel(type=t.value, status=ActivityStatus.pending.value)
@@ -1585,15 +1642,13 @@ def _build_activities(snapshot: dict) -> List[OrderActivityModel]:
 
 def _activity_responses(
     activities: List[OrderActivityModel],
-    *,
-    all_progress: CuttingProgress,
-    banded_progress: CuttingProgress,
+    progress_by_set: dict[str, CuttingProgress],
 ) -> List[OrderActivityResponse]:
     """Projects activity rows, each with the progress of ITS piece set.
 
-    Takes the two aggregates already computed by the caller instead of querying
-    per activity: the board renders one card per order and would otherwise fire
-    two queries per activity per row.
+    Takes the aggregates already computed by the caller instead of querying per
+    activity: the board renders one card per order and would otherwise fire a
+    query per activity per row.
     """
     return [
         OrderActivityResponse(
@@ -1606,11 +1661,7 @@ def _activity_responses(
             finished_at=a.finished_at,
             finished_by=a.finished_by,
             finished_by_label=a.finished_by_label,
-            progress=(
-                banded_progress
-                if ACTIVITY_PIECES[ActivityType(a.type)] == "banded"
-                else all_progress
-            ),
+            progress=progress_by_set[ACTIVITY_PIECES[ActivityType(a.type)]],
         )
         for a in sorted(activities, key=lambda a: a.type)
     ]
@@ -1638,6 +1689,9 @@ def _piece_response(piece: OrderPlacedPieceModel) -> PlacedPieceResponse:
         original_height=piece.original_height,
         rotated=piece.rotated,
         edges=piece.edges,
+        hinging_code=piece.hinging_code,
+        assembly_code=piece.assembly_code,
+        grooving_code=piece.grooving_code,
         cut=piece.cut_at is not None,
         cut_at=piece.cut_at,
         cut_by=piece.cut_by,
