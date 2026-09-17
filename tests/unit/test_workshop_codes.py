@@ -1,4 +1,4 @@
-"""Unit: the workshop codes of the cut list (abisagrado, ensamble, ranurado).
+"""Unit: the workshop codes of the cut list (abisagrado, ranurado, ensamble, división).
 
 No DB. The codes are production data the seller types on the cut list, and four
 things about them are load-bearing and silent when wrong:
@@ -20,7 +20,7 @@ from reportlab.lib.styles import getSampleStyleSheet
 
 from src.modules.optimizations.carrier import DocumentCarrier
 from src.modules.optimizations.documents import DocumentService
-from src.modules.optimizations.labels import workshop_codes_line
+from src.modules.optimizations.labels import _WORKSHOP_CODE_ABBR, workshop_codes_line
 from src.modules.optimizations.schemas import WORKSHOP_CODE_FIELDS, Requirement
 from src.modules.optimizations.service import (
     OptimizationService,
@@ -86,15 +86,17 @@ def test_the_codes_travel_in_camel_case():
             "width": 400,
             "materialKey": "b1",
             "hingingCode": "B2",
-            "assemblyCode": "E1",
             "groovingCode": "R3",
+            "assemblyCode": "E1",
+            "divisionCode": "D4",
         }
     )
-    assert (req.hinging_code, req.assembly_code, req.grooving_code) == (
-        "B2",
-        "E1",
-        "R3",
-    )
+    assert (
+        req.hinging_code,
+        req.grooving_code,
+        req.assembly_code,
+        req.division_code,
+    ) == ("B2", "R3", "E1", "D4")
 
 
 # --------------------------------------------------------------------------- #
@@ -148,8 +150,9 @@ def test_codes_follow_the_instance_names_within_a_group():
     assert codes[("b1", "Puerta#2")]["hinging_code"] == "B2"
     assert codes[("b1", "Puerta#3")] == {
         "hinging_code": None,
-        "assembly_code": None,
         "grooving_code": "R1",
+        "assembly_code": None,
+        "division_code": None,
     }
     # A piece without codes is simply absent: nothing to hang on it.
     assert ("b1", "Lateral") not in codes
@@ -225,6 +228,11 @@ def test_one_code_on_one_piece_is_enough():
     assert ActivityType.additional.value in _types(snapshot)
 
 
+def test_a_division_alone_is_enough():
+    snapshot = {"requirements": [_dumped(division_code="D1")]}
+    assert ActivityType.additional.value in _types(snapshot)
+
+
 def test_every_activity_names_a_complete_piece_set():
     for activity in ActivityType:
         piece_set = ACTIVITY_PIECES[activity]
@@ -242,6 +250,21 @@ def test_the_line_names_each_service_and_skips_the_missing():
         "Abis B2 · Ran R1"
     )
     assert workshop_codes_line({"assembly_code": None}) == ""
+
+
+def test_the_line_reads_abisagrado_ranurado_ensamble_division():
+    codes = {
+        "division_code": "D1",
+        "assembly_code": "E1",
+        "grooving_code": "R1",
+        "hinging_code": "B1",
+    }
+    assert workshop_codes_line(codes) == "Abis B1 · Ran R1 · Ens E1 · Div D1"
+
+
+def test_the_printed_names_cover_every_code_in_order():
+    """One list decides the order; the abbreviations must not drift from it."""
+    assert [field for field, _ in _WORKSHOP_CODE_ABBR] == list(WORKSHOP_CODE_FIELDS)
 
 
 _CELL = getSampleStyleSheet()["BodyText"]

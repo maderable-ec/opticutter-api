@@ -678,7 +678,7 @@ class DocumentService:
         # "Cantos" now carries the alias too ("2L1C CS CSH" = 58pt at 9pt
         # Helvetica, against 12pt of cell padding), so it takes 0.15" from the
         # flexible "Etiqueta" column for headroom. "Taller" takes its width from
-        # the same place, and wraps a full "Abis · Ens · Ran" onto two lines.
+        # the same place, and wraps a full "Abis · Ran · Ens · Div" onto two lines.
         workshop_width = 1.2 * inch if with_workshop else 0.0
         col_widths = [0.35 * inch, 0.8 * inch, 0.8 * inch, 0.55 * inch]
         col_widths += [1.25 * inch, 1.25 * inch]

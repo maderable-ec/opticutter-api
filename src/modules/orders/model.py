@@ -68,7 +68,7 @@ class ActivityType(str, Enum):
 
     ``cutting`` is on every order; ``banding`` only when it carries edge
     banding; ``additional`` only when some piece of its cut list carries a
-    workshop code (abisagrado, ensamble, ranurado). The billed additional
+    workshop code (abisagrado, ranurado, ensamble, división). The billed additional
     services have nothing to do with it: they are lines on the bill, not work
     on the shop floor. The operator cuts; the bander does banding AND
     additional.
@@ -577,11 +577,12 @@ class OrderPieceModel(TimestampMixin, AuditMixin, Base):
     # Piece edge banding (nominal sides + product), e.g.
     # ``{"product_id": 42, "sides": ["top", "left"]}``. Null if not banded.
     edges: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
-    # Workshop codes the seller typed on the cut list (abisagrado, ensamble,
-    # ranurado). NULL = no such work; a blank never reaches the table.
+    # Workshop codes the seller typed on the cut list (abisagrado, ranurado,
+    # ensamble, división). NULL = no such work; a blank never reaches the table.
     hinging_code: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
-    assembly_code: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     grooving_code: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    assembly_code: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    division_code: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
 
     order: Mapped["OrderModel"] = relationship("OrderModel", back_populates="pieces")
 
@@ -665,8 +666,9 @@ class OrderPlacedPieceModel(TimestampMixin, AuditMixin, Base):
     # SQL, and a plain ``IS NOT NULL`` is only correct on a real column (see
     # ``_is_banded`` for what the JSON version of that check does).
     hinging_code: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
-    assembly_code: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     grooving_code: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    assembly_code: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    division_code: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     cut_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     # Who marked the piece as cut: FK to the operator + frozen label.
     # NULL while pending (in sync with ``cut_at``).

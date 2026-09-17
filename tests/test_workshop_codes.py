@@ -1,4 +1,6 @@
-"""The workshop codes of the cut list, end to end (abisagrado, ensamble, ranurado).
+"""The workshop codes of the cut list, end to end.
+
+Abisagrado, ranurado, ensamble and división.
 
 The seller types them on the cut list; the order freezes them on its pieces and
 on every placed instance; the operator reads them on the cutting plan, the
@@ -87,6 +89,59 @@ def test_a_piece_on_a_pooled_retazo_keeps_its_codes(client, db_session):
     pieces = [p for board in plan["boards"] for p in board["pieces"]]
     assert len(pieces) == 2
     assert all(p["assemblyCode"] == "E7" for p in pieces)
+
+
+def test_a_division_alone_is_work_for_the_shop(client, db_session):
+    """The fourth code gates the additional work exactly like the other three.
+
+    Counted in SQL: the card's progress only covers the division pieces if the
+    ``worked`` filter reads the new column.
+    """
+    c = _create_client(client, identifier="0100000496")
+    b = _create_board(client, code="MEL0496")
+    order = _mint_order(
+        client,
+        db_session,
+        {
+            "clientId": c["id"],
+            "branchId": _BRANCH,
+            "materials": [{"key": "b1", "source": "catalog", "productId": b["id"]}],
+            "requirements": [
+                {
+                    "priority": 0,
+                    "height": 400,
+                    "width": 600,
+                    "quantity": 2,
+                    "materialKey": "b1",
+                    "label": "Repisa",
+                    "canRotate": True,
+                    "divisionCode": "D3",
+                },
+                {
+                    "priority": 0,
+                    "height": 500,
+                    "width": 500,
+                    "quantity": 1,
+                    "materialKey": "b1",
+                    "label": "Tapa",
+                    "canRotate": True,
+                },
+            ],
+        },
+    )
+    assert order["pieces"][0]["divisionCode"] == "D3"
+    assert _activity(order, "additional") is not None
+
+    _to_in_process(client, order["id"])
+    worked = _worked_pieces(client, order["id"])
+    assert [p["divisionCode"] for p in worked] == ["D3", "D3"]
+    assert _cut_piece(client, order["id"], worked[0]).status_code == 200
+    queue = client.get("/api/v1/orders/workshop-queue").json()["data"]
+    card = next(item for item in queue if item["orderId"] == order["id"])
+    assert _activity(card, "additional")["progress"] == {
+        "cutPieces": 1,
+        "totalPieces": 2,
+    }
 
 
 def test_the_board_counts_the_additional_work_on_its_own_pieces(client, db_session):

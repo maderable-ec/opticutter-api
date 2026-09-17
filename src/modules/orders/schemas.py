@@ -221,11 +221,14 @@ class OrderPieceResponse(CamelModel):
     hinging_code: Optional[str] = Field(
         default=None, description="Abisagrado: workshop code (null = no such work)"
     )
+    grooving_code: Optional[str] = Field(
+        default=None, description="Ranurado: workshop code (null = no such work)"
+    )
     assembly_code: Optional[str] = Field(
         default=None, description="Ensamble: workshop code (null = no such work)"
     )
-    grooving_code: Optional[str] = Field(
-        default=None, description="Ranurado: workshop code (null = no such work)"
+    division_code: Optional[str] = Field(
+        default=None, description="División: workshop code (null = no such work)"
     )
 
 
@@ -412,11 +415,14 @@ class PlacedPieceResponse(CamelModel):
     hinging_code: Optional[str] = Field(
         default=None, description="Abisagrado: workshop code (null = no such work)"
     )
+    grooving_code: Optional[str] = Field(
+        default=None, description="Ranurado: workshop code (null = no such work)"
+    )
     assembly_code: Optional[str] = Field(
         default=None, description="Ensamble: workshop code (null = no such work)"
     )
-    grooving_code: Optional[str] = Field(
-        default=None, description="Ranurado: workshop code (null = no such work)"
+    division_code: Optional[str] = Field(
+        default=None, description="División: workshop code (null = no such work)"
     )
     cut: bool = Field(..., description="Whether the piece was already cut")
     cut_at: Optional[datetime] = None

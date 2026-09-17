@@ -481,14 +481,19 @@ class Requirement(CamelModel):
     hinging_code: Optional[str] = Field(
         default=None, max_length=32, description="Abisagrado: workshop code"
     )
-    assembly_code: Optional[str] = Field(
-        default=None, max_length=32, description="Ensamble: workshop code"
-    )
     grooving_code: Optional[str] = Field(
         default=None, max_length=32, description="Ranurado: workshop code"
     )
+    assembly_code: Optional[str] = Field(
+        default=None, max_length=32, description="Ensamble: workshop code"
+    )
+    division_code: Optional[str] = Field(
+        default=None, max_length=32, description="División: workshop code"
+    )
 
-    @field_validator("hinging_code", "assembly_code", "grooving_code", mode="before")
+    @field_validator(
+        "hinging_code", "grooving_code", "assembly_code", "division_code", mode="before"
+    )
     @classmethod
     def _blank_code_is_none(cls, value):
         """One spelling of "no work": a blank code is ``None``, everywhere.
@@ -509,7 +514,12 @@ class Requirement(CamelModel):
 # seconds with the client at the counter) and never in the cached payload (a
 # cache hit would hand back another request's codes). The order takes them
 # from its own request instead.
-WORKSHOP_CODE_FIELDS = ("hinging_code", "assembly_code", "grooving_code")
+WORKSHOP_CODE_FIELDS = (
+    "hinging_code",
+    "grooving_code",
+    "assembly_code",
+    "division_code",
+)
 
 
 def has_workshop_codes(requirement: dict) -> bool:
