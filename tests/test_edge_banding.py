@@ -47,13 +47,20 @@ def _create_edge_banding(
     attributes = {"thickness": 0.45, "width": 22, "color": color, "length": 50000}
     if band_type is not None:
         attributes["band_type"] = band_type
+    # ``family`` and ``alias`` are columns of the product now, not keys of the
+    # bag: the catalog sync replaces ``attributes`` wholesale on every pass, so
+    # nothing configured from this side could survive in there. The assertions
+    # downstream (the payload, the notation, the summary) are unchanged — which
+    # is the point: only where the value is stored moved.
+    body = {}
     if family is not None:
-        attributes["family"] = family
+        body["familyId"] = family
     if alias is not None:
-        attributes["alias"] = alias
+        body["alias"] = alias
     return client.post(
         "/api/v1/products/",
         json={
+            **body,
             "type": "edge_banding",
             "code": code,
             "name": f"Tapacanto {code}",

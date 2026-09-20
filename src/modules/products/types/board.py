@@ -68,11 +68,10 @@ class BoardAttributes(CamelModel):
     subtype: Optional[BoardSubtype] = Field(
         None, description="Material subtype (MDP/MDF/Plywood/...)"
     )
-    family: Optional[str] = Field(
-        None,
-        max_length=64,
-        description="Familia/diseño para coordinar tapacantos (debe coincidir con el tapacanto)",
-    )
+    # NOTE: ``family`` used to live here. The board<->tapacanto coordination is
+    # now ``products.family_id``, a real column pointing at ``product_families``:
+    # inside this bag it was wiped by every catalog sync, which rewrites
+    # ``attributes`` wholesale. What stays here is what the VENDOR owns.
 
 
 class HalfBoardSplit(str, Enum):

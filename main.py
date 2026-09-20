@@ -28,6 +28,9 @@ from src.modules.orders.router import router as orders_router
 from src.modules.preorders.public_router import router as preorders_public_router
 from src.modules.preorders.router import router as preorders_router
 from src.modules.print_jobs.router import router as print_router
+from src.modules.products.family_router import (
+    router as product_families_router,
+)
 from src.modules.products.router import router as products_router
 from src.modules.settings.router import router as settings_router
 from src.modules.system.router import router as system_router
@@ -105,6 +108,7 @@ app.include_router(auth_router, prefix="/api/v1")
 app.include_router(users_router, prefix="/api/v1")
 app.include_router(branches_router, prefix="/api/v1")
 app.include_router(products_router, prefix="/api/v1")
+app.include_router(product_families_router, prefix="/api/v1")
 app.include_router(clients_router, prefix="/api/v1")
 app.include_router(additional_services_router, prefix="/api/v1")
 app.include_router(optimizations_router, prefix="/api/v1")
