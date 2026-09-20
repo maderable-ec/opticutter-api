@@ -159,21 +159,49 @@ def test_edge_banding_subtype_spanish_aliases_normalize_to_english(client):
 # --------------------------------------------------------------------------- #
 # alias (edge banding only)
 # --------------------------------------------------------------------------- #
-def test_edge_banding_alias_is_independent_of_family(client):
+def test_edge_banding_alias_is_independent_of_the_family(client):
+    """Both live outside the ``attributes`` bag now, and stay independent.
+
+    The family coordinates and is never printed; the alias is printed and
+    coordinates nothing. They moved out of the bag together because the catalog
+    sync replaces it wholesale, but they did not become one field."""
+    family_id = _seed_family(client, "Cashmere")
     payload = _edge_banding_payload()
-    payload["attributes"]["family"] = "Cashmere"
-    payload["attributes"]["alias"] = "CSH"
+    payload["familyId"] = family_id
+    payload["alias"] = "CSH"
     created = client.post("/api/v1/products/", json=payload).json()["data"]
-    assert created["attributes"]["family"] == "Cashmere"
-    assert created["attributes"]["alias"] == "CSH"
-
-
-def test_board_has_no_alias_attribute(client):
-    """``alias`` isn't a `BoardAttributes` field — sending it is silently dropped."""
-    payload = _board_payload()
-    payload["attributes"]["alias"] = "CSH"
-    created = client.post("/api/v1/products/", json=payload).json()["data"]
+    assert created["familyId"] == family_id
+    assert created["family"]["name"] == "Cashmere"
+    assert created["alias"] == "CSH"
+    # And neither leaks back into the vendor's half of the record.
+    assert "family" not in created["attributes"]
     assert "alias" not in created["attributes"]
+
+
+def test_a_board_cannot_carry_an_alias(client):
+    """An alias is an edge-banding field and always was — guarded on both doors.
+
+    On CREATE the discriminated union is what says so: ``alias`` is declared on
+    the edge-banding branch only, so a board that sends one has it ignored, the
+    same silence as when the field lived inside ``attributes``. Declarative and
+    free.
+
+    On UPDATE there is no union to lean on — ``ProductUpdate`` is flat, because a
+    product's type never changes after creation and the request has no reason to
+    repeat it — so the service checks against the STORED type. Without it the
+    database's own CHECK would still refuse the row, but as an opaque integrity
+    error, which is the wrong way to learn this.
+    """
+    payload = _board_payload()
+    payload["alias"] = "CSH"
+    created = client.post("/api/v1/products/", json=payload)
+    assert created.status_code == 201
+    assert created.json()["data"]["alias"] is None
+
+    board_id = created.json()["data"]["id"]
+    resp = client.put(f"/api/v1/products/{board_id}", json={"alias": "CSH"})
+    assert resp.status_code == 422
+    assert "alias" in resp.json()["errors"][0]["message"]
 
 
 # --------------------------------------------------------------------------- #
@@ -287,6 +315,19 @@ def _issues(resp):
     return resp.json()["data"]["issues"]
 
 
+def _messages_by_code(resp):
+    """Every warning per article, as a list.
+
+    A dict keyed by code would drop all but the last: one row can legitimately
+    carry two (a board with its sides swapped AND no family to coordinate
+    through), and collapsing them makes a test pass for the wrong reason.
+    """
+    grouped: dict[str, list[str]] = {}
+    for w in _warnings(resp):
+        grouped.setdefault(w["code"], []).append(w["message"])
+    return grouped
+
+
 def _warnings(resp):
     return resp.json()["data"]["warnings"]
 
@@ -308,6 +349,10 @@ def test_sync_happy_path_creates_board_and_edge_banding(client, monkeypatch):
         # The board writes the family alone ("Cashmere"), the tapacanto appends
         # its short code ("Cashmere - CSH"): coordinated, nothing to report.
         "warnings": [],
+        # One design, seeded from OBS because both articles are new. The counter
+        # exists so a dry run says out loud that the pass would add a row nobody
+        # asked for — the only thing the sync still creates on our side.
+        "familiesCreated": 1,
         "dryRun": False,
     }
 
@@ -325,15 +370,20 @@ def test_sync_happy_path_creates_board_and_edge_banding(client, monkeypatch):
     assert board["attributes"]["height"] == 2800
     assert board["attributes"]["thickness"] == 15
     assert board["attributes"]["subtype"] == "MDP"
-    assert board["attributes"]["family"] == "Cashmere"
-    assert "alias" not in board["attributes"]
+    # The coordination is seeded from OBS into our own table, not into the bag.
+    assert board["family"]["name"] == "Cashmere"
+    assert board["alias"] is None
+    assert "family" not in board["attributes"]
 
     eb = client.get("/api/v1/products/?search=IBIZA").json()["data"][0]
     assert eb["attributes"]["width"] == 19
     assert eb["attributes"]["thickness"] == 0.40
     assert eb["attributes"]["subtype"] == "Wood Grain"
-    assert eb["attributes"]["family"] == "Cashmere"
-    assert eb["attributes"]["alias"] == "CSH"
+    # Both articles resolved to the SAME family row: "Cashmere" and
+    # "Cashmere - CSH" name one design.
+    assert eb["family"]["name"] == "Cashmere"
+    assert eb["familyId"] == board["familyId"]
+    assert eb["alias"] == "CSH"
     # No band-type column in the vendor's schema: inferred from thickness
     # (<1mm = Soft).
     assert eb["attributes"]["bandType"] == "Soft"
@@ -698,23 +748,30 @@ def test_sync_dry_run_reports_without_writing(client, monkeypatch):
         "skippedInvalid": 0,
         "issues": [],
         "warnings": [],
+        "familiesCreated": 1,
         "dryRun": True,
     }
     assert client.get("/api/v1/products/").json()["data"] == []
+    # The rollback covers the family too: a preview that left a design behind
+    # would be writing the one row it announced it would not write.
+    assert client.get("/api/v1/product-families/").json()["data"] == []
 
     # ...and the real run then does exactly what the preview announced.
     applied = _sync(client)
     assert applied.json()["data"]["created"] == 2
     assert len(client.get("/api/v1/products/").json()["data"]) == 2
+    assert len(client.get("/api/v1/product-families/").json()["data"]) == 1
 
 
-def test_sync_warns_when_a_family_has_no_counterpart(client, monkeypatch):
-    """A board whose family no tapacanto shares imports, but can't coordinate.
+def test_a_family_with_no_counterpart_is_no_longer_a_sync_warning(client, monkeypatch):
+    """The drift is real, but the sync is the wrong place to judge it now.
 
-    The drift this catches is a real one: the family is an equality match, so a
-    board left on "Cashmere" while its tapacanto moved to "CSH" silently stops
-    offering the tapacanto, with no error anywhere. The warning is the only
-    signal — and it must not block or skip anything.
+    A board left on "Cashmere" while its tapacanto moved to "CSH" silently stops
+    offering the tapacanto — that has not changed. What changed is where the
+    answer lives: coordination is our ``product_families`` table, so judging it
+    from the vendor's OBS would flag designs we already fixed by hand and stay
+    silent about the ones we break from the dashboard. The signal moved to the
+    families screen (``test_product_families.py``), computed over our own rows.
     """
     _load_inventory(
         monkeypatch,
@@ -725,42 +782,74 @@ def test_sync_warns_when_a_family_has_no_counterpart(client, monkeypatch):
     assert resp.status_code == 200
     data = resp.json()["data"]
 
-    # Both products are in the catalog: this is a warning, not an issue.
+    # Both products import, and two different designs are seeded.
     assert (data["created"], data["skippedInvalid"], data["issues"]) == (2, 0, [])
-    assert len(client.get("/api/v1/products/").json()["data"]) == 2
+    assert data["familiesCreated"] == 2
 
-    messages = {w["code"]: w["message"] for w in _warnings(resp)}
-    assert "'Cashmere' solo aparece en tableros" in messages["1033"]
-    assert "'CSH' solo aparece en tapacantos" in messages["57"]
-    # And the warning is telling the truth: the picker really is empty.
+    # Nothing is reported about the pairing here any more...
+    messages = " ".join(w["message"] for w in _warnings(resp))
+    assert "solo aparece" not in messages
+
+    # ...and the picker really is empty, which is what the families screen says.
     board = client.get("/api/v1/products/code/1033").json()["data"]
     bands = client.get(f"/api/v1/products/{board['id']}/edge-bandings").json()["data"]
     assert bands == []
 
+    flagged = client.get(
+        "/api/v1/product-families/", params={"issuesOnly": True}
+    ).json()["data"]
+    by_name = {f["name"]: f for f in flagged}
+    assert by_name["Cashmere"]["hasNoEdgeBandings"] is True
+    assert by_name["CSH"]["hasNoBoards"] is True
 
-def test_sync_warns_on_an_edge_banding_without_family_or_alias(client, monkeypatch):
+
+def test_sync_warns_only_about_NEW_articles_that_arrive_uncoordinated(
+    client, monkeypatch
+):
+    """The OBS is a seed, so an empty one only matters the first time.
+
+    On an existing product the family lives in our table and is probably right —
+    warning that its OBS is blank would send the operator to fix something that
+    is not broken. A brand-new article is the one case nobody has looked at.
+
+    The board rule also changed, in the other direction: a NON-MDP board with no
+    family is still silent (plywood, OSB and MDF fondo coordinate with nothing —
+    76 of the catalog's 210 boards), but an MDP one IS reported now. Coordination
+    is an MDP business rule, so an MDP arriving uncoordinated is exactly the case
+    the families screen exists for. The old code never warned about any board;
+    that was right while there was nowhere to send anyone.
+    """
     _load_inventory(
         monkeypatch,
-        # A board with no family at all — the plywood/OSB/MDF-fondo shape.
+        # Plywood with no family: legitimately uncoordinated, stays silent.
+        _board_record(
+            cin=9000,
+            nom="PLYWOOD SM B/C (2.44X1.22)M-15MM",
+            tip="PLYWOOD",
+            obs="",
+        ),
+        # MDP with no family: this one IS a gap.
         _board_record(obs=""),
-        # ...and one that coordinates the CEDRO tapacanto below, so the only
-        # thing left to report about it is the missing short code.
-        _board_record(cin=9001, nom="MDP RH CEDRO (2.44X1.83)M-15MM", obs="Cedro"),
         _edge_record(cin="57", obs=""),
         _edge_record(cin="58", nom="TAPACANTO CEDRO 19X0.40MM", obs="Cedro"),
     )
     resp = _sync(client)
-    messages = {w["code"]: w["message"] for w in _warnings(resp)}
+    messages = _messages_by_code(resp)
 
     # A blank OBS. on a tapacanto is a missing field: it always IS a design.
-    assert "sin familia" in messages["57"]
+    assert any("sin familia" in m for m in messages["57"])
     # A family with no short code prints an indistinguishable notation.
-    assert "sin alias" in messages["58"]
-    # ...but a board without a family is NOT warned: plywood/OSB/MDF fondo
-    # legitimately have no coordinated banding, and warning about every one of
-    # them would bury the real problems.
-    assert "1033" not in messages
-    assert "9001" not in messages
+    assert any("sin alias" in m for m in messages["58"])
+    # The MDP board is reported; the plywood is not.
+    assert any("sin familia" in m for m in messages["1033"])
+    assert "9000" not in messages
+
+    # Second pass over the SAME rows: nothing is new, so nothing is reported —
+    # even though every OBS is still exactly as empty as before.
+    again = _sync(client)
+    assert again.json()["data"]["updated"] == 4
+    assert [w for w in _warnings(again) if "sin familia" in w["message"]] == []
+    assert [w for w in _warnings(again) if "sin alias" in w["message"]] == []
 
 
 def test_sync_warns_when_a_board_has_the_shorter_side_first(client, monkeypatch):
@@ -784,15 +873,20 @@ def test_sync_warns_when_a_board_has_the_shorter_side_first(client, monkeypatch)
     assert board["attributes"]["height"] == 2070
     assert board["attributes"]["width"] == 2800
 
-    messages = {w["code"]: w["message"] for w in _warnings(resp)}
-    assert "largo" in messages["1033"] and "ancho" in messages["1033"]
+    messages = _messages_by_code(resp)
+    # Two warnings on one row: the swapped sides, and (because it is an MDP with
+    # a blank OBS.) the missing family. Both are true; a dict keyed by code would
+    # have shown only whichever came last.
+    assert any("largo" in m and "ancho" in m for m in messages["1033"])
 
 
-def test_sync_warns_when_no_stocked_width_covers_the_board(client, monkeypatch):
-    """A design that coordinates on paper but whose only tape is too narrow.
+def test_a_width_gap_is_no_longer_a_sync_warning(client, monkeypatch):
+    """A design whose only tape is too narrow for its own board.
 
     From the seller's chair this is the same failure as a broken family — an
-    empty picker — so it gets the same treatment: reported, never corrected.
+    empty picker — and it is still reported. Just not from here: it is a fact
+    about OUR catalog, so it is computed over our rows on the families screen
+    (``uncoveredThicknesses``) instead of over the vendor's OBS.
     """
     _load_inventory(
         monkeypatch,
@@ -801,15 +895,16 @@ def test_sync_warns_when_no_stocked_width_covers_the_board(client, monkeypatch):
     )
     resp = _sync(client)
     assert resp.status_code == 200
-    data = resp.json()["data"]
+    assert "cubra un tablero" not in " ".join(w["message"] for w in _warnings(resp))
 
-    # Both products import: this is a warning, not an issue.
-    assert (data["created"], data["skippedInvalid"], data["issues"]) == (2, 0, [])
+    # The families screen is where it surfaces, and it names the thickness.
+    (family,) = client.get(
+        "/api/v1/product-families/", params={"issuesOnly": True}
+    ).json()["data"]
+    assert family["name"] == "Carbono"
+    assert family["uncoveredThicknesses"] == [36.0]
 
-    messages = {w["code"]: w["message"] for w in _warnings(resp)}
-    assert "no tiene ningún tapacanto que cubra un tablero de 36mm" in messages["1033"]
-    assert "solo hay de 19mm" in messages["1033"]
-    # And the warning is telling the truth: the picker really is empty.
+    # ...and it is telling the truth: the picker is empty.
     board = client.get("/api/v1/products/code/1033").json()["data"]
     bands = client.get(f"/api/v1/products/{board['id']}/edge-bandings").json()["data"]
     assert bands == []
@@ -1056,6 +1151,24 @@ def test_delete_product(client):
 # --- Board -> coordinated edge-banding matching --------------------------------
 
 
+def _seed_family(client, name="CASHMERE"):
+    """Creates (or finds) the design family these seeds coordinate through.
+
+    The coordination is a foreign key now, so the family has to exist before a
+    product can point at it. Idempotent because several seeds share one design:
+    a repeated name is a 409, and reusing the existing row is what the dashboard
+    does too."""
+    created = client.post("/api/v1/product-families/", json={"name": name})
+    if created.status_code == 201:
+        return created.json()["data"]["id"]
+    listed = client.get("/api/v1/product-families/", params={"search": name})
+    return next(
+        f["id"]
+        for f in listed.json()["data"]
+        if f["name"].casefold() == name.strip().casefold()
+    )
+
+
 def _seed_board(client, code, name, thickness, family="CASHMERE"):
     return client.post(
         "/api/v1/products/",
@@ -1064,11 +1177,11 @@ def _seed_board(client, code, name, thickness, family="CASHMERE"):
             "code": code,
             "name": name,
             "price": 50.0,
+            "familyId": _seed_family(client, family) if family else None,
             "attributes": {
                 "height": 2800,
                 "width": 2070,
                 "thickness": thickness,
-                "family": family,
             },
         },
     ).json()["data"]
@@ -1084,12 +1197,12 @@ def _seed_edge(
             "code": code,
             "name": name,
             "price": 12.0,
+            "familyId": _seed_family(client, family) if family else None,
             "attributes": {
                 "bandType": band_type,
                 "thickness": thickness,
                 "width": width,
                 "color": color,
-                "family": family,
             },
         },
     ).json()["data"]

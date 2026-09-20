@@ -102,17 +102,8 @@ class EdgeBandingAttributes(CamelModel):
     subtype: Optional[EdgeBandingSubtype] = Field(
         None, description="Material subtype (Canto Maderado/Solido/Gloss/...)"
     )
-    family: Optional[str] = Field(
-        None,
-        max_length=64,
-        description="Familia/diseño para coordinar con el tablero (debe coincidir con el tablero)",
-    )
-    alias: Optional[str] = Field(
-        None,
-        max_length=20,
-        description=(
-            "Código corto impreso en la notación de despiece/documentos. "
-            "Independiente de `family`, que sigue siendo la clave de "
-            "coordinación tablero↔tapacanto y nunca se imprime."
-        ),
-    )
+    # NOTE: ``family`` and ``alias`` used to live here. Both are columns now
+    # (``products.family_id`` / ``products.alias``) because the catalog sync
+    # replaces this whole bag on every pass, so anything configured from the
+    # dashboard was wiped. What stays is what the VENDOR owns -- ``band_type``
+    # included, which is inferred from the tape's own thickness.

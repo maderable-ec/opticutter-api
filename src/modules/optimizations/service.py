@@ -115,6 +115,33 @@ def _exact_config() -> ExactConfig:
     )
 
 
+def edge_banding_salt(eb_products: Dict[int, ProductModel]) -> dict:
+    """The per-product edge-banding signature that salts ``_compute_hash``.
+
+    Three fields, and the two non-price ones are here because they are baked
+    into what the documents PRINT (the ``2L1C CS CSH`` notation) without moving
+    a millimetre of geometry: without them a catalog edit would stay invisible
+    for a whole ``OPT_RESULT_TTL_SECONDS``. ``family`` is deliberately absent —
+    it coordinates but is never printed.
+
+    Extracted from ``_compute_hash`` so it can be pinned by a test. When ``alias``
+    moved out of the ``attributes`` bag into a column of its own, this dict is
+    the one place where that could have changed a cached quote: the digest is
+    ``json.dumps(..., sort_keys=True)`` over it, so the same strings under the
+    same keys must keep producing the same bytes. They do — the migration copies
+    the alias verbatim — which is why no Redis entry was invalidated and why
+    ``ENGINE_VERSION`` did not move.
+    """
+    return {
+        str(pid): {
+            "price": p.price,
+            "band_type": (p.attributes or {}).get("bandType"),
+            "alias": p.alias,
+        }
+        for pid, p in eb_products.items()
+    }
+
+
 class OptimizationService:
     """Orchestrates the cutting domain (``cutting``) and caches the result by hash.
 
@@ -524,14 +551,7 @@ class OptimizationService:
             }
             for key, rm in resolved.items()
         }
-        edge_bandings = {
-            str(pid): {
-                "price": p.price,
-                "band_type": (p.attributes or {}).get("bandType"),
-                "alias": (p.attributes or {}).get("alias"),
-            }
-            for pid, p in eb_products.items()
-        }
+        edge_bandings = edge_banding_salt(eb_products)
         digest_input = {
             "materials": materials,
             "requirements": hashable_requirements(request.requirements),
@@ -685,14 +705,20 @@ class OptimizationService:
             # diagram (soft = solid, hard = hatched). ``None`` in older snapshots.
             "band_type": attrs.get("bandType"),
             # Short alias (``CSH``) so the workshop tells two banded designs
-            # apart. ``None`` when the product has no alias configured.
-            # Independent of ``family``, which stays the coordination key.
-            "alias": attrs.get("alias"),
+            # apart. ``None`` when the product has no alias configured, and when
+            # there is no product at all (geometry-only banding, ``pid is None``)
+            # — hence the guard rather than a bare ``product.alias``.
+            # Independent of the family, which stays the coordination key.
+            "alias": (product.alias if product else None),
             # Workshop notation computed from the NOMINAL sides (stable under
             # rotation); ``geo`` is only used to draw the bands on the right side.
-            # ``attributes`` is persisted in camelCase → ``bandType``.
+            # ``attributes`` is persisted in camelCase → ``bandType``; the alias
+            # is a column of its own (the sync rewrites the bag wholesale, so it
+            # could not survive there).
             "notation": edge_banding_notation(
-                nominal, attrs.get("bandType"), attrs.get("alias")
+                nominal,
+                attrs.get("bandType"),
+                (product.alias if product else None),
             ),
         }
 
@@ -761,7 +787,7 @@ class OptimizationService:
                     "thickness": attrs.get("thickness"),
                     "color": attrs.get("color"),
                     "band_type": attrs.get("bandType"),
-                    "alias": attrs.get("alias"),
+                    "alias": (product.alias if product else None),
                     "net_linear_m": round(net_m, 2),
                     "linear_m": billed,
                     "billed_linear_m": billed,
@@ -799,9 +825,10 @@ class OptimizationService:
         if req.edge_banding is not None and data.get("edge_banding"):
             product = eb_products.get(req.edge_banding.product_id)
             attrs = (product.attributes if product else None) or {}
-            # ``attributes`` is persisted in camelCase → ``bandType``.
+            # ``attributes`` is persisted in camelCase → ``bandType``; the alias
+            # is its own column.
             data["edge_banding"]["band_type"] = attrs.get("bandType")
-            data["edge_banding"]["alias"] = attrs.get("alias")
+            data["edge_banding"]["alias"] = product.alias if product else None
         return data
 
     @staticmethod

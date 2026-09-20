@@ -30,10 +30,14 @@ from sqlalchemy.orm import Session
 
 from src.modules.orders.model import OrderBoardModel, OrderLineModel, OrderPieceModel
 from src.modules.products.external_catalog import SourceRow, fetch_rows
-from src.modules.products.model import ProductModel, ProductType
+from src.modules.products.model import (
+    ProductFamilyModel,
+    ProductModel,
+    ProductType,
+)
 from src.modules.products.schemas import ProductSyncIssue, ProductSyncResult
-from src.modules.products.service import edge_width_fits_board, normalize_family
-from src.modules.products.types.board import BoardAttributes
+from src.modules.products.service import normalize_family
+from src.modules.products.types.board import BoardAttributes, BoardSubtype
 from src.modules.products.types.edge_banding import BandType, EdgeBandingAttributes
 from src.modules.settings.service import SettingsService
 from src.shared.exceptions import BulkValidationError
@@ -203,6 +207,13 @@ class _ValidRow:
     # row the configured rate would bill wrong. Never applied to the price.
     iva_rate: float
     attributes: dict
+    # Parsed from the vendor's OBS, and deliberately NOT inside ``attributes``:
+    # that dict is literally what ``_apply`` writes into the JSON column on every
+    # update, so leaving them there would reinject them into the bag on each
+    # pass — the exact overwrite this whole change exists to stop. They are
+    # carried alongside and read only on the CREATE path.
+    family: Optional[str] = None
+    alias: Optional[str] = None
 
 
 @dataclass
@@ -251,18 +262,19 @@ def _collect_warnings(valid: Sequence[_ValidRow], tax_rate: float) -> List[_Issu
 
     Deliberately narrow, so the list stays worth reading:
 
-    * A **board** with no family is NOT a warning. Plywood, OSB and MDF fondo
-      have no coordinated banding at all, and warning about every one of them
-      would bury the real problems.
-    * A family is only checked for a counterpart when it was actually
-      *declared* — writing one is the statement of intent that makes its
-      absence on the other side a mistake.
-    * A family that coordinates but whose stocked widths cover none of its
-      own boards (``edge_width_fits_board``) is reported: a 36 mm board whose
-      design only comes in 19 mm tape has a picker as empty as a board with a
-      broken family, and from the seller's chair the two are the same problem.
-      Only families that HAVE bandings are checked, so this never restates the
-      orphan-family warning below.
+    Coordination is NOT checked here any more, and that is the point of the
+    change this function survived: board<->tapacanto pairing lives in our own
+    ``product_families`` table now, not in the vendor's OBS. Judging it from
+    source rows would flag families we already fixed by hand and stay silent
+    about the ones we break — so "this family has no counterpart" and "no
+    stocked width covers this board" moved to
+    ``ProductFamilyService.list_with_stats``, and "a new article arrived with
+    nothing to seed a family from" moved to ``_apply``, which is the only place
+    that knows whether a row is new.
+
+    What remains is defects of the SOURCE — things only fixable in the inventory
+    system. Deliberately narrow, so the list stays worth reading:
+
     * A **tapacanto thicker than it is wide** is a measurement that cannot
       exist: the vendor almost certainly dropped a decimal point ("18X45MM"
       where its siblings say "18X0.45MM"), and the thickness is also what the
@@ -303,20 +315,6 @@ def _collect_warnings(valid: Sequence[_ValidRow], tax_rate: float) -> List[_Issu
             )
         )
 
-    # First row that declared each family, per side — the anchor for the
-    # "no counterpart" warning, so an orphan family is reported once instead of
-    # once per article that carries it.
-    first_by_family: Dict[ProductType, Dict[str, _ValidRow]] = {
-        ProductType.BOARD: {},
-        ProductType.EDGE_BANDING: {},
-    }
-    # Every width a family is stocked in, and the first board that needs each
-    # (family, thickness) combination covered. Keyed by thickness and not just
-    # by family because a design can coordinate perfectly at 15mm and have no
-    # tape wide enough for its 36mm sibling — that's one gap, not two.
-    widths_by_family: Dict[str, set] = {}
-    boards_by_family_thickness: Dict[Tuple[str, float], _ValidRow] = {}
-
     # Anchors for the once-per-level warnings, plus how many rows they stand for.
     missing_level: Dict[int, Tuple[_ValidRow, int]] = {}
 
@@ -346,12 +344,6 @@ def _collect_warnings(valid: Sequence[_ValidRow], tax_rate: float) -> List[_Issu
                 "configurado",
             )
 
-        family = normalize_family(row.attributes.get("family"))
-        if family:
-            # setdefault on the outer dict too: a future ProductType reaching
-            # the sync should not KeyError its way out of a warning.
-            first_by_family.setdefault(row.product_type, {}).setdefault(family, row)
-
         if row.product_type is ProductType.BOARD:
             height = row.attributes.get("height")
             width = row.attributes.get("width")
@@ -362,19 +354,10 @@ def _collect_warnings(valid: Sequence[_ValidRow], tax_rate: float) -> List[_Issu
                     f"({width:g}mm): revisar si el proveedor escribió el "
                     "lado más corto primero",
                 )
-            thickness = row.attributes.get("thickness")
-            if family and thickness is not None:
-                boards_by_family_thickness.setdefault((family, thickness), row)
             continue
 
         band_width = row.attributes.get("width")
         band_thickness = row.attributes.get("thickness")
-        if band_width is not None and family:
-            # The width still counts towards coverage even on the row below:
-            # when the two numbers disagree it's the thickness that lost its
-            # decimal point, and a width the family really stocks shouldn't be
-            # dropped from the check on the strength of the other field.
-            widths_by_family.setdefault(family, set()).add(band_width)
         if (
             band_width is not None
             and band_thickness is not None
@@ -387,60 +370,12 @@ def _collect_warnings(valid: Sequence[_ValidRow], tax_rate: float) -> List[_Issu
                 "medida en el inventario",
             )
 
-        if not family:
-            # An edge banding always *is* a design, so a missing family here is
-            # a blank field, not a product that has none.
-            warn(
-                row,
-                "tapacanto sin familia (OBS. vacío): no va a coordinar con "
-                "ningún tablero",
-            )
-        elif not row.attributes.get("alias"):
-            warn(
-                row,
-                "tapacanto sin alias (OBS. sin ' - CÓDIGO'): la notación de "
-                "despiece no lo va a distinguir de otro diseño",
-            )
-
     for level, (anchor, count) in sorted(missing_level.items()):
         others = f" (y {count - 1} artículo{'s' if count > 2 else ''} más)"
         warn(
             anchor,
             f"sin Precio {level} en el inventario{others if count > 1 else ''}: "
             f"se cobra{'n' if count > 1 else ''} al precio de lista",
-        )
-
-    boards = first_by_family[ProductType.BOARD]
-    bandings = first_by_family[ProductType.EDGE_BANDING]
-    for family, row in boards.items():
-        if family not in bandings:
-            warn(
-                row,
-                f"la familia '{row.attributes['family']}' solo aparece en "
-                "tableros; ningún tapacanto la coordina",
-            )
-    for family, row in bandings.items():
-        if family not in boards:
-            warn(
-                row,
-                f"la familia '{row.attributes['family']}' solo aparece en "
-                "tapacantos; ningún tablero la usa",
-            )
-
-    for (family, thickness), row in boards_by_family_thickness.items():
-        widths = widths_by_family.get(family)
-        if not widths:
-            # No banding at all on this family: already reported above, and
-            # saying it twice would only make the list harder to read.
-            continue
-        if any(edge_width_fits_board(thickness, w) for w in widths):
-            continue
-        stocked = "/".join(f"{w:g}" for w in sorted(widths))
-        warn(
-            row,
-            f"la familia '{row.attributes['family']}' no tiene ningún "
-            f"tapacanto que cubra un tablero de {thickness:g}mm "
-            f"(solo hay de {stocked}mm)",
         )
 
     warnings.sort(key=lambda w: w.row_no)
@@ -579,8 +514,6 @@ def _validate(
             }
             if row.tipo:
                 attrs["subtype"] = row.tipo
-            if family:
-                attrs["family"] = family
             try:
                 validated = BoardAttributes(**attrs)
             except PydanticValidationError as exc:
@@ -611,10 +544,6 @@ def _validate(
             grupo = row.grupo.strip()
             if grupo and grupo != "-":
                 attrs["subtype"] = grupo
-            if family:
-                attrs["family"] = family
-            if alias:
-                attrs["alias"] = alias
             try:
                 validated = EdgeBandingAttributes(**attrs)
             except PydanticValidationError as exc:
@@ -637,6 +566,11 @@ def _validate(
                 price_3=price_3,
                 iva_rate=iva_rate,
                 attributes=validated.model_dump(by_alias=True, mode="json"),
+                # Carried beside the bag, never in it. A board drops the alias:
+                # ``family`` is the coordination key and applies to both
+                # categories, an alias is an edge-banding field.
+                family=family,
+                alias=alias if product_type is ProductType.EDGE_BANDING else None,
             )
         )
 
@@ -663,6 +597,65 @@ def _is_product_in_use(db: Session, product_id: int) -> bool:
         .first()
         is not None
     )
+
+
+def _warn_uncoordinated(warnings: List[_Issue], row: _ValidRow) -> None:
+    """Flags a NEWLY CREATED article that landed with no coordination.
+
+    Only on create, and that restriction is what makes it worth reading. The
+    vendor's OBS is now only a SEED: an existing product's family lives in our
+    table and is probably right, so warning that its OBS is blank would send the
+    operator to fix something that is not broken. A new article, on the other
+    hand, is the one case nobody has looked at yet.
+
+    A board is warned only when it is MDP. Coordination is an MDP business rule —
+    plywood, OSB, MDF fondo and the rest have no coordinated banding at all
+    (measured: 76 of 210 boards carry no family, every one of them non-MDP), so
+    warning about them would bury the real cases. The old rule never warned
+    about any board; that was right while there was no screen to send anyone to.
+    """
+    if row.product_type is ProductType.BOARD:
+        if not row.family and row.attributes.get("subtype") == BoardSubtype.MDP.value:
+            warnings.append(
+                _Issue(
+                    row_no=row.row_no,
+                    codigo=row.codigo,
+                    name=row.name,
+                    message=(
+                        "tablero MDP nuevo sin familia (OBS. vacío): quedó sin "
+                        "coordinar, asignale una familia en Productos → Familias"
+                    ),
+                    external_code=row.external_code,
+                )
+            )
+        return
+
+    if not row.family:
+        warnings.append(
+            _Issue(
+                row_no=row.row_no,
+                codigo=row.codigo,
+                name=row.name,
+                message=(
+                    "tapacanto nuevo sin familia (OBS. vacío): quedó sin "
+                    "coordinar, asignale una familia en Productos → Familias"
+                ),
+                external_code=row.external_code,
+            )
+        )
+    elif not row.alias:
+        warnings.append(
+            _Issue(
+                row_no=row.row_no,
+                codigo=row.codigo,
+                name=row.name,
+                message=(
+                    "tapacanto nuevo sin alias (OBS. sin ' - CÓDIGO'): la "
+                    "notación de despiece no lo va a distinguir de otro diseño"
+                ),
+                external_code=row.external_code,
+            )
+        )
 
 
 def _apply(
@@ -747,6 +740,37 @@ def _apply(
             errors=conflicts,
         )
 
+    # Every family we know, keyed the way ``normalize_family`` keys them. Built
+    # once: resolving per row would be a query per article.
+    families_by_key: Dict[str, ProductFamilyModel] = {
+        f.normalized_name: f for f in db.query(ProductFamilyModel).all()
+    }
+    families_created = 0
+
+    def resolve_family(name: Optional[str]) -> Optional[ProductFamilyModel]:
+        """The family an incoming article names, creating it if it is new.
+
+        Registering the new family in the dict before the next row is read is
+        load-bearing, not tidiness: 202 tapacantos share 72 designs, so without
+        it a first sync would try to insert the same family once per article and
+        the UNIQUE constraint would abort the whole pass.
+
+        The relationship is assigned rather than ``family_id`` because a family
+        created here has no id until the flush; SQLAlchemy resolves the FK for
+        us at flush time.
+        """
+        nonlocal families_created
+        key = normalize_family(name)
+        if not key:
+            return None
+        family = families_by_key.get(key)
+        if family is None:
+            family = ProductFamilyModel(name=name.strip(), normalized_name=key)
+            db.add(family)
+            families_by_key[key] = family
+            families_created += 1
+        return family
+
     created = updated = 0
     synced_codes_by_type: Dict[ProductType, set] = {}
     for row in valid_rows:
@@ -765,9 +789,13 @@ def _apply(
                     price_3=row.price_3,
                     is_active=True,
                     attributes=row.attributes,
+                    # Seeded ONLY here. See the update branch below.
+                    family=resolve_family(row.family),
+                    alias=row.alias,
                 )
             )
             created += 1
+            _warn_uncoordinated(warnings, row)
         else:
             product.name = row.name
             product.description = row.description
@@ -776,6 +804,17 @@ def _apply(
             product.price_3 = row.price_3
             product.attributes = row.attributes
             product.is_active = True
+            # ``family_id`` and ``alias`` are deliberately ABSENT from this
+            # branch, and that omission is the whole point of the change that
+            # moved them out of ``attributes``. The vendor's OBS seeds the
+            # coordination when an article first appears; from then on it is
+            # ours. A family assigned from the dashboard does not revert just
+            # because SIFAC now says something else — same rule, and same
+            # reason, as ``clients/client_sync.py``, where the source never
+            # overwrites a contact detail a seller typed in.
+            #
+            # Note this is why ``attributes`` can still be replaced wholesale:
+            # what is left in that bag is the vendor's alone.
             updated += 1
 
     # A row we couldn't read is not a row the vendor removed, so its product
@@ -816,7 +855,8 @@ def _apply(
         skipped_inactive=skipped_inactive,
         skipped_invalid=len(issues),
         issues=[i.to_schema() for i in issues],
-        warnings=[w.to_schema() for w in warnings],
+        warnings=[w.to_schema() for w in sorted(warnings, key=lambda w: w.row_no)],
+        families_created=families_created,
         dry_run=dry_run,
     )
 

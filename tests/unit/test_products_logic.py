@@ -79,28 +79,36 @@ def test_norm_family(value, expected):
 
 
 # --- Matching with a mocked session --------------------------------------------
-def _board(family="CASHMERE", thickness=15):
+# The family is a foreign key now, not a string inside the bag: the catalog sync
+# rewrites ``attributes`` wholesale on every pass, so nothing configurable could
+# survive in there. Matching on an id also means the picker can no longer be
+# broken by a typo, which is what the old string equality allowed.
+_CASHMERE = 1
+
+
+def _board(family_id=_CASHMERE, thickness=15):
     return SimpleNamespace(
         id=1,
         code="MDP-SL-CSH-15",
         type="board",
-        attributes={"thickness": thickness, "family": family},
+        family_id=family_id,
+        attributes={"thickness": thickness},
     )
 
 
 _next_id = iter(range(100, 1000))
 
 
-def _band(code, width, *, family="CASHMERE", band_type="Soft", thickness=0.45):
+def _band(code, width, *, family_id=_CASHMERE, band_type="Soft", thickness=0.45):
     return SimpleNamespace(
         id=next(_next_id),
         code=code,
         type="edge_banding",
+        family_id=family_id,
         attributes={
             "width": width,
             "bandType": band_type,
             "thickness": thickness,
-            "family": family,
         },
     )
 
@@ -109,14 +117,19 @@ def _candidates(mock_session, items):
     mock_session.query.return_value.filter.return_value.all.return_value = items
 
 
-def test_matches_by_family_and_thickness_width(mock_session):
+def test_matches_by_covering_width(mock_session):
+    """Of the family's own tapes, only the ones that cover the edge come back.
+
+    The design no longer appears in this list at all: excluding another family's
+    tape is the query's job since the match became a foreign key, and
+    ``test_the_family_filter_is_pushed_into_the_query`` is what pins that. What
+    is left here is the rule that stayed in Python — the overhang window."""
     mock_session.get.return_value = _board()  # 15mm board
     _candidates(
         mock_session,
         [
-            _band("TAP-SL-CSH-019", 19),  # matches
-            _band("TAP-SL-CSH-040", 40),  # too wide for 15mm
-            _band("TAP-OT-XXX-019", 19, family="BARROCO"),  # different family
+            _band("TAP-SL-CSH-019", 19),  # covers: 4mm of overhang
+            _band("TAP-SL-CSH-040", 40),  # too wide for a 15mm board
         ],
     )
     result = ProductService(mock_session).find_edge_bandings_for_board(1)
@@ -178,15 +191,25 @@ def test_a_36mm_board_never_sees_the_narrow_tape(mock_session):
     assert ProductService(mock_session).find_edge_bandings_for_board(1) == []
 
 
-def test_family_match_is_case_insensitive(mock_session):
-    mock_session.get.return_value = _board(family="Cashmere")
-    _candidates(mock_session, [_band("TAP-SL-CSH-019", 19, family="  cashmere ")])
-    result = ProductService(mock_session).find_edge_bandings_for_board(1)
-    assert [p.code for p in result] == ["TAP-SL-CSH-019"]
+def test_the_family_filter_is_pushed_into_the_query(mock_session):
+    """The candidate query now carries the family, so the Python pass only ever
+    sees tapes of the right design.
+
+    This used to load EVERY active edge banding (202 rows on the live catalog)
+    and compare normalized family strings in Python, once per call. The test
+    asserts the filter reaches SQLAlchemy rather than trusting the result, which
+    a stubbed session would produce either way."""
+    mock_session.get.return_value = _board()
+    _candidates(mock_session, [_band("TAP-SL-CSH-019", 19)])
+    ProductService(mock_session).find_edge_bandings_for_board(1)
+    criteria = mock_session.query.return_value.filter.call_args.args
+    assert any("family_id" in str(c) for c in criteria)
 
 
 def test_board_without_family_returns_empty(mock_session):
-    mock_session.get.return_value = _board(family=None)
+    """The 76 non-MDP boards (plywood, OSB, MDF fondo) coordinate with nothing.
+    That is N/A, not a gap — and it costs no query."""
+    mock_session.get.return_value = _board(family_id=None)
     _candidates(mock_session, [_band("TAP-SL-CSH-019", 19)])
     assert ProductService(mock_session).find_edge_bandings_for_board(1) == []
 
@@ -208,7 +231,7 @@ def test_filters_by_band_type(mock_session):
 
 def test_non_board_product_is_rejected(mock_session):
     mock_session.get.return_value = SimpleNamespace(
-        code="TAP-SL-CSH-019", type="edge_banding", attributes={}
+        code="TAP-SL-CSH-019", type="edge_banding", family_id=None, attributes={}
     )
     with pytest.raises(BusinessRuleError):
         ProductService(mock_session).find_edge_bandings_for_board(1)

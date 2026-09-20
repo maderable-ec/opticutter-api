@@ -96,6 +96,14 @@ def list_products(
         description="Filter by one or more material subtypes, case-insensitive "
         "(repeat the parameter)",
     ),
+    family_id: Optional[int] = Query(
+        None, alias="familyId", description="Filter by design family"
+    ),
+    unassigned: Optional[bool] = Query(
+        None,
+        description="true = only products with no family (the assignment queue); "
+        "false = only products that have one",
+    ),
     svc: ProductService = Depends(product_service),
 ):
     """Lists products with optional type/active/subtype filters, search, and pagination.
@@ -103,9 +111,20 @@ def list_products(
     ``type`` and ``subtype`` each accept multiple values (repeat the query
     parameter) for a multi-select filter; results are ordered by name, so
     paging through them is stable.
+
+    ``familyId`` and ``unassigned`` are two parameters rather than one nullable
+    filter because a query string cannot carry a null — ``?familyId=`` arrives as
+    the empty string and 422s on its way to ``int``.
     """
     items, total = svc.search_paginated(
-        search, type, paging.limit, paging.offset, is_active, subtype
+        search,
+        type,
+        paging.limit,
+        paging.offset,
+        is_active,
+        subtype,
+        family_id,
+        unassigned,
     )
     return page(items, total, paging.limit, paging.offset)
 
