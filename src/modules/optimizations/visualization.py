@@ -1,5 +1,5 @@
 import io
-from typing import List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from PIL import Image, ImageColor, ImageDraw, ImageFont
 
@@ -87,6 +87,21 @@ LEGEND_ROW_GAP = 16  # a wrapped legend row → the next
 LEGEND_TOP = 24  # canvas top → legend
 HEADER_GAP_ABOVE = 16  # legend → board name
 HEADER_GAP_BELOW = 14  # board name → the board itself
+
+
+def _side_band_types(edges: dict) -> Dict[str, Optional[str]]:
+    """The band type of each banded GEOMETRIC side: ``{side: 'Soft'|'Hard'|None}``.
+
+    The piece's own ``band_type`` covers every side, except the ones a canto
+    especial took (``edges['special']``, keyed by its geometric ``side``).
+    Snapshots predating the special edges simply have no ``special``.
+    """
+    types: Dict[str, Optional[str]] = {
+        side: edges.get("band_type") for side in edges.get("sides") or []
+    }
+    for special in edges.get("special") or []:
+        types[special["side"]] = special.get("band_type")
+    return types
 
 
 def _draw_edge_strip(
@@ -425,9 +440,7 @@ class VisualizationService:
         # piece with no known type (older snapshots) is treated as solid → "Soft".
         band_types: Set[str] = set()
         for piece in layout.get("placed_pieces", []):
-            edges = piece.get("edges") or {}
-            if edges.get("sides"):
-                bt = edges.get("band_type")
+            for bt in _side_band_types(piece.get("edges") or {}).values():
                 band_types.add(bt if bt in ("Soft", "Hard") else "Soft")
 
         badge = f"  ·  ×{count}" if count > 1 else ""
@@ -624,24 +637,22 @@ class VisualizationService:
         # are hatched diagonally and soft (or unknown) ones are solid. After
         # rotating the board 90 degrees clockwise the sides rotate:
         # left->top, top->right, right->bottom, bottom->left.
-        edges = piece.get("edges") or {}
-        sides = set(edges.get("sides") or [])
-        if sides:
-            hatched = edges.get("band_type") == "Hard"
-            w = EDGE_BANDING_WIDTH
-            color = COLOR_INK
-            if "left" in sides:
-                _draw_edge_strip(img, draw, (px, py, px + pw, py + w), color, hatched)
-            if "right" in sides:
-                _draw_edge_strip(
-                    img, draw, (px, py + ph - w, px + pw, py + ph), color, hatched
-                )
-            if "bottom" in sides:
-                _draw_edge_strip(img, draw, (px, py, px + w, py + ph), color, hatched)
-            if "top" in sides:
-                _draw_edge_strip(
-                    img, draw, (px + pw - w, py, px + pw, py + ph), color, hatched
-                )
+        #
+        # The type is read per side: a canto especial can put a hard tape on
+        # one side of a piece whose other sides are soft.
+        band_types = _side_band_types(piece.get("edges") or {})
+        w = EDGE_BANDING_WIDTH
+        color = COLOR_INK
+        strips = {
+            "left": (px, py, px + pw, py + w),
+            "right": (px, py + ph - w, px + pw, py + ph),
+            "bottom": (px, py, px + w, py + ph),
+            "top": (px + pw - w, py, px + pw, py + ph),
+        }
+        for side, strip in strips.items():
+            if side in band_types:
+                hatched = band_types[side] == "Hard"
+                _draw_edge_strip(img, draw, strip, color, hatched)
 
     @staticmethod
     def _draw_piece_labels(
@@ -683,24 +694,40 @@ class VisualizationService:
         # notation (e.g. "2L1C CS"). They're stacked and centered as a block; each
         # line is omitted if it doesn't fit, covering label+notation, label only,
         # or notation only.
-        stack = []
+        max_w, max_h = pw - 2 * pad, ph - 2 * pad
+        head = []
         piece_id = base_label(str(piece.get("piece_id", "")))
         if piece_id and not piece_id.startswith("piece_"):
-            label = _fit_label(piece_id, label_font, pw - 2 * pad, ph - 2 * pad)
+            label = _fit_label(piece_id, label_font, max_w, max_h)
             if label:
-                stack.append(_text_image(label, label_font, COLOR_INK))
+                head.append(_text_image(label, label_font, COLOR_INK))
 
         notation = (piece.get("edges") or {}).get("notation")
-        if notation:
-            fitted = _fit_label(notation, dim_font, pw - 2 * pad, ph - 2 * pad)
-            if fitted:
-                stack.append(_text_image(fitted, dim_font, COLOR_INK))
+        tapes = [t for t in (notation or "").split(" · ") if t]
 
-        if stack:
-            gap = 2
+        def notation_lines():
+            """The notation's candidate layouts, best first, rendered on demand.
+
+            With cantos especiales, one line per tape (``2L1C CS CSH`` over
+            ``1C CS BNL``) comes first -- on one line the special tape was the
+            part the ellipsis cut off -- and is only offered when every tape fits
+            whole. The one-line notation, which is all a piece with a single tape
+            ever has, is the fallback.
+            """
+            if len(tapes) > 1 and all(
+                _text_size(t, dim_font)[0] <= max_w for t in tapes
+            ):
+                yield [_text_image(t, dim_font, COLOR_INK) for t in tapes]
+            fitted = _fit_label(notation, dim_font, max_w, max_h) if notation else None
+            yield [_text_image(fitted, dim_font, COLOR_INK)] if fitted else []
+
+        gap = 2
+        for lines in notation_lines():
+            stack = head + lines
             total_h = sum(im.height for im in stack) + gap * (len(stack) - 1)
-            if total_h <= ph - 2 * pad:
+            if stack and total_h <= max_h:
                 y = py + (ph - total_h) // 2
                 for im in stack:
                     img.paste(im, (px + (pw - im.width) // 2, y), im)
                     y += im.height + gap
+                break

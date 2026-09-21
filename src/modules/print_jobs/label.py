@@ -133,17 +133,25 @@ def _render_raster(data: LabelData) -> Image.Image:
         (data.client_name, text_font),
         (f"{data.width_mm} x {data.height_mm} mm", dim_font),
     ]
+    # The first tape rides next to the piece's label, as the whole notation
+    # always did; with cantos especiales every other tape gets a line of its own
+    # (``1C CS BNL``) -- on the label's line it was the part the truncation cut.
+    tapes = [t for t in (data.notation or "").split(" · ") if t]
     label_line = data.piece_label or ""
-    if data.notation:
-        label_line = f"{label_line}  {data.notation}".strip()
+    if tapes:
+        label_line = f"{label_line}  {tapes[0]}".strip()
     if label_line:
         lines.append((label_line, text_font))
+    lines += [(tape, text_font) for tape in tapes[1:]]
 
     y = margin
     for text, font in lines:
+        line_h = _text_size(draw, "Ag", font)[1]
+        if y + line_h > height_px - margin:
+            break  # a label is a fixed size: the diagram on the right still shows every side
         fitted = _truncate(draw, text, font, text_w)
         draw.text((margin, y), fitted, font=font, fill=0)
-        y += _text_size(draw, "Ag", font)[1] + _px(1.5)
+        y += line_h + _px(1.5)
 
     return img
 

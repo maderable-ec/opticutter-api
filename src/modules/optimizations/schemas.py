@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import Annotated, List, Literal, Optional, Union
+from typing import Annotated, Dict, List, Literal, Optional, Union
 
 from pydantic import (
     Field,
@@ -123,6 +123,22 @@ class EdgeBandingSpec(CamelModel):
         if len(set(sides)) != len(sides):
             raise ValueError("sides must not contain duplicates")
         return sides
+
+
+class SpecialEdge(CamelModel):
+    """A canto especial: one side of the piece banded with a tape of its own.
+
+    What the seller types as ``2L CS BLN`` (the auto banding's own notation)
+    arrives resolved to one entry per side, each with its product: the band
+    type and the alias are the PRODUCT's, read from the catalog when the
+    payload is built, never stored here. Unlike ``EdgeBandingSpec.product_id``
+    the product is mandatory -- a special edge exists precisely to name a tape.
+    """
+
+    side: EdgeSide = Field(..., description="Nominal side (top/bottom/left/right)")
+    product_id: int = Field(
+        ..., gt=0, description="Edge banding product ID (type=edge_banding)"
+    )
 
 
 class EdgeBandingSummary(CamelModel):
@@ -471,6 +487,21 @@ class Requirement(CamelModel):
     edge_banding: Optional[EdgeBandingSpec] = Field(
         default=None, description="Optional edge banding for this piece"
     )
+    # Cantos especiales: per-side tapes that WIN over ``edge_banding`` on the
+    # sides they name, and add the side when ``edge_banding`` did not band it.
+    # The seller's input is kept as typed and the precedence is resolved when
+    # the payload is built (``side_products``): normalizing ``edge_banding.sides``
+    # instead would not survive the round trip, since the web writes the auto
+    # sides as a count (``1L`` is always ``left``). Empty is left out of the
+    # hash and of the cached payload, so no existing quote moves.
+    special_edges: List[SpecialEdge] = Field(
+        default_factory=list,
+        max_length=4,
+        description=(
+            "Per-side edge banding overriding (or adding to) `edgeBanding` on "
+            "the sides it names; at most one entry per side"
+        ),
+    )
     # The shop's own work on the piece, as the codes the workshop already knows.
     # Free text on purpose: the seller types what the bander reads, and this
     # system has no opinion on what a code means. They are production data, not
@@ -506,6 +537,38 @@ class Requirement(CamelModel):
             value = value.strip()
             return value or None
         return value
+
+    @field_validator("special_edges")
+    @classmethod
+    def _one_special_edge_per_side(cls, edges: List[SpecialEdge]) -> List[SpecialEdge]:
+        if len({e.side for e in edges}) != len(edges):
+            raise ValueError("specialEdges must not repeat a side")
+        return edges
+
+    def side_products(self) -> Dict[str, Optional[int]]:
+        """The tape each banded side actually gets: ``{side: product_id}``.
+
+        The single definition of the precedence: a canto especial wins on its
+        side, ``edge_banding`` keeps the rest of its sides (its ``product_id``
+        may be ``None`` — geometry-only banding), and a special side the auto
+        banding did not cover is added. Sides come in ``edge_banding.sides``
+        order first, then the added ones: for a piece with no special edge that
+        is exactly the order every length sum ran in before they existed.
+        """
+        special = {e.side.value: e.product_id for e in self.special_edges}
+        sides: Dict[str, Optional[int]] = {}
+        if self.edge_banding is not None:
+            for side in self.edge_banding.sides:
+                sides[side.value] = special.get(
+                    side.value, self.edge_banding.product_id
+                )
+        for side, pid in special.items():
+            sides.setdefault(side, pid)
+        return sides
+
+    def side_length(self, side: str) -> int:
+        """Length of a nominal side: ``width`` for top/bottom, ``height`` else."""
+        return self.width if side in ("top", "bottom") else self.height
 
 
 # The workshop codes of a requirement, in the order the documents print them.

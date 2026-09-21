@@ -21,7 +21,7 @@ from src.cutting import (
 )
 from src.modules.clients.model import ClientModel
 from src.modules.optimizations.engine_info import backend_name
-from src.modules.optimizations.labels import edge_banding_notation
+from src.modules.optimizations.labels import SPECIAL_SIDE_ORDER, edge_notation
 from src.modules.optimizations.materials import MaterialResolver, ResolvedMaterial
 from src.modules.optimizations.parallel import (
     PoolJob,
@@ -45,11 +45,11 @@ from src.modules.optimizations.pricing import build_pricing
 from src.modules.optimizations.schemas import (
     WORKSHOP_CODE_FIELDS,
     EdgeBandingSpec,
-    EdgeSide,
     OptimizeRequest,
     OptimizeResponse,
     PricingSummary,
     Requirement,
+    SpecialEdge,
 )
 from src.modules.optimizations.summary import build_materials_summary
 from src.modules.optimizations.whole_boards import apply_whole_boards
@@ -82,6 +82,20 @@ CCW_ROTATION = {v: k for k, v in _CW_ROTATION.items()}
 _SIDE_ORDER = ("top", "bottom", "left", "right")
 
 
+def _requirement_dump(requirement: Requirement) -> dict:
+    """A requirement as the hash and the cached payload both see it.
+
+    The workshop codes are always left out, and ``special_edges`` whenever it is
+    empty -- the device ``skip_trim`` uses in ``_compute_hash``: a piece with no
+    canto especial dumps byte-identically to what it did before the field
+    existed, so the deploy invalidated no Redis entry.
+    """
+    exclude = set(WORKSHOP_CODE_FIELDS)
+    if not requirement.special_edges:
+        exclude.add("special_edges")
+    return requirement.model_dump(mode="json", exclude=exclude)
+
+
 def hashable_requirements(requirements: Sequence[Requirement]) -> List[dict]:
     """The requirements as the optimization hash sees them: without the codes.
 
@@ -90,11 +104,9 @@ def hashable_requirements(requirements: Sequence[Requirement]) -> List[dict]:
     rather than defaulted, which is also what keeps the canonical JSON of every
     quote byte-identical to the one this hash produced before the codes existed
     -- a new ``null`` key would have invalidated every Redis entry on deploy.
+    The special edges ARE in (they move metres and money), but only when set.
     """
-    return [
-        r.model_dump(mode="json", exclude=set(WORKSHOP_CODE_FIELDS))
-        for r in requirements
-    ]
+    return [_requirement_dump(r) for r in requirements]
 
 
 def _exact_config() -> ExactConfig:
@@ -475,21 +487,24 @@ class OptimizationService:
         """
         eb_products: Dict[int, ProductModel] = {}
         for req in requirements:
-            if req.edge_banding is None:
-                continue
-            pid = req.edge_banding.product_id
-            # Geometry-only edge banding (no product): contributes length but isn't
-            # resolved or charged until a product is assigned at quoting time.
-            if pid is None or pid in eb_products:
-                continue
-            product = self.product_service.get(pid)
-            if product is None:
-                raise EntityNotFoundError("Product", pid)
-            if product.type != ProductType.EDGE_BANDING.value:
-                raise BusinessRuleError(
-                    f"El producto {product.code} no es un tapacanto"
-                )
-            eb_products[pid] = product
+            # The auto tape and every canto especial get the same check: a
+            # special edge's product is just as able to be a board by mistake.
+            pids = [req.edge_banding.product_id] if req.edge_banding else []
+            pids += [e.product_id for e in req.special_edges]
+            for pid in pids:
+                # Geometry-only edge banding (no product): contributes length but
+                # isn't resolved or charged until a product is assigned at
+                # quoting time.
+                if pid is None or pid in eb_products:
+                    continue
+                product = self.product_service.get(pid)
+                if product is None:
+                    raise EntityNotFoundError("Product", pid)
+                if product.type != ProductType.EDGE_BANDING.value:
+                    raise BusinessRuleError(
+                        f"El producto {product.code} no es un tapacanto"
+                    )
+                eb_products[pid] = product
         return eb_products
 
     def _compute_hash(
@@ -632,7 +647,7 @@ class OptimizationService:
 
     def _build_pieces(
         self, reqs: List[Requirement]
-    ) -> Tuple[List[Piece], Dict[str, EdgeBandingSpec], Dict[str, float]]:
+    ) -> Tuple[List[Piece], Dict[str, Requirement], Dict[str, float]]:
         """Expands the requirements into domain pieces with a unique id per instance.
 
         The piece id is the identity used to attribute edge banding and length to
@@ -645,9 +660,11 @@ class OptimizationService:
         ``(pieces, edge_map, net_map)`` with the maps indexed by that unique id; the
         net length is per instance (``width`` for ``top/bottom``, ``height`` for
         ``left/right``, independent of rotation), not multiplied by quantity.
+        ``edge_map`` holds the whole requirement of every banded piece, since
+        its banding is two fields (``edge_banding`` + ``special_edges``).
         """
         pieces: List[Piece] = []
-        edge_map: Dict[str, EdgeBandingSpec] = {}
+        edge_map: Dict[str, Requirement] = {}
         net_map: Dict[str, float] = {}
         for i, uid in piece_instance_ids([(p.label, p.quantity) for p in reqs]):
             p = reqs[i]
@@ -664,16 +681,17 @@ class OptimizationService:
                 )
             except ValueError as e:
                 raise ValidationError(f"Pieza {i} tiene valores inválidos: {e}")
-            if p.edge_banding is not None:
-                edge_map[uid] = p.edge_banding
-                net_map[uid] = sum(
-                    p.width if side in (EdgeSide.top, EdgeSide.bottom) else p.height
-                    for side in p.edge_banding.sides
-                )
+            if p.edge_banding is not None or p.special_edges:
+                edge_map[uid] = p
+                net_map[uid] = sum(p.side_length(side) for side in p.side_products())
         return pieces, edge_map, net_map
 
     def _geometric_edges(
-        self, spec: EdgeBandingSpec, eb_products: Dict[int, ProductModel], rotated: bool
+        self,
+        spec: Optional[EdgeBandingSpec],
+        eb_products: Dict[int, ProductModel],
+        rotated: bool,
+        special: Sequence[SpecialEdge] = (),
     ) -> dict:
         """Translates the nominal sides to the geometric sides of the drawn piece.
 
@@ -689,16 +707,33 @@ class OptimizationService:
         requested measurements and the ``L``/``C`` notation refer to). A consumer
         that shows a piece as the client ordered it wants the latter — deriving
         it from ``sides`` means re-implementing this rotation convention.
+
+        Cantos especiales (``special``) add their sides to both frames, and each
+        one ships in ``special`` with its own product fields, since a side can
+        carry a tape the rest of the piece does not. The top-level product
+        fields keep describing the AUTO tape, and go ``None`` when every one of
+        its sides went special. With no special edge the dict is exactly the
+        one this produced before they existed -- same keys, same order.
         """
-        nominal = {s.value for s in spec.sides}
-        sides = {_CW_ROTATION[s] for s in nominal} if rotated else nominal
+        turn = _CW_ROTATION.get if rotated else (lambda s: s)
+        auto = {s.value for s in spec.sides} if spec is not None else set()
+        taken = {e.side.value for e in special}
+        nominal = auto | taken
+        sides = {turn(s) for s in nominal}
         geo = [s for s in _SIDE_ORDER if s in sides]
-        product = eb_products.get(spec.product_id)
+        pid = spec.product_id if spec is not None and auto - taken else None
+        product = eb_products.get(pid)
         attrs = (product.attributes if product else None) or {}
-        return {
+        special_edges = [
+            self._special_edge(e, eb_products, turn(e.side.value))
+            for e in sorted(
+                special, key=lambda e: SPECIAL_SIDE_ORDER.index(e.side.value)
+            )
+        ]
+        edges = {
             "sides": geo,
             "nominal_sides": [s for s in _SIDE_ORDER if s in nominal],
-            "product_id": spec.product_id,
+            "product_id": pid,
             "code": product.code if product else None,
             "color": attrs.get("color"),
             # Canonical type (``Soft``/``Hard``) to differentiate the band in the
@@ -715,17 +750,44 @@ class OptimizationService:
             # ``attributes`` is persisted in camelCase → ``bandType``; the alias
             # is a column of its own (the sync rewrites the bag wholesale, so it
             # could not survive there).
-            "notation": edge_banding_notation(
-                nominal,
+            "notation": edge_notation(
+                auto,
                 attrs.get("bandType"),
                 (product.alias if product else None),
+                # The notation speaks the piece's own frame, like ``auto``.
+                [{**e, "side": e["nominal_side"]} for e in special_edges],
             ),
+        }
+        if special_edges:
+            edges["special"] = special_edges
+        return edges
+
+    @staticmethod
+    def _special_edge(
+        edge: SpecialEdge, eb_products: Dict[int, ProductModel], geometric_side: str
+    ) -> dict:
+        """One canto especial of a placed piece, in both frames and with its tape.
+
+        Carries the same product fields as the top level of ``edges`` (see
+        ``_geometric_edges``) so a consumer reads a side's tape the same way
+        whether it is the auto one or not.
+        """
+        product = eb_products.get(edge.product_id)
+        attrs = (product.attributes if product else None) or {}
+        return {
+            "side": geometric_side,
+            "nominal_side": edge.side.value,
+            "product_id": edge.product_id,
+            "code": product.code if product else None,
+            "color": attrs.get("color"),
+            "band_type": attrs.get("bandType"),
+            "alias": (product.alias if product else None),
         }
 
     def _enrich_layout_pieces(
         self,
         layout_dict: dict,
-        edge_map: Dict[str, EdgeBandingSpec],
+        edge_map: Dict[str, Requirement],
         eb_products: Dict[int, ProductModel],
     ) -> None:
         """Adds ``edges`` (geometric banded sides) to each placed piece.
@@ -734,11 +796,14 @@ class OptimizationService:
         the lookup uses the exact ``piece_id`` of the placed piece.
         """
         for placed in layout_dict.get("placed_pieces", []):
-            spec = edge_map.get(str(placed.get("piece_id", "")))
-            if spec is None:
+            req = edge_map.get(str(placed.get("piece_id", "")))
+            if req is None:
                 continue
             placed["edges"] = self._geometric_edges(
-                spec, eb_products, bool(placed.get("rotated"))
+                req.edge_banding,
+                eb_products,
+                bool(placed.get("rotated")),
+                req.special_edges,
             )
 
     def _build_edge_bandings_summary(
@@ -754,18 +819,21 @@ class OptimizationService:
         independent of rotation. The configured waste factor is applied and the
         result is billed exactly (net + waste), with no rounding up to a whole
         meter.
+
+        Each side is billed to the tape it actually gets (``side_products``: a
+        canto especial wins on its side), grouped per product within the piece
+        before multiplying by the quantity -- for a piece with no special edge
+        that is one group, summed in the same order as always, so its rows
+        come out identical.
         """
         waste = waste_factor
         net_mm: Dict[Optional[int], float] = defaultdict(float)
         for req in requirements:
-            spec = req.edge_banding
-            if spec is None:
-                continue
-            per_piece = sum(
-                req.width if side in (EdgeSide.top, EdgeSide.bottom) else req.height
-                for side in spec.sides
-            )
-            net_mm[spec.product_id] += per_piece * req.quantity
+            per_piece: Dict[Optional[int], int] = defaultdict(int)
+            for side, pid in req.side_products().items():
+                per_piece[pid] += req.side_length(side)
+            for pid, mm in per_piece.items():
+                net_mm[pid] += mm * req.quantity
 
         summary: List[dict] = []
         total_cost = 0.0
@@ -810,7 +878,8 @@ class OptimizationService:
         column. ``band_type`` and ``alias`` live in the product's attributes,
         not in the ``EdgeBandingSpec``; they're injected here so the documents can
         build the edge notation (``2L1C CS CSH``) without re-resolving the
-        product at render time.
+        product at render time. Each canto especial gets the same two fields,
+        and ``special_edges`` is present only when the piece has one.
         """
         rm = resolved.get(req.material_key)
         material_label = (rm.code or rm.name) if rm else None
@@ -818,7 +887,7 @@ class OptimizationService:
             # The workshop codes never enter the cached payload: they are not
             # in the hash, so a cache hit would hand back another request's.
             # The order adds its own (``OrderService.create``).
-            **req.model_dump(mode="json", exclude=set(WORKSHOP_CODE_FIELDS)),
+            **_requirement_dump(req),
             "product_code": material_label or req.material_key,
             "product_name": (rm.name if rm else None),
         }
@@ -829,6 +898,11 @@ class OptimizationService:
             # is its own column.
             data["edge_banding"]["band_type"] = attrs.get("bandType")
             data["edge_banding"]["alias"] = product.alias if product else None
+        for edge in data.get("special_edges") or []:
+            product = eb_products.get(edge["product_id"])
+            attrs = (product.attributes if product else None) or {}
+            edge["band_type"] = attrs.get("bandType")
+            edge["alias"] = product.alias if product else None
         return data
 
     @staticmethod

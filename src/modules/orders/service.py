@@ -94,6 +94,21 @@ def _has_payment(payment: Optional[OrderPaymentInput]) -> bool:
     )
 
 
+def _piece_edges(requirement: dict) -> Optional[dict]:
+    """What ``order_pieces.edges`` freezes for a requirement of the snapshot.
+
+    The auto banding as it always was, plus ``special_edges`` when the piece
+    has a canto especial. A piece banded ONLY with special edges still gets the
+    auto keys, empty, so every row keeps one shape. ``None`` when unbanded.
+    """
+    auto = requirement.get("edge_banding")
+    special = requirement.get("special_edges")
+    if not special:
+        return auto
+    base = auto or {"sides": [], "product_id": None, "band_type": None, "alias": None}
+    return {**base, "special_edges": special}
+
+
 class OrderService(BranchScopedMixin):
     """Creates orders (immutable snapshot), manages states and anti-abuse.
 
@@ -390,7 +405,7 @@ class OrderService(BranchScopedMixin):
                 quantity=r["quantity"],
                 priority=r.get("priority", 0),
                 can_rotate=r.get("can_rotate", True),
-                edges=r.get("edge_banding"),
+                edges=_piece_edges(r),
                 **{f: r.get(f) for f in WORKSHOP_CODE_FIELDS},
             )
             for r in snapshot["requirements"]

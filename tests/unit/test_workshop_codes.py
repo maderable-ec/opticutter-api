@@ -109,6 +109,8 @@ def test_the_codes_never_reach_the_hash():
     # Excluded, not emitted as null: the dump is exactly what it was before the
     # fields existed, so every Redis entry survives the deploy.
     legacy = _req().model_dump(mode="json")
+    # Younger than the codes and left out the same way while empty.
+    legacy.pop("special_edges")
     for field in WORKSHOP_CODE_FIELDS:
         legacy.pop(field)
         assert field not in with_codes[0]

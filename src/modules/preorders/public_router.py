@@ -10,6 +10,7 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Request
 
+from src.modules.optimizations.labels import edge_notation
 from src.modules.optimizations.service import CCW_ROTATION
 from src.modules.preorders.model import PreOrderModel, PreOrderStatus
 from src.modules.preorders.review_service import (
@@ -27,6 +28,7 @@ from src.modules.preorders.schemas import (
     ReviewPreOrderResponse,
     ReviewServiceResponse,
     ReviewSheet,
+    ReviewSpecialEdge,
 )
 from src.shared.responses import ERROR_RESPONSES, DataResponse, ok
 
@@ -63,22 +65,56 @@ def _edge_banding_index(payload: dict) -> dict:
     }
 
 
+def _to_review_special(
+    special: Optional[list], eb_by_id: dict
+) -> List[ReviewSpecialEdge]:
+    """The cantos especiales of a piece, named the way its auto tape is.
+
+    Takes either shape: the requirement's (``side`` nominal) and the placed
+    piece's (``side`` geometric + ``nominal_side``).
+    """
+    return [
+        ReviewSpecialEdge(
+            side=e["side"],
+            nominal_side=e.get("nominal_side") or e["side"],
+            band_type=e.get("band_type"),
+            product_name=(eb_by_id.get(e.get("product_id")) or {}).get("product_name"),
+            color=(eb_by_id.get(e.get("product_id")) or {}).get("color"),
+        )
+        for e in special or []
+    ]
+
+
 def _to_review_cut_edges(
-    edges: Optional[dict], eb_by_id: dict
+    requirement: dict, eb_by_id: dict
 ) -> Optional[ReviewCutPieceEdges]:
     """Projects a cut-list piece's banding; drops the catalog identifiers.
 
     No rotation here, unlike ``_to_review_edges``: these sides come from the
-    requirement's own ``EdgeBandingSpec`` and are nominal already.
+    requirement's own ``EdgeBandingSpec`` and are nominal already. A canto
+    especial adds its side to ``sides`` and takes it from the auto tape, whose
+    name is dropped when it no longer bands any side.
     """
-    if not edges:
+    edges = requirement.get("edge_banding") or {}
+    special = requirement.get("special_edges") or []
+    if not edges and not special:
         return None
-    summary = eb_by_id.get(edges.get("product_id")) or {}
+    taken = {e["side"] for e in special}
+    auto = [s for s in edges.get("sides") or [] if s not in taken]
+    summary = (eb_by_id.get(edges.get("product_id")) or {}) if auto else {}
     return ReviewCutPieceEdges(
-        sides=list(edges.get("sides") or []),
-        band_type=edges.get("band_type"),
+        sides=auto + [e["side"] for e in special if e["side"] not in auto],
+        band_type=edges.get("band_type") if auto else None,
         product_name=summary.get("product_name"),
         color=summary.get("color"),
+        notation=edge_notation(
+            edges.get("sides") or [],
+            edges.get("band_type"),
+            edges.get("alias"),
+            special,
+        )
+        or None,
+        special=_to_review_special(special, eb_by_id),
     )
 
 
@@ -109,6 +145,7 @@ def _to_review_edges(
         band_type=edges.get("band_type"),
         notation=edges.get("notation"),
         product_name=summary.get("product_name"),
+        special=_to_review_special(edges.get("special"), eb_by_id),
     )
 
 
@@ -214,7 +251,7 @@ def _to_review_response(
             height=r["height"],
             width=r["width"],
             quantity=r["quantity"],
-            edges=_to_review_cut_edges(r.get("edge_banding"), eb_by_id),
+            edges=_to_review_cut_edges(r, eb_by_id),
         )
         for r in payload.get("requirements", [])
     ]

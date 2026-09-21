@@ -712,3 +712,207 @@ def test_the_diagram_renders_soft_and_hard_bands(client, db_session):
     packet = client.get(f"/api/v1/orders/{order['id']}/document")
     assert packet.status_code == 200
     assert len(packet.content) > 1000
+
+
+# --------------------------------------------------------------------------- #
+# Cantos especiales: per-side tapes over the auto banding
+# --------------------------------------------------------------------------- #
+def _with_special(requirement, *special):
+    """``special`` = ``(side, productId)`` pairs."""
+    return {
+        **requirement,
+        "specialEdges": [{"side": side, "productId": pid} for side, pid in special],
+    }
+
+
+def test_a_special_edge_bills_its_side_to_its_own_tape(client):
+    """``2L1C`` on the soft tape with ``L1`` special: the soft tape keeps one
+    long side and the short one, the hard tape bills the long side it took."""
+    c = _create_client(client)
+    b = _create_board(client)
+    soft = _create_edge_banding(client, code="SOFT", band_type="Soft", alias="CSH")
+    hard = _create_edge_banding(
+        client, code="HARD", price=3.0, band_type="Hard", alias="BLN"
+    )
+
+    # height=500, width=1000: left/right are 500, top/bottom 1000.
+    requirement = _with_special(
+        _requirement(soft["id"], ["left", "right", "top"]), ("left", hard["id"])
+    )
+    resp = client.post(
+        "/api/v1/optimize/",
+        json={
+            "clientId": c["id"],
+            "materials": _materials(b["id"]),
+            "requirements": [requirement],
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+
+    net = {e["productCode"]: e["netLinearM"] for e in data["edgeBandingsSummary"]}
+    assert net == {"SOFT": pytest.approx(1.5), "HARD": pytest.approx(0.5)}
+    assert data["totalEdgeBandingLinearM"] == pytest.approx(2.0)
+
+    [placed] = data["layouts"][0]["placedPieces"]
+    assert placed["edges"]["notation"] == "1L1C CS CSH · 1L CD BLN"
+    assert placed["edges"]["special"][0]["nominal_side"] == "left"
+    assert placed["edges"]["special"][0]["band_type"] == "Hard"
+
+
+def test_a_special_edge_adds_a_side_the_auto_banding_left_bare(client):
+    c = _create_client(client)
+    b = _create_board(client)
+    soft = _create_edge_banding(client, code="SOFT", band_type="Soft")
+    hard = _create_edge_banding(client, code="HARD", band_type="Hard")
+
+    requirement = _with_special(
+        _requirement(soft["id"], ["top"]), ("bottom", hard["id"])
+    )
+    data = client.post(
+        "/api/v1/optimize/",
+        json={
+            "clientId": c["id"],
+            "materials": _materials(b["id"]),
+            "requirements": [requirement],
+        },
+    ).json()["data"]
+
+    net = {e["productCode"]: e["netLinearM"] for e in data["edgeBandingsSummary"]}
+    assert net == {"SOFT": pytest.approx(1.0), "HARD": pytest.approx(1.0)}
+
+
+@pytest.mark.parametrize(
+    "special, status",
+    [
+        ([{"side": "left", "productId": 99999}], 404),
+        ([{"side": "left"}], 422),
+        ([{"side": "left", "productId": 1}, {"side": "left", "productId": 1}], 422),
+    ],
+)
+def test_special_edges_are_validated(client, special, status):
+    c = _create_client(client)
+    b = _create_board(client)
+    eb = _create_edge_banding(client)
+    resp = client.post(
+        "/api/v1/optimize/",
+        json={
+            "clientId": c["id"],
+            "materials": _materials(b["id"]),
+            "requirements": [
+                {**_requirement(eb["id"], ["top"]), "specialEdges": special}
+            ],
+        },
+    )
+    assert resp.status_code == status
+
+
+def test_a_board_is_not_a_special_edge(client):
+    c = _create_client(client)
+    b = _create_board(client)
+    eb = _create_edge_banding(client)
+    resp = client.post(
+        "/api/v1/optimize/",
+        json={
+            "clientId": c["id"],
+            "materials": _materials(b["id"]),
+            "requirements": [
+                _with_special(_requirement(eb["id"], ["top"]), ("left", b["id"]))
+            ],
+        },
+    )
+    assert resp.status_code == 422
+    assert "no es un tapacanto" in resp.json()["errors"][0]["message"].lower()
+
+
+def test_an_order_banded_only_with_special_edges_bands_and_bills(client, db_session):
+    """No auto banding at all: the piece is still banded (the activity exists
+    and counts it), its tape is billed, and the order piece freezes it."""
+    c = _create_client(client)
+    b = _create_board(client)
+    hard = _create_edge_banding(
+        client, code="HARD", price=3.0, band_type="Hard", alias="BLN"
+    )
+    requirement = {
+        k: v for k, v in _requirement(None, ["top"]).items() if k != "edgeBanding"
+    }
+    data = _mint_order(
+        client,
+        db_session,
+        {
+            "clientId": c["id"],
+            "branchId": 1,
+            "materials": _materials(b["id"]),
+            "requirements": [_with_special(requirement, ("left", hard["id"]))],
+        },
+    )
+
+    lines = {line["productCode"]: line for line in data["lines"]}
+    assert lines["HARD"]["unitPriceSnapshot"] == 3.0
+
+    edges = data["pieces"][0]["edges"]
+    assert edges["sides"] == [] and edges["product_id"] is None
+    assert edges["special_edges"] == [
+        {"side": "left", "product_id": hard["id"], "band_type": "Hard", "alias": "BLN"}
+    ]
+    assert "banding" in {a["type"] for a in data["activities"]}
+
+    plan = client.get(f"/api/v1/orders/{data['id']}/cutting-plan").json()["data"]
+    [banding] = [a for a in plan["activities"] if a["type"] == "banding"]
+    assert banding["progress"]["totalPieces"] == 1
+
+    document = client.get(f"/api/v1/orders/{data['id']}/document")
+    assert document.status_code == 200
+
+
+def test_the_order_document_renders_mixed_bands(client, db_session):
+    c = _create_client(client)
+    b = _create_board(client)
+    soft = _create_edge_banding(client, code="SOFT", band_type="Soft", alias="CSH")
+    hard = _create_edge_banding(client, code="HARD", band_type="Hard", alias="BLN")
+    order = _mint_order(
+        client,
+        db_session,
+        {
+            "clientId": c["id"],
+            "branchId": 1,
+            "materials": _materials(b["id"]),
+            "requirements": [
+                _with_special(
+                    _requirement(soft["id"], ["left", "right", "top", "bottom"]),
+                    ("left", hard["id"]),
+                    ("bottom", hard["id"]),
+                )
+            ],
+        },
+    )
+    snapshot = order["pieces"][0]["edges"]
+    assert [e["side"] for e in snapshot["special_edges"]] == ["left", "bottom"]
+    packet = client.get(f"/api/v1/orders/{order['id']}/document")
+    assert packet.status_code == 200
+    assert len(packet.content) > 1000
+
+
+def test_a_preorder_keeps_its_special_edges(client):
+    c = _create_client(client)
+    b = _create_board(client)
+    soft = _create_edge_banding(client, code="SOFT", band_type="Soft")
+    hard = _create_edge_banding(client, code="HARD", band_type="Hard")
+    resp = client.post(
+        "/api/v1/preorders/",
+        json={
+            "clientId": c["id"],
+            "branchId": 1,
+            "materials": _materials(b["id"]),
+            "requirements": [
+                _with_special(_requirement(soft["id"], ["top"]), ("left", hard["id"]))
+            ],
+        },
+    )
+    assert resp.status_code == 201
+    created = resp.json()["data"]
+
+    read = client.get(f"/api/v1/preorders/{created['id']}").json()["data"]
+    assert read["requirements"][0]["specialEdges"] == [
+        {"side": "left", "productId": hard["id"]}
+    ]
