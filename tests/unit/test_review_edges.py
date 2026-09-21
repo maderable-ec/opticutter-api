@@ -50,7 +50,7 @@ def test_keeps_both_frames_and_drops_the_catalog_ids():
 def test_no_banding_projects_to_none():
     assert _to_review_edges(None, rotated=False, eb_by_id=_SUMMARY) is None
     assert _to_review_edges({}, rotated=True, eb_by_id=_SUMMARY) is None
-    assert _to_review_cut_edges(None, _SUMMARY) is None
+    assert _to_review_cut_edges({"edge_banding": None}, _SUMMARY) is None
     assert _to_review_cut_edges({}, _SUMMARY) is None
 
 
@@ -58,15 +58,19 @@ def test_cut_list_edges_are_nominal_and_named():
     """The cut list never rotates: these sides come from the requirement itself."""
     out = _to_review_cut_edges(
         {
-            "sides": ["left", "top"],
-            "product_id": 72,
-            "band_type": "Soft",
-            "alias": "GRT",
+            "edge_banding": {
+                "sides": ["left", "top"],
+                "product_id": 72,
+                "band_type": "Soft",
+                "alias": "GRT",
+            }
         },
         _SUMMARY,
     )
 
     assert out.sides == ["left", "top"]
+    assert out.notation == "1L1C CS GRT"
+    assert out.special == []
     assert out.band_type == "Soft"
     assert out.product_name == "TAPACANTO GRIS RATÓN 22X0.45MM"
     assert out.color == "Gris Ratón"
@@ -77,7 +81,9 @@ def test_cut_list_edges_are_nominal_and_named():
 
 def test_an_unpriced_tape_still_projects():
     """Geometry-only banding has no ``product_id``, so the summary has no row for it."""
-    out = _to_review_cut_edges({"sides": ["left"], "product_id": None}, _SUMMARY)
+    out = _to_review_cut_edges(
+        {"edge_banding": {"sides": ["left"], "product_id": None}}, _SUMMARY
+    )
 
     assert out.sides == ["left"]
     assert out.product_name is None
@@ -122,3 +128,78 @@ def test_nominal_sides_are_recovered_from_a_cached_payload(
 
     assert out.sides == geometric
     assert out.nominal_sides == expected
+
+
+# A second tape the summary knows, for the cantos especiales.
+_WITH_SPECIAL = {
+    **_SUMMARY,
+    90: {"product_name": "TAPACANTO BLANCO 22X2MM", "color": "Blanco"},
+}
+
+
+def test_a_special_edge_takes_its_side_from_the_auto_tape():
+    """The cut list names the auto tape on the sides it kept and each canto
+    especial on its own side; the notation says which long side went special."""
+    out = _to_review_cut_edges(
+        {
+            "edge_banding": {
+                "sides": ["left", "right", "top"],
+                "product_id": 72,
+                "band_type": "Soft",
+                "alias": "GRT",
+            },
+            "special_edges": [
+                {"side": "left", "product_id": 90, "band_type": "Hard", "alias": "BLN"}
+            ],
+        },
+        _WITH_SPECIAL,
+    )
+
+    assert out.sides == ["right", "top", "left"]
+    assert out.product_name == "TAPACANTO GRIS RATÓN 22X0.45MM"
+    assert out.notation == "1L1C CS GRT · 1L CD BLN"
+    [special] = out.special
+    assert special.side == "left" and special.nominal_side == "left"
+    assert special.band_type == "Hard"
+    assert special.product_name == "TAPACANTO BLANCO 22X2MM"
+
+
+def test_a_piece_banded_only_with_special_edges_names_no_auto_tape():
+    out = _to_review_cut_edges(
+        {
+            "edge_banding": {"sides": ["left"], "product_id": 72, "band_type": "Soft"},
+            "special_edges": [
+                {"side": "left", "product_id": 90, "band_type": "Hard", "alias": "BLN"}
+            ],
+        },
+        _WITH_SPECIAL,
+    )
+
+    assert out.sides == ["left"]
+    assert out.band_type is None and out.product_name is None
+    assert out.notation == "1L CD BLN"
+
+
+def test_the_diagram_projects_the_special_edges_in_both_frames():
+    edges = _edges(
+        sides=["top", "right"],
+        nominal_sides=["left", "top"],
+        notation="1C CS · 1L CD BLN",
+        special=[
+            {
+                "side": "top",
+                "nominal_side": "left",
+                "product_id": 90,
+                "code": "BLN-2",
+                "color": "Blanco",
+                "band_type": "Hard",
+                "alias": "BLN",
+            }
+        ],
+    )
+    out = _to_review_edges(edges, rotated=True, eb_by_id=_WITH_SPECIAL)
+
+    [special] = out.special
+    assert (special.side, special.nominal_side) == ("top", "left")
+    assert special.product_name == "TAPACANTO BLANCO 22X2MM"
+    assert out.notation == "1C CS · 1L CD BLN"

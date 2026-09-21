@@ -223,6 +223,23 @@ class ReviewServiceResponse(CamelModel):
     line_total: float
 
 
+class ReviewSpecialEdge(CamelModel):
+    """A canto especial: one side carrying a tape of its own.
+
+    ``side`` is in the same frame as the ``sides`` of the object holding it
+    (nominal on the cut list, geometric on the diagram); ``nominal_side`` is
+    always the piece's own, the one the ``L1``/``C2`` token names.
+    """
+
+    side: str = Field(..., description="top | bottom | left | right")
+    nominal_side: str = Field(..., description="The side before rotation")
+    band_type: Optional[str] = Field(
+        default=None, description="Canonical band type (Soft/Hard)"
+    )
+    product_name: Optional[str] = None
+    color: Optional[str] = None
+
+
 class ReviewCutPieceEdges(CamelModel):
     """Edge banding of a cut-list piece, without the catalog identifiers.
 
@@ -243,6 +260,13 @@ class ReviewCutPieceEdges(CamelModel):
     )
     product_name: Optional[str] = None
     color: Optional[str] = None
+    notation: Optional[str] = Field(
+        default=None, description="Workshop notation, e.g. '1L1C CS · 1L CD BLN'"
+    )
+    special: List[ReviewSpecialEdge] = Field(
+        default_factory=list,
+        description="Cantos especiales: sides whose tape is not the one above",
+    )
 
 
 class ReviewPieceResponse(CamelModel):
@@ -283,6 +307,10 @@ class ReviewPieceEdges(CamelModel):
     product_name: Optional[str] = Field(
         default=None,
         description="Tape the piece carries, joined in from the banding summary",
+    )
+    special: List[ReviewSpecialEdge] = Field(
+        default_factory=list,
+        description="Cantos especiales: sides whose tape is not the one above",
     )
 
 

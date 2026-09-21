@@ -1,6 +1,6 @@
 """Workshop notation for a piece: its edge banding (tapacantos) and its codes."""
 
-from typing import Iterable, Mapping, Optional
+from typing import Dict, Iterable, List, Mapping, Optional, Tuple
 
 # Edge-type abbreviation: Soft→CS, Hard→CD (BandType canonical values).
 _BAND_TYPE_ABBR = {"Soft": "CS", "Hard": "CD"}
@@ -19,9 +19,9 @@ def edge_banding_notation(
     diagram, neither of which carries a banding summary table.
 
     ``alias`` is a separate, purely cosmetic field (max 20 chars) — it plays no
-    role in board↔tapacanto coordination, which still uses the product's
-    ``family`` attribute. It's uppercased for the tag, which is free: nothing
-    downstream depends on its case.
+    role in board↔tapacanto coordination, which runs on ``products.family_id``.
+    It's uppercased for the tag, which is free: nothing downstream depends on
+    its case.
 
     Classifies by the **nominal** side measurement: ``left``/``right`` are the
     height sides (first dimension) → ``L`` (largo/long); ``top``/``bottom`` are
@@ -52,6 +52,48 @@ def edge_banding_notation(
     tag = (alias or "").strip().upper()
     suffixes = [s for s in (_BAND_TYPE_ABBR.get(band_type), tag) if s]
     return " ".join([parts, *suffixes])
+
+
+# Order the cantos especiales are grouped and written in: the long sides first,
+# then the short ones, each pair in the order the web fills it (``1L`` is
+# ``left``, ``1C`` is ``top``, as in its ``NOTATION_TO_SIDES``).
+SPECIAL_SIDE_ORDER = ("left", "right", "top", "bottom")
+
+
+def edge_notation(
+    sides: Iterable[str],
+    band_type: Optional[str] = None,
+    alias: Optional[str] = None,
+    special: Iterable[Mapping[str, Optional[str]]] = (),
+) -> str:
+    """The whole banding of a piece: the auto part, then each special tape.
+
+    ``1L1C CS CSH · 1L CD BLN``. The cantos especiales speak the same notation
+    as the auto banding, which is also how the seller types them: they are
+    grouped by tape (band type + alias) and each group is written with
+    ``edge_banding_notation`` -- two long sides on one tape read ``2L CD BLN``,
+    two different tapes on them read ``1L CD BLN · 1L CS CHM``. The auto part
+    counts only the sides no special edge took, so a ``2L1C`` whose long side
+    went special reads ``1L1C``. ``special`` holds mappings with ``side``
+    (nominal), ``band_type`` and ``alias``. With no special edge this IS
+    ``edge_banding_notation``, byte for byte, which is what keeps every existing
+    document and label unchanged.
+    """
+    special = list(special or ())
+    if not special:
+        return edge_banding_notation(sides, band_type, alias)
+    taken = {s["side"] for s in special}
+    auto = [s for s in (sides or []) if s not in taken]
+    tapes: Dict[Tuple[Optional[str], Optional[str]], List[str]] = {}
+    for edge in sorted(special, key=lambda s: SPECIAL_SIDE_ORDER.index(s["side"])):
+        tapes.setdefault((edge.get("band_type"), edge.get("alias")), []).append(
+            edge["side"]
+        )
+    parts = [edge_banding_notation(auto, band_type, alias)] + [
+        edge_banding_notation(group, tape_type, tape_alias)
+        for (tape_type, tape_alias), group in tapes.items()
+    ]
+    return " · ".join(p for p in parts if p)
 
 
 # How each workshop code is named where it is printed, in printing order. Keyed
