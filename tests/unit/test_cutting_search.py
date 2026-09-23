@@ -1058,3 +1058,52 @@ def test_barroco_dorado_reaches_commercial_parity_at_kerf_4():
     )
     cost = sum(layout.material.cost_per_unit for layout in layouts)
     assert cost == pytest.approx(BARROCO_COMMERCIAL_COST, abs=0.01)
+
+
+# --- Pre-order 132: the partition the beam cannot see -------------------------
+#
+# 54 pieces of MDP RH IBIZA LINEAL 2.80x2.07 that the engine billed as 3 whole
+# boards. They fit on 2 + a half, which ``lanes.py`` finds by asking the
+# question the beam cannot: which full-height lanes go on which sheet.
+PREORDER_132 = [
+    (620, 2625, 3, False),
+    (220, 2565, 3, False),
+    (222, 607, 30, False),
+    (760, 120, 3, False),
+    (600, 120, 3, False),
+    (222, 622, 6, False),
+    (622, 222, 6, True),
+]
+IBIZA_PRICE = 88.478261
+IBIZA_FULL = BinSpec(
+    key="board", width=2070, height=2800, thickness=15, cost_per_unit=IBIZA_PRICE
+)
+IBIZA_HALF = BinSpec(
+    key="board",
+    width=1035,
+    height=2800,
+    thickness=15,
+    cost_per_unit=IBIZA_PRICE / 2 * 1.05,
+    half_board=True,
+)
+
+
+@pytest.mark.slow
+def test_preorder_132_bills_two_boards_and_a_half():
+    """2 whole boards + a half, not 3 — and every piece really on a sheet."""
+    layouts, unplaced = optimize_bins(
+        _pieces(PREORDER_132),
+        [IBIZA_FULL, IBIZA_HALF],
+        cutting_params=PARAMS_KERF4,
+    )
+
+    assert unplaced == []
+    assert_valid_layouts(
+        layouts, unplaced, PARAMS_KERF4, _total_instances(PREORDER_132)
+    )
+    assert [lay.material.half_board for lay in layouts].count(True) == 1
+    assert len(layouts) == 3
+    cost = sum(layout.material.cost_per_unit for layout in layouts)
+    assert cost == pytest.approx(
+        2 * IBIZA_FULL.cost_per_unit + IBIZA_HALF.cost_per_unit, abs=0.01
+    )
