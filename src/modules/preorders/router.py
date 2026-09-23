@@ -54,6 +54,7 @@ def _detail(svc: PreOrderService, preorder: PreOrderModel) -> PreOrderResponse:
         status=PreOrderStatus(preorder.status),
         price_level=preorder.price_level,
         variant=preorder.variant,
+        layout_adjustments=preorder.layout_adjustments,
         notes=preorder.notes,
         client_note=preorder.client_note,
         source=preorder.source,

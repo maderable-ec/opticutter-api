@@ -8,6 +8,7 @@ from src.modules.clients.schemas import ClientResponse
 from src.modules.optimizations.schemas import (
     AdditionalServiceLine,
     CutSegment,
+    LayoutAdjustment,
     MaterialInput,
     Remainder,
     Requirement,
@@ -50,6 +51,13 @@ class OrderCreate(CamelModel):
         description=(
             "Alternative-solution seed to use when recomputing and freezing the "
             "snapshot. Inherited from the pre-order on confirmation."
+        ),
+    )
+    layout_adjustments: Optional[List[LayoutAdjustment]] = Field(
+        default=None,
+        description=(
+            "The seller's hand adjustments to the plan, inherited from the "
+            "pre-order: the snapshot freezes the adjusted plan."
         ),
     )
     notes: Optional[str] = Field(default=None, max_length=512)

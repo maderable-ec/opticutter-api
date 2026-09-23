@@ -174,6 +174,7 @@ class PreOrderReviewService:
                 branch_id=preorder.branch_id,
                 price_level=preorder.price_level,
                 variant=preorder.variant or 0,
+                layout_adjustments=preorder.layout_adjustments,
                 notes=preorder.notes,
                 source=preorder.source,
             ),

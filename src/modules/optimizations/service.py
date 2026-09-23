@@ -3,8 +3,9 @@ import hashlib
 import json
 import logging
 import time
-from collections import defaultdict
-from typing import Dict, List, Optional, Sequence, Tuple
+from collections import Counter, defaultdict
+from dataclasses import dataclass, field
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from fastapi import Depends
 from sqlalchemy.orm import Session
@@ -16,12 +17,34 @@ from src.cutting import (
     CuttingParameters,
     ExactConfig,
     Piece,
+    PlacedPiece,
+    Rectangle,
     SearchBudget,
     exact_available,
+)
+from src.cutting.sheet_check import (
+    Placement,
+    leftover_extensions,
+    placement_candidates,
+    realize_sheet,
 )
 from src.modules.clients.model import ClientModel
 from src.modules.optimizations.engine_info import backend_name
 from src.modules.optimizations.labels import SPECIAL_SIDE_ORDER, edge_notation
+from src.modules.optimizations.layout_adjustments import (
+    EDITING,
+    LENIENT,
+    STRICT,
+    PoolSpec,
+    RealizedPool,
+    SheetBin,
+    apply_layout_adjustments,
+    group_by_pool,
+    placed_pieces,
+    realize_adjustments,
+    sheets_from_layouts,
+    whole_offcut_rects,
+)
 from src.modules.optimizations.materials import MaterialResolver, ResolvedMaterial
 from src.modules.optimizations.parallel import (
     PoolJob,
@@ -44,11 +67,18 @@ from src.modules.optimizations.price_levels import (
 from src.modules.optimizations.pricing import build_pricing
 from src.modules.optimizations.schemas import (
     WORKSHOP_CODE_FIELDS,
+    AdjustedSheet,
     EdgeBandingSpec,
+    EditablePiece,
+    EditablePool,
+    EditableSheet,
+    LayoutCandidatesRequest,
+    LayoutEvaluateResponse,
     OptimizeRequest,
     OptimizeResponse,
     PricingSummary,
     Requirement,
+    SheetBinInfo,
     SpecialEdge,
 )
 from src.modules.optimizations.summary import build_materials_summary
@@ -154,6 +184,70 @@ def edge_banding_salt(eb_products: Dict[int, ProductModel]) -> dict:
     }
 
 
+def _material_label(material: ResolvedMaterial) -> str:
+    """How the seller names a material: its product, its label, or its size."""
+    return material.name or material.code or f"{material.width:g}×{material.height:g}"
+
+
+def _sheet_bin(material: ResolvedMaterial, *, pooled: bool) -> SheetBin:
+    """A material's whole sheet as a bin, with the supply the engine gives it.
+
+    An offcut is a physical piece: finite, ``quantity`` or 1 of them, which is
+    also how ``pool`` feeds a pooled one to the search whatever its source.
+    """
+    finite = pooled or material.is_finite
+    return SheetBin(
+        material_key=material.key,
+        half_board=False,
+        width=material.width,
+        height=material.height,
+        thickness=material.thickness,
+        cost_per_unit=material.cost_per_unit,
+        count=(material.quantity or 1) if finite else None,
+        label=_material_label(material),
+    )
+
+
+@dataclass
+class _Prepared:
+    """A request resolved against the DB: what the search and the adjustments share."""
+
+    requirements_by_key: Dict[str, List[Requirement]]
+    cutting_params: CuttingParameters
+    waste_factor: float
+    half_board_markup_pct: float
+    resolved: Dict[str, ResolvedMaterial]
+    pools: Dict[str, List[ResolvedMaterial]]
+    eb_products: Dict[int, ProductModel]
+    optimization_hash: str
+
+    @property
+    def pool_of(self) -> Dict[str, str]:
+        """Material key -> the pool (anchor key) its sheets belong to."""
+        out = {key: key for key in self.requirements_by_key}
+        for anchor, offcuts in self.pools.items():
+            for offcut in offcuts:
+                out[offcut.key] = anchor
+        return out
+
+    @property
+    def finite_keys(self) -> set:
+        """Materials that are physical offcuts: not boards the client buys."""
+        return {key for key, rm in self.resolved.items() if rm.is_finite}
+
+
+@dataclass
+class _Computed:
+    """One computation, with what the layout editor needs besides the payload."""
+
+    payload: dict
+    plan_hash: str
+    base: dict
+    prepared: _Prepared
+    specs: Dict[str, PoolSpec] = field(default_factory=dict)
+    realized: Dict[str, RealizedPool] = field(default_factory=dict)
+
+
 class OptimizationService:
     """Orchestrates the cutting domain (``cutting``) and caches the result by hash.
 
@@ -171,7 +265,10 @@ class OptimizationService:
         self.settings_service = SettingsService(db)
 
     def optimize_response(
-        self, request: OptimizeRequest, additional_services: list | None = None
+        self,
+        request: OptimizeRequest,
+        additional_services: list | None = None,
+        mode: str = LENIENT,
     ) -> OptimizeResponse:
         """Computes (cache-first) and builds the ``POST /optimize`` response.
 
@@ -181,7 +278,18 @@ class OptimizationService:
         geometry) are folded into the ``pricing`` block; the raw ``/optimize``
         endpoint passes none.
         """
-        payload, optimization_hash = self.compute(request)
+        computed = self._compute(request, mode)
+        return OptimizeResponse(
+            **self._response_fields(computed, request, additional_services)
+        )
+
+    def _response_fields(
+        self,
+        computed: "_Computed",
+        request: OptimizeRequest,
+        additional_services: list | None,
+    ) -> dict:
+        payload = computed.payload
         client = None
         if request.client_id is not None:
             client = self.db.get(ClientModel, request.client_id)
@@ -196,10 +304,10 @@ class OptimizationService:
             additional_services,
             self.settings_service.get_tax_rate(),
         )
-        return OptimizeResponse(
+        return dict(
             id=None,
             client=client,
-            optimization_hash=optimization_hash,
+            optimization_hash=computed.plan_hash,
             variant=payload.get("variant", 0),
             total_boards_used=payload["total_boards_used"],
             total_boards_cost=payload["total_boards_cost"],
@@ -214,9 +322,312 @@ class OptimizationService:
             # ``get``, not ``[]``: a payload cached before this field existed is
             # still served for a whole OPT_RESULT_TTL_SECONDS after the deploy.
             unplaced=payload.get("unplaced") or [],
+            layout_issues=payload.get("layout_issues") or [],
+            adjustment_summary=payload.get("adjustment_summary"),
+            layout_adjustments=payload.get("layout_adjustments"),
         )
 
-    def compute(self, request: OptimizeRequest) -> Tuple[dict, str]:
+    def evaluate_layout(
+        self, request: OptimizeRequest, additional_services: list | None = None
+    ) -> LayoutEvaluateResponse:
+        """The plan with the editor's working adjustment, and the editor's context.
+
+        ``editing`` mode: a sheet that cannot be cut is refused (422, the reason
+        in Spanish), but pieces may wait in the pending tray. Besides the usual
+        response it carries, per pool, the working sheets IN THE ORDER THE EDITOR
+        SENT THEM (so its indices hold across calls) with the layout derived for
+        each, the pieces, what is pending and which sheet types can be added.
+        Nothing is cached and nothing is written.
+        """
+        computed = self._compute(request, EDITING)
+        prepared = computed.prepared
+        specs = self._pool_specs(prepared)
+        base_by_pool = group_by_pool(
+            computed.base.get("layouts") or [],
+            list(prepared.requirements_by_key),
+            prepared.pool_of,
+        )
+        pools = []
+        for key, spec in specs.items():
+            realized = computed.realized.get(key)
+            if realized is not None:
+                entries = realized.entries
+            else:
+                layouts = base_by_pool.get(key, [])
+                entries = list(zip(sheets_from_layouts(layouts), layouts))
+            on_sheets = {p.piece_id for sheet, _ in entries for p in sheet.pieces}
+            used = Counter(sheet.material_key for sheet, _ in entries if sheet.pieces)
+            pools.append(
+                EditablePool(
+                    pool_key=key,
+                    label=spec.label.strip("«»"),
+                    bins=[
+                        SheetBinInfo(
+                            material_key=b.material_key,
+                            half_board=b.half_board,
+                            width=b.width,
+                            height=b.height,
+                            cost_per_unit=b.cost_per_unit,
+                            label=b.label,
+                            remaining=(
+                                None
+                                if b.count is None
+                                else max(0, b.count - used[b.material_key])
+                            ),
+                        )
+                        for b in spec.bins.values()
+                    ],
+                    pieces=[
+                        EditablePiece(
+                            piece_id=piece.id,
+                            label=base_label(piece.id),
+                            width=piece.width,
+                            height=piece.height,
+                            can_rotate=piece.can_rotate,
+                        )
+                        for piece in spec.pieces.values()
+                    ],
+                    pending=[pid for pid in spec.pieces if pid not in on_sheets],
+                    sheets=[
+                        EditableSheet(**sheet.model_dump(), layout=layout)
+                        for sheet, layout in entries
+                    ],
+                    adjusted=realized is not None,
+                    finite=spec.finite,
+                )
+            )
+        return LayoutEvaluateResponse(
+            **self._response_fields(computed, request, additional_services),
+            pools=pools,
+        )
+
+    def layout_candidates(self, request: LayoutCandidatesRequest) -> dict:
+        """Answers the editor's probe: where a piece fits, how far an offcut can
+        grow, which sizes a sheet can take. Read-only; the plan is the cached one
+        with the request's working adjustment for the probed pool.
+        """
+        prepared = self._prepare(request)
+        probe = request.probe
+        spec = self._pool_specs(prepared, [probe.pool_key]).get(probe.pool_key)
+        if spec is None:
+            raise ValidationError(
+                f"El material «{probe.pool_key}» no está en la cotización",
+                field="probe.poolKey",
+            )
+        pinned = next(
+            (
+                a
+                for a in request.layout_adjustments or []
+                if a.pool_key == spec.pool_key
+            ),
+            None,
+        )
+        if pinned is not None:
+            sheets = pinned.sheets
+        else:
+            base = self._base_payload(request, prepared, time.perf_counter())
+            sheets = sheets_from_layouts(
+                group_by_pool(
+                    base.get("layouts") or [],
+                    list(prepared.requirements_by_key),
+                    prepared.pool_of,
+                ).get(spec.pool_key, [])
+            )
+
+        def sheet_at(index: int) -> Tuple[AdjustedSheet, SheetBin]:
+            if not 0 <= index < len(sheets):
+                raise ValidationError("La hoja no existe", field="probe.sheetIndex")
+            sheet = sheets[index]
+            sheet_bin = spec.bins.get((sheet.material_key, sheet.half_board))
+            if sheet_bin is None:
+                raise ValidationError(
+                    "La hoja usa un tablero que ya no está disponible",
+                    field="probe.sheetIndex",
+                )
+            return sheet, sheet_bin
+
+        min_usable = config.OPT_MIN_USABLE_OFFCUT_MM
+        if probe.kind == "piece":
+            piece = spec.pieces.get(probe.piece_id)
+            if piece is None:
+                raise ValidationError(
+                    f"La pieza «{probe.piece_id}» no está en el despiece",
+                    field="probe.pieceId",
+                )
+            targets = (
+                [probe.sheet_index]
+                if probe.sheet_index is not None
+                else range(len(sheets))
+            )
+            fits = []
+            for index in targets:
+                sheet, sheet_bin = sheet_at(index)
+                placed = placed_pieces(sheet, spec)
+                others = [pp for pp in placed if pp.piece.id != piece.id]
+                here = next((pp for pp in placed if pp.piece.id == piece.id), None)
+                placements, free = placement_candidates(
+                    sheet_bin.material(),
+                    others,
+                    piece,
+                    spec.params,
+                    whole_offcut_rects(sheet),
+                    first_only=probe.sheet_index is None,
+                    # Back where it was must always work (see ``current``).
+                    current=(Placement(here.x, here.y, here.rotated) if here else None),
+                    min_usable_offcut=min_usable,
+                )
+                detailed = probe.sheet_index is not None
+                fits.append(
+                    {
+                        "sheet_index": index,
+                        "fits": any(not p.rotated for p in placements),
+                        "fits_rotated": any(p.rotated for p in placements),
+                        "positions": (
+                            [
+                                {
+                                    "x": p.x,
+                                    "y": p.y,
+                                    "rotated": p.rotated,
+                                    "uses_whole_offcuts": list(p.uses_whole_offcuts),
+                                }
+                                for p in placements
+                            ]
+                            if detailed
+                            else []
+                        ),
+                        "free_rects": (
+                            [
+                                {
+                                    "x": b[0],
+                                    "y": b[1],
+                                    "width": b[2] - b[0],
+                                    "height": b[3] - b[1],
+                                }
+                                for b in free
+                            ]
+                            if detailed
+                            else []
+                        ),
+                    }
+                )
+            return {"sheets": fits, "extensions": [], "conversions": []}
+
+        sheet, sheet_bin = sheet_at(probe.sheet_index)
+        if probe.kind == "leftover":
+            extensions = leftover_extensions(
+                sheet_bin.material(),
+                placed_pieces(sheet, spec),
+                spec.params,
+                whole_offcut_rects(sheet),
+                Rectangle(probe.x, probe.y, probe.width, probe.height),
+                min_usable_offcut=min_usable,
+            )
+            return {
+                "sheets": [],
+                "extensions": [
+                    {
+                        "direction": direction,
+                        "x": rect.x,
+                        "y": rect.y,
+                        "width": rect.width,
+                        "height": rect.height,
+                    }
+                    for direction, rect in extensions
+                ],
+                "conversions": [],
+            }
+        return {
+            "sheets": [],
+            "extensions": [],
+            "conversions": self._sheet_conversions(sheet, spec),
+        }
+
+    @staticmethod
+    def _sheet_conversions(sheet: AdjustedSheet, spec: PoolSpec) -> List[dict]:
+        """Which other size an anchor sheet can take with its pieces on it.
+
+        A whole board can become the half when everything fits the half's own
+        usable area — as it lies, or shifted into the other half, which is the
+        same physical rip taken from the other side. A half can always try the
+        whole board. Offcut sheets have no other size.
+        """
+        if sheet.material_key != spec.pool_key:
+            return []
+        current = spec.bins.get((spec.pool_key, sheet.half_board))
+        target = spec.bins.get((spec.pool_key, not sheet.half_board))
+        if current is None or target is None:
+            return []
+        shifts = [(0.0, 0.0)]
+        if target.half_board:
+            dx = current.width - target.width
+            dy = current.height - target.height
+            if dx > 1e-6 or dy > 1e-6:
+                shifts.append((-dx, -dy))
+        placed = placed_pieces(sheet, spec)
+        whole = whole_offcut_rects(sheet)
+        options = []
+        for sx, sy in shifts:
+            layout, _ = realize_sheet(
+                target.material(),
+                [
+                    PlacedPiece(
+                        piece=pp.piece,
+                        x=pp.x + sx,
+                        y=pp.y + sy,
+                        width=pp.width,
+                        height=pp.height,
+                        rotated=pp.rotated,
+                    )
+                    for pp in placed
+                ],
+                spec.params,
+                [Rectangle(r.x + sx, r.y + sy, r.width, r.height) for r in whole],
+                min_usable_offcut=spec.min_usable_offcut,
+            )
+            if layout is not None:
+                options.append(
+                    {"half_board": target.half_board, "shift_x": sx, "shift_y": sy}
+                )
+        return options
+
+    def validate_layout_adjustments(self, request: OptimizeRequest) -> None:
+        """Refuses (422) a hand adjustment that does not hold: for writes.
+
+        Checked against the inputs it is being saved with, sheet by sheet, and
+        with no pending piece on a pool that can open another board.
+        """
+        if not request.layout_adjustments:
+            return
+        prepared = self._prepare(request)
+        realize_adjustments(
+            request.layout_adjustments, self._pool_specs(prepared), {}, STRICT
+        )
+
+    def prune_layout_adjustments(
+        self, request: OptimizeRequest
+    ) -> Optional[List[dict]]:
+        """The stored adjustments that still hold against new inputs.
+
+        For a quote whose cut list or materials changed without the seller
+        touching the layout: the pools that no longer hold are dropped instead of
+        failing the edit, the rest are kept as they were.
+        """
+        if not request.layout_adjustments:
+            return None
+        prepared = self._prepare(request)
+        realized, _ = realize_adjustments(
+            request.layout_adjustments, self._pool_specs(prepared), {}, LENIENT
+        )
+        kept = [
+            a.model_dump(mode="json")
+            for a in request.layout_adjustments
+            if a.pool_key in realized
+        ]
+        return kept or None
+
+    def compute(
+        self, request: OptimizeRequest, mode: str = LENIENT
+    ) -> Tuple[dict, str]:
         """Computes (or retrieves from cache) the optimization result.
 
         Cache-first via a deterministic hash of the inputs (resolved materials +
@@ -224,13 +635,33 @@ class OptimizationService:
         the DB: the orders module reuses it to freeze the snapshot without depending
         on the cache. Returns ``(payload, optimization_hash)``.
 
+        The hand adjustments (``layout_adjustments``) are laid over the result
+        after the cache, like the commercial flags; ``mode`` says how strictly
+        (see ``layout_adjustments``). The hash returned is the plan's identity:
+        the cache key, salted with the adjustments actually applied, so two
+        orders that differ only by a hand adjustment are not deduplicated.
+
         Timed from here — before the cache lookup, not around the search — because
         the question the log has to answer is "why was that quote slow", and a
         Redis that has started failing open (``src/shared/cache.py`` swallows every
         ``RedisError``) turns every request into a cold compute without any other
         symptom.
         """
+        computed = self._compute(request, mode)
+        return computed.payload, computed.plan_hash
+
+    def _compute(self, request: OptimizeRequest, mode: str) -> "_Computed":
         started = time.perf_counter()
+        prepared = self._prepare(request)
+        base = self._base_payload(request, prepared, started)
+        return self._finish(base, request, prepared, mode)
+
+    def _prepare(self, request: OptimizeRequest) -> "_Prepared":
+        """Everything the search and the adjustments share, resolved once.
+
+        The only part that touches the DB (settings, catalog, tapacantos), so it
+        runs in the parent before anything crosses a process boundary.
+        """
         if not request.requirements:
             raise ValidationError("La lista de piezas no puede estar vacía")
 
@@ -281,14 +712,29 @@ class OptimizationService:
             waste_factor,
             half_board_markup_pct,
         )
+        return _Prepared(
+            requirements_by_key=requirements_by_key,
+            cutting_params=cutting_params,
+            waste_factor=waste_factor,
+            half_board_markup_pct=half_board_markup_pct,
+            resolved=resolved,
+            pools=pools,
+            eb_products=eb_products,
+            optimization_hash=optimization_hash,
+        )
+
+    def _base_payload(
+        self, request: OptimizeRequest, prepared: "_Prepared", started: float
+    ) -> dict:
+        """The optimizer's own plan: from the cache, or searched and cached."""
+        requirements_by_key = prepared.requirements_by_key
+        resolved = prepared.resolved
+        optimization_hash = prepared.optimization_hash
 
         cached = cache.get_json(optimization_hash)
         if cached is not None:
             self._log_compute(optimization_hash, started, hit=True, jobs=(), results=())
-            return (
-                self._apply_commercial_overrides(cached, request, resolved),
-                optimization_hash,
-            )
+            return cached
 
         exact_config = _exact_config()
 
@@ -307,32 +753,19 @@ class OptimizationService:
             if not pieces:
                 # Raised here so no domain error ever crosses a process boundary.
                 raise ValidationError("La lista de piezas no puede estar vacía")
-            # ``skipTrim`` is the one cutting parameter the seller sets per job.
-            # One ``CuttingParameters`` per pool is all it takes: ``PoolJob``
-            # already carries its own, and ``_optimize_job`` hands that same
-            # object to the anchor, to every attached offcut and to the
-            # consolidation pass — which is why the flag covers the whole group
-            # without ``src/cutting/`` (or the Rust kernel) learning about it.
-            job_params = (
-                dataclasses.replace(
-                    cutting_params,
-                    top_trim=0.0,
-                    bottom_trim=0.0,
-                    left_trim=0.0,
-                    right_trim=0.0,
-                )
-                if resolved[key].skip_trim
-                else cutting_params
-            )
             jobs.append(
                 PoolJob(
                     material_key=key,
                     pieces=tuple(pieces),
                     material=resolved[key],
                     # Pooled offcuts: extra finite stock for this catalog board.
-                    offcuts=tuple(pools.get(key) or ()),
-                    cutting_params=job_params,
-                    half_spec=self._half_spec(resolved[key], half_board_markup_pct),
+                    offcuts=tuple(prepared.pools.get(key) or ()),
+                    cutting_params=self._pool_params(
+                        resolved[key], prepared.cutting_params
+                    ),
+                    half_spec=self._half_spec(
+                        resolved[key], prepared.half_board_markup_pct
+                    ),
                     budget=SearchBudget.scaled(
                         len(pieces),
                         tries_per_board=config.OPT_TRIES_PER_BOARD,
@@ -357,8 +790,8 @@ class OptimizationService:
             request,
             results,
             resolved,
-            eb_products,
-            waste_factor,
+            prepared.eb_products,
+            prepared.waste_factor,
             self._build_unplaced(jobs, pool_results),
         )
         # Cached BEFORE the overrides: Redis has to hold the canonical payload
@@ -368,10 +801,151 @@ class OptimizationService:
         self._log_compute(
             optimization_hash, started, hit=False, jobs=jobs, results=pool_results
         )
-        return (
-            self._apply_commercial_overrides(payload, request, resolved),
-            optimization_hash,
+        return payload
+
+    @staticmethod
+    def _pool_params(
+        anchor: ResolvedMaterial, cutting_params: CuttingParameters
+    ) -> CuttingParameters:
+        """The cutting parameters one pool is packed (and checked) under.
+
+        ``skipTrim`` is the one cutting parameter the seller sets per job. One
+        ``CuttingParameters`` per pool is all it takes: ``PoolJob`` already
+        carries its own, and ``_optimize_job`` hands that same object to the
+        anchor, to every attached offcut and to the consolidation pass — which is
+        why the flag covers the whole group without ``src/cutting/`` (or the Rust
+        kernel) learning about it. A hand-adjusted sheet is checked under the
+        very same object, from here.
+        """
+        if not anchor.skip_trim:
+            return cutting_params
+        return dataclasses.replace(
+            cutting_params,
+            top_trim=0.0,
+            bottom_trim=0.0,
+            left_trim=0.0,
+            right_trim=0.0,
         )
+
+    def _finish(
+        self,
+        base: dict,
+        request: OptimizeRequest,
+        prepared: "_Prepared",
+        mode: str,
+    ) -> "_Computed":
+        """Lays the hand adjustments, then the commercial flags, over the plan.
+
+        The ORDER is the point: the adjustments decide which sheets exist, and
+        every commercial pass after them (the level, ``wholeBoard``, the
+        discount) prices sheets — so they have to be priced as adjusted.
+        """
+        adjustments = request.layout_adjustments or []
+        specs = self._pool_specs(prepared) if adjustments else {}
+        adjusted, realized, _ = apply_layout_adjustments(
+            base,
+            adjustments,
+            specs,
+            list(prepared.requirements_by_key),
+            prepared.pool_of,
+            prepared.finite_keys,
+            mode,
+        )
+        payload = self._apply_commercial_overrides(adjusted, request, prepared.resolved)
+        plan_hash = prepared.optimization_hash
+        if realized:
+            reference = self._apply_commercial_overrides(
+                base, request, prepared.resolved
+            )
+            payload = {
+                **payload,
+                "adjustment_summary": {
+                    "moved_pieces": sum(
+                        1
+                        for layout in payload["layouts"]
+                        for p in layout.get("placed_pieces") or []
+                        if p.get("adjusted")
+                    ),
+                    "boards_delta": payload["total_boards_used"]
+                    - reference["total_boards_used"],
+                    "board_cost_delta": round(
+                        payload["total_boards_cost"] - reference["total_boards_cost"],
+                        2,
+                    ),
+                    "whole_offcuts": sum(
+                        1
+                        for layout in payload["layouts"]
+                        for r in layout.get("remainders") or []
+                        if r.get("kept_whole")
+                    ),
+                },
+            }
+            applied = json.dumps(
+                payload["layout_adjustments"], sort_keys=True, separators=(",", ":")
+            )
+            plan_hash = hashlib.sha256(
+                f"{prepared.optimization_hash}:{applied}".encode("utf-8")
+            ).hexdigest()
+        return _Computed(
+            payload=payload,
+            plan_hash=plan_hash,
+            base=base,
+            prepared=prepared,
+            specs=specs,
+            realized=realized,
+        )
+
+    def _pool_specs(
+        self, prepared: "_Prepared", keys: Optional[Iterable[str]] = None
+    ) -> Dict[str, PoolSpec]:
+        """What a hand-adjusted pool is checked against, per pool.
+
+        Built from the objects ``_base_payload`` hands the engine — the same
+        instance ids, the same per-pool ``CuttingParameters``, the same half-board
+        spec and offcut supply — so a sheet the seller arranged is held to the
+        constraints the search packed it under, and nothing else.
+        """
+        specs: Dict[str, PoolSpec] = {}
+        for key in keys if keys is not None else prepared.requirements_by_key:
+            reqs = prepared.requirements_by_key.get(key)
+            if not reqs:
+                continue
+            pieces, edge_map, net_map = self._build_pieces(reqs)
+            anchor = prepared.resolved[key]
+            bins: Dict[Tuple[str, bool], SheetBin] = {
+                (key, False): _sheet_bin(anchor, pooled=False)
+            }
+            half = self._half_spec(anchor, prepared.half_board_markup_pct)
+            if half is not None:
+                bins[(key, True)] = SheetBin(
+                    material_key=key,
+                    half_board=True,
+                    width=half.width,
+                    height=half.height,
+                    thickness=half.thickness,
+                    cost_per_unit=half.cost_per_unit,
+                    count=None,
+                    label=f"{_material_label(anchor)} (medio tablero)",
+                )
+            for offcut in prepared.pools.get(key) or ():
+                bins[(offcut.key, False)] = _sheet_bin(offcut, pooled=True)
+
+            def serialize(layout, edge_map=edge_map, net_map=net_map):
+                return self._serialize_layout(
+                    layout, edge_map, net_map, prepared.eb_products
+                )
+
+            specs[key] = PoolSpec(
+                pool_key=key,
+                label=f"«{_material_label(anchor)}»",
+                pieces={piece.id: piece for piece in pieces},
+                params=self._pool_params(anchor, prepared.cutting_params),
+                bins=bins,
+                finite=anchor.is_finite,
+                serialize=serialize,
+                min_usable_offcut=config.OPT_MIN_USABLE_OFFCUT_MM,
+            )
+        return specs
 
     @staticmethod
     def _apply_commercial_overrides(
@@ -937,6 +1511,31 @@ class OptimizationService:
                     entry["quantity"] += 1
         return list(grouped.values())
 
+    def _serialize_layout(
+        self,
+        layout: CuttingLayout,
+        edge_map: Dict[str, Requirement],
+        net_map: Dict[str, float],
+        eb_products: Dict[int, ProductModel],
+    ) -> dict:
+        """One sheet as the payload carries it: geometry, edges and its metrics.
+
+        The single serializer for a sheet, whether the engine or the seller laid
+        it out: the cut metres come off its cuts (saw travel) and the edge-banding
+        metres off the net length of the pieces on it.
+        """
+        layout_dict = layout.to_dict()
+        if edge_map:
+            self._enrich_layout_pieces(layout_dict, edge_map, eb_products)
+        eb_mm = sum(
+            net_map.get(str(p.get("piece_id", "")), 0.0)
+            for p in layout_dict.get("placed_pieces", [])
+        )
+        stats = layout_dict["statistics"]
+        stats["cut_linear_m"] = round(layout.cut_length / 1000.0, 2)
+        stats["edge_banding_linear_m"] = round(eb_mm / 1000.0, 2)
+        return layout_dict
+
     def _build_result_payload(
         self,
         request: OptimizeRequest,
@@ -985,20 +1584,12 @@ class OptimizationService:
             # the loop puts a material's half board last without interleaving
             # two materials. See `order_sheets`.
             for layout in order_sheets(layouts):
-                layout_dict = layout.to_dict()
-                if edge_map:
-                    self._enrich_layout_pieces(layout_dict, edge_map, eb_products)
-                cut_linear_m = round(layout.cut_length / 1000.0, 2)
-                eb_mm = sum(
-                    net_map.get(str(p.get("piece_id", "")), 0.0)
-                    for p in layout_dict.get("placed_pieces", [])
+                layout_dict = self._serialize_layout(
+                    layout, edge_map, net_map, eb_products
                 )
-                eb_linear_m = round(eb_mm / 1000.0, 2)
                 stats = layout_dict["statistics"]
-                stats["cut_linear_m"] = cut_linear_m
-                stats["edge_banding_linear_m"] = eb_linear_m
-                total_cut_linear_m += cut_linear_m
-                total_edge_banding_linear_m += eb_linear_m
+                total_cut_linear_m += stats["cut_linear_m"]
+                total_edge_banding_linear_m += stats["edge_banding_linear_m"]
                 layout_dicts.append(layout_dict)
 
         edge_bandings_summary, total_edge_banding_cost = (

@@ -267,6 +267,39 @@ class _Consolidator:
         )
 
 
+def derive_tree(
+    boxes: Sequence[Tuple[float, float, float, float]],
+    bounds: Tuple[float, float, float, float],
+    params: CuttingParameters,
+    *,
+    min_rect_size: float = 0.1,
+    min_usable_offcut: float = DEFAULT_MIN_USABLE_OFFCUT,
+    node_budget: int = DEFAULT_NODE_BUDGET,
+) -> Tuple[Optional[Tuple[List[Cut], List[Rectangle], float]], bool]:
+    """The best guillotine tree that frees ``boxes`` inside ``bounds``.
+
+    Returns ``(plan, exhausted)``. ``plan`` is ``(cuts, leftovers, cut_length)``
+    in tree order, or ``None`` when no tree was found — and ``exhausted`` says
+    which ``None`` it is: ``True`` means the node budget ran out before the search
+    could decide, ``False`` means the model searched and there is no tree. The
+    engine never needs the difference (it keeps the packer's own tree either
+    way); a hand-edited sheet, which has no other tree to fall back on, does.
+
+    ``boxes`` are ``(x0, y0, x1, y1)``; any order, they are sorted here so the
+    region keys — and therefore the memo hits and the tie-breaks — depend on the
+    geometry alone, never on placement order.
+    """
+    consolidator = _Consolidator(
+        boxes=sorted(boxes),
+        kerf=max(0.0, params.kerf),
+        min_rect_size=max(0.01, min_rect_size),
+        min_usable=min_usable_offcut,
+        node_budget=node_budget,
+    )
+    plan = consolidator.solve(*bounds, tuple(range(len(boxes))))
+    return plan, plan is None and consolidator.budget < 0
+
+
 def consolidate_layout(
     layout: CuttingLayout,
     params: CuttingParameters,
@@ -295,17 +328,14 @@ def consolidate_layout(
     if x1 - x0 < min_rect_size or y1 - y0 < min_rect_size:
         return layout
 
-    # Sorted so the region keys — and therefore the memo hits and the tie-breaks
-    # — depend on the geometry alone, never on placement order.
-    boxes = sorted((p.x, p.y, p.x + p.width, p.y + p.height) for p in pieces)
-    consolidator = _Consolidator(
-        boxes=boxes,
-        kerf=max(0.0, params.kerf),
-        min_rect_size=max(0.01, min_rect_size),
-        min_usable=min_usable_offcut,
+    plan, _ = derive_tree(
+        [(p.x, p.y, p.x + p.width, p.y + p.height) for p in pieces],
+        (x0, y0, x1, y1),
+        params,
+        min_rect_size=min_rect_size,
+        min_usable_offcut=min_usable_offcut,
         node_budget=node_budget,
     )
-    plan = consolidator.solve(x0, y0, x1, y1, tuple(range(len(boxes))))
     if plan is None:
         return layout
 

@@ -1,14 +1,17 @@
 from enum import Enum
-from typing import Annotated, Dict, List, Literal, Optional, Union
+from typing import Annotated, ClassVar, Dict, List, Literal, Optional, Tuple, Union
 
 from pydantic import (
     Field,
     NonNegativeInt,
     PositiveInt,
+    SerializerFunctionWrapHandler,
     confloat,
     field_validator,
+    model_serializer,
     model_validator,
 )
+from pydantic.alias_generators import to_camel
 
 from src.modules.clients.schemas import ClientResponse
 from src.shared.schemas import CamelModel
@@ -590,6 +593,76 @@ def has_workshop_codes(requirement: dict) -> bool:
     return any(requirement.get(f) for f in WORKSHOP_CODE_FIELDS)
 
 
+class AdjustedPiece(CamelModel):
+    """Where the seller put one piece instance, by hand.
+
+    Only the corner and the orientation: the size comes from the requirement the
+    id names, so a hand adjustment can never smuggle in a piece of another size.
+    """
+
+    piece_id: str = Field(
+        ...,
+        min_length=1,
+        max_length=160,
+        description="Instance id, as the layouts name it (`Puerta#2`)",
+    )
+    x: float = Field(..., description="X of the piece's corner, mm")
+    y: float = Field(..., description="Y of the piece's corner, mm")
+    rotated: bool = Field(default=False, description="Placed turned 90 degrees")
+
+
+class WholeOffcut(CamelModel):
+    """Free space the seller wants cut out in one piece: a *retazo entero*.
+
+    The cut tree has to free it intact. A wish about free space, not an
+    obstacle: a piece placed on it later simply uses it.
+    """
+
+    x: float
+    y: float
+    width: float = Field(..., gt=0)
+    height: float = Field(..., gt=0)
+
+
+class AdjustedSheet(CamelModel):
+    """One sheet of a hand-adjusted pool: which stock it is and what sits on it.
+
+    No dimensions and no price: both are read off the materials resolved for
+    the request, so the sheet is billed at today's price and a sheet type the
+    catalog stopped offering is caught instead of re-created.
+    """
+
+    material_key: str = Field(
+        ...,
+        min_length=1,
+        max_length=64,
+        description="The pool's anchor, or one of its offcuts",
+    )
+    half_board: bool = Field(
+        default=False, description="The anchor's half board rather than the whole one"
+    )
+    pieces: List[AdjustedPiece] = Field(default_factory=list, max_length=5000)
+    whole_offcuts: List[WholeOffcut] = Field(default_factory=list, max_length=100)
+
+
+class LayoutAdjustment(CamelModel):
+    """The seller's own layout for a whole pool: it replaces the engine's.
+
+    A pool is the material the requirements point at plus every offcut whose
+    `poolKey` names it — the unit the engine optimizes on its own, and the only
+    one pieces can move within. A piece of the pool that sits on no sheet is
+    pending.
+    """
+
+    pool_key: str = Field(
+        ...,
+        min_length=1,
+        max_length=64,
+        description="Key of the pool's anchor material",
+    )
+    sheets: List[AdjustedSheet] = Field(default_factory=list, max_length=1000)
+
+
 class OptimizeRequest(CamelModel):
     materials: List[MaterialInput] = Field(
         ...,
@@ -629,6 +702,17 @@ class OptimizeRequest(CamelModel):
             "every variant is cached and deterministic on its own."
         ),
     )
+    layout_adjustments: Optional[List[LayoutAdjustment]] = Field(
+        default=None,
+        description=(
+            "The seller's hand adjustments to the plan, one entry per pool. Each "
+            "entry REPLACES the engine's sheets for that pool; the others are "
+            "left as the engine made them. Applied after the cache, so it is not "
+            "part of the optimization hash. On a read, a pool whose adjustment no "
+            "longer holds (the cut list changed, a sheet type is gone, a piece "
+            "would overlap) is dropped and reported in `layoutIssues`."
+        ),
+    )
 
     @model_validator(mode="after")
     def _validate_material_refs(self) -> "OptimizeRequest":
@@ -660,6 +744,26 @@ class OptimizeRequest(CamelModel):
         return {m.key for m in self.materials if getattr(m, "whole_board", False)}
 
 
+class _QuietFlags(CamelModel):
+    """Leaves the listed flags out of the JSON while they are ``False``.
+
+    The hand-adjustment markers (``adjusted``, ``kept_whole``) are new keys on
+    shapes every quote has always returned. Emitting them only when they are
+    true keeps the response of a plan nobody adjusted exactly what it was.
+    """
+
+    quiet_flags: ClassVar[Tuple[str, ...]] = ()
+
+    @model_serializer(mode="wrap")
+    def _drop_false_flags(self, handler: SerializerFunctionWrapHandler):
+        data = handler(self)
+        for name in self.quiet_flags:
+            for key in (name, to_camel(name)):
+                if data.get(key) is False:
+                    del data[key]
+        return data
+
+
 class Material(CamelModel):
     material_key: str = Field(
         ..., description="Key of the material (from `materials`) this sheet came from"
@@ -681,7 +785,9 @@ class Material(CamelModel):
     )
 
 
-class PlacedPiece(CamelModel):
+class PlacedPiece(_QuietFlags):
+    quiet_flags = ("adjusted",)
+
     piece_id: str = Field(..., description="Unique identifier for the placed piece")
     x: float = Field(..., description="X position of the placed piece")
     y: float = Field(..., description="Y position of the placed piece")
@@ -702,13 +808,26 @@ class PlacedPiece(CamelModel):
         default=None,
         description="Edge banding on the geometric sides of the placed piece",
     )
+    adjusted: bool = Field(
+        default=False,
+        description="Moved by hand: not where the optimizer put it",
+    )
 
 
-class Remainder(CamelModel):
+class Remainder(_QuietFlags):
+    quiet_flags = ("kept_whole",)
+
     x: float = Field(..., description="X position of the remainder")
     y: float = Field(..., description="Y position of the remainder")
     height: float = Field(..., description="Height of the remainder (alto)")
     width: float = Field(..., description="Width of the remainder (ancho)")
+    kept_whole: bool = Field(
+        default=False,
+        description=(
+            "An offcut the seller asked to cut out in one piece (a whole offcut, "
+            "see `layoutAdjustments`)"
+        ),
+    )
 
 
 class CutSegment(CamelModel):
@@ -736,7 +855,9 @@ class LayoutStatistics(CamelModel):
     )
 
 
-class Layout(CamelModel):
+class Layout(_QuietFlags):
+    quiet_flags = ("adjusted",)
+
     material: Material = Field(..., description="Material/sheet used in this layout")
     placed_pieces: List[PlacedPiece] = Field(
         ..., description="Pieces placed on this sheet"
@@ -751,6 +872,10 @@ class Layout(CamelModel):
     cuts: List[CutSegment] = Field(
         default_factory=list,
         description="Guillotine saw cuts on this sheet (for drawing cut lines)",
+    )
+    adjusted: bool = Field(
+        default=False,
+        description="This sheet differs from what the optimizer produced",
     )
 
 
@@ -835,3 +960,191 @@ class OptimizeResponse(CamelModel):
             "else — these are the pieces it does NOT cut."
         ),
     )
+    layout_issues: List["LayoutIssue"] = Field(
+        default_factory=list,
+        description=(
+            "Hand adjustments that were not applied, and why. On a read the pool "
+            "falls back to the optimizer's plan; the seller sees this list."
+        ),
+    )
+    adjustment_summary: Optional["AdjustmentSummary"] = Field(
+        default=None,
+        description="What the hand adjustments changed against the optimizer's plan",
+    )
+    layout_adjustments: Optional[List[LayoutAdjustment]] = Field(
+        default=None,
+        description="The hand adjustments actually applied to this plan",
+    )
+
+
+class LayoutIssue(CamelModel):
+    """Why (part of) a hand adjustment does not hold."""
+
+    pool_key: str
+    code: str = Field(..., description="Stable machine-readable reason")
+    message: str = Field(..., description="The reason, for the seller, in Spanish")
+    sheet_index: Optional[int] = Field(
+        default=None, description="0-based index of the sheet within the pool's list"
+    )
+    piece_ids: List[str] = Field(default_factory=list)
+
+
+class AdjustmentSummary(CamelModel):
+    """The hand adjustments against the optimizer's plan, at the quote's prices."""
+
+    moved_pieces: int = Field(
+        ..., description="Pieces not where the optimizer put them"
+    )
+    boards_delta: int = Field(..., description="Change in boards the client buys")
+    board_cost_delta: float = Field(..., description="Change in what the sheets cost")
+    whole_offcuts: int = Field(
+        default=0, description="Offcuts the seller asked to cut out in one piece"
+    )
+
+
+OptimizeResponse.model_rebuild()
+
+
+class EditablePiece(CamelModel):
+    """One piece instance of a pool, as the layout editor needs it."""
+
+    piece_id: str
+    label: str
+    width: float
+    height: float
+    can_rotate: bool
+
+
+class SheetBinInfo(CamelModel):
+    """A kind of sheet a pool may be cut on."""
+
+    material_key: str
+    half_board: bool
+    width: float
+    height: float
+    cost_per_unit: float
+    label: str
+    remaining: Optional[int] = Field(
+        default=None,
+        description="Units still unused (offcuts); null means unlimited",
+    )
+
+
+class EditableSheet(AdjustedSheet):
+    """A working sheet plus the layout derived from it (null when empty)."""
+
+    layout: Optional[Layout] = None
+
+
+class EditablePool(CamelModel):
+    """Everything the editor needs to rearrange one pool."""
+
+    pool_key: str
+    label: str
+    bins: List[SheetBinInfo]
+    pieces: List[EditablePiece]
+    pending: List[str] = Field(
+        default_factory=list, description="Instance ids that sit on no sheet"
+    )
+    sheets: List[EditableSheet]
+    adjusted: bool = Field(
+        default=False, description="The pool carries a hand adjustment"
+    )
+    finite: bool = Field(
+        default=False,
+        description=(
+            "Only offcuts, no board to open: pieces may legitimately stay pending. "
+            "Anywhere else a pending piece blocks applying the adjustment."
+        ),
+    )
+
+
+class LayoutEvaluateResponse(OptimizeResponse):
+    """The plan with a working adjustment applied, plus the editor's context."""
+
+    pools: List[EditablePool] = Field(default_factory=list)
+
+
+class PieceProbe(CamelModel):
+    """Where can this piece go: on one sheet, or on which sheets at all."""
+
+    kind: Literal["piece"]
+    pool_key: str
+    piece_id: str
+    sheet_index: Optional[int] = Field(
+        default=None,
+        description="Target sheet; null asks which sheets can take the piece",
+    )
+
+
+class LeftoverProbe(CamelModel):
+    """How far can this offcut grow and still be cut whole."""
+
+    kind: Literal["leftover"]
+    pool_key: str
+    sheet_index: int
+    x: float
+    y: float
+    width: float
+    height: float
+
+
+class SheetProbe(CamelModel):
+    """Which sizes can this sheet take (whole board / half board)."""
+
+    kind: Literal["sheet"]
+    pool_key: str
+    sheet_index: int
+
+
+LayoutProbe = Annotated[
+    Union[PieceProbe, LeftoverProbe, SheetProbe], Field(discriminator="kind")
+]
+
+
+class LayoutCandidatesRequest(OptimizeRequest):
+    probe: LayoutProbe
+
+
+class CandidatePosition(CamelModel):
+    x: float
+    y: float
+    rotated: bool
+    uses_whole_offcuts: List[int] = Field(
+        default_factory=list,
+        description=(
+            "Whole offcuts of the sheet (indices into its `wholeOffcuts`) this "
+            "position lands on: placing the piece there uses them, so they are no "
+            "longer kept whole."
+        ),
+    )
+
+
+class SheetFit(CamelModel):
+    sheet_index: int
+    fits: bool = Field(..., description="The piece fits as it is")
+    fits_rotated: bool = Field(..., description="The piece fits turned 90 degrees")
+    positions: List[CandidatePosition] = Field(default_factory=list)
+    free_rects: List[Remainder] = Field(
+        default_factory=list, description="Maximal free rectangles of the sheet"
+    )
+
+
+class LeftoverExtension(CamelModel):
+    direction: Literal["x+", "x-", "y+", "y-"]
+    x: float
+    y: float
+    width: float
+    height: float
+
+
+class SheetConversion(CamelModel):
+    half_board: bool
+    shift_x: float = 0.0
+    shift_y: float = 0.0
+
+
+class LayoutCandidatesResponse(CamelModel):
+    sheets: List[SheetFit] = Field(default_factory=list)
+    extensions: List[LeftoverExtension] = Field(default_factory=list)
+    conversions: List[SheetConversion] = Field(default_factory=list)

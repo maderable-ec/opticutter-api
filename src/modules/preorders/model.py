@@ -101,6 +101,12 @@ class PreOrderModel(TimestampMixin, AuditMixin, Base):
     # the chosen layout and inherited by the order on confirmation.
     variant: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
 
+    # The seller's hand adjustments to the plan (``layoutAdjustments``: per pool,
+    # the sheets and where each piece sits). Another geometry input, like
+    # ``variant``: laid over every recompute and inherited by the order. NULL =
+    # the optimizer's plan as it comes.
+    layout_adjustments: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+
     source: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     notes: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     # Latest client change request (free text from the review link); cleared

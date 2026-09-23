@@ -7,6 +7,7 @@ from src.modules.branches.schemas import BranchRefResponse
 from src.modules.clients.schemas import ClientResponse
 from src.modules.optimizations.schemas import (
     AdditionalServiceLine,
+    LayoutAdjustment,
     MaterialInput,
     OptimizeResponse,
     Remainder,
@@ -52,6 +53,13 @@ class PreOrderCreate(CamelModel):
             "geometry and is inherited by the order."
         ),
     )
+    layout_adjustments: Optional[List[LayoutAdjustment]] = Field(
+        default=None,
+        description=(
+            "The seller's hand adjustments to the plan (see `OptimizeRequest`). "
+            "Checked on save and inherited by the order."
+        ),
+    )
     notes: Optional[str] = Field(default=None, max_length=512)
     source: Optional[str] = Field(default="web", max_length=32)
     branch_id: Optional[int] = Field(
@@ -85,6 +93,14 @@ class PreOrderUpdate(CamelModel):
     client_id: Optional[int] = None
     price_level: Optional[int] = Field(default=None, ge=1, le=3)
     variant: Optional[int] = Field(default=None, ge=0, le=1000)
+    layout_adjustments: Optional[List[LayoutAdjustment]] = Field(
+        default=None,
+        description=(
+            "Replaces the stored hand adjustments; `null` clears them. Left out, "
+            "the stored ones are kept — minus any pool a change to the materials "
+            "or the cut list makes invalid."
+        ),
+    )
     notes: Optional[str] = Field(default=None, max_length=512)
     source: Optional[str] = Field(default=None, max_length=32)
 
@@ -121,6 +137,9 @@ class PreOrderResponse(CamelModel):
     )
     variant: int = Field(
         default=0, description="Alternative-solution seed remembered for the recompute"
+    )
+    layout_adjustments: Optional[List[LayoutAdjustment]] = Field(
+        default=None, description="Stored hand adjustments to the plan (editable)"
     )
     notes: Optional[str] = None
     client_note: Optional[str] = Field(
