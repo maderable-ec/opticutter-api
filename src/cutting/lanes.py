@@ -52,6 +52,7 @@ from src.cutting.enums import Selection, SplitRule
 from src.cutting.models import BinSpec, Cut, Piece, PlacedPiece, Rectangle
 from src.cutting.packer import GuillotineOptimizer
 from src.cutting.parameters import CuttingParameters
+from src.cutting.sheet_check import is_cuttable
 
 # How many rotatable pieces may be pulled out of the lanes and laid down in the
 # strips. Counted in candidates, never in time: each value of ``g`` is one full
@@ -673,38 +674,14 @@ def _is_cuttable(fills: Sequence[BinFill], params: CuttingParameters) -> bool:
     That failure does not cost a board, it costs a cut batch, so it is worth
     O(k²) per sheet on the rare plan that is about to be adopted.
 
-    The checks are the ones ``tests/unit/cutting_invariants.py`` asserts, which
-    is deliberate: the contract a candidate ships under should be the contract
-    its tests read.
+    The checks are ``sheet_check``'s — the ones ``tests/unit/cutting_invariants.py``
+    asserts and the ones a hand-edited sheet is held to — which is deliberate:
+    the contract a candidate ships under should be the contract its tests read.
     """
-    for fill in fills:
-        x0 = max(0.0, params.left_trim)
-        y0 = max(0.0, params.bottom_trim)
-        x1 = fill.spec.width - max(0.0, params.right_trim)
-        y1 = fill.spec.height - max(0.0, params.top_trim)
-        placed = fill.placed
-        for pp in placed:
-            if pp.x < x0 - 1e-6 or pp.y < y0 - 1e-6:
-                return False
-            if pp.x + pp.width > x1 + 1e-6 or pp.y + pp.height > y1 + 1e-6:
-                return False
-            if pp.rotated:
-                if not pp.piece.can_rotate:
-                    return False
-                if (pp.width, pp.height) != (pp.piece.height, pp.piece.width):
-                    return False
-            elif (pp.width, pp.height) != (pp.piece.width, pp.piece.height):
-                return False
-        for i in range(len(placed)):
-            a = placed[i]
-            for j in range(i + 1, len(placed)):
-                b = placed[j]
-                gap_x = max(b.x - (a.x + a.width), a.x - (b.x + b.width))
-                gap_y = max(b.y - (a.y + a.height), a.y - (b.y + b.height))
-                # Apart on at least one axis, by at least a blade's width.
-                if max(gap_x, gap_y) < max(0.0, params.kerf) - 1e-6:
-                    return False
-    return True
+    return all(
+        is_cuttable(fill.spec.width, fill.spec.height, fill.placed, params)
+        for fill in fills
+    )
 
 
 def _plan_for(

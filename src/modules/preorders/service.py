@@ -170,6 +170,15 @@ class PreOrderService(BranchScopedMixin):
             self.db, branch_scope, data.branch_id, default_branch_id
         )
         self._enforce_open_cap(data.client_id, branch_id)
+        if data.layout_adjustments:
+            self.optimization_service.validate_layout_adjustments(
+                OptimizeRequest(
+                    materials=data.materials,
+                    requirements=data.requirements,
+                    variant=data.variant,
+                    layout_adjustments=data.layout_adjustments,
+                )
+            )
         validity_days = self.settings_service.get_preorder_config()[
             "preorder_validity_days"
         ]
@@ -185,6 +194,11 @@ class PreOrderService(BranchScopedMixin):
             ],
             price_level=data.price_level,
             variant=data.variant,
+            layout_adjustments=(
+                [a.model_dump(mode="json") for a in data.layout_adjustments]
+                if data.layout_adjustments
+                else None
+            ),
             source=data.source,
             notes=data.notes,
             created_at=now,
@@ -242,6 +256,12 @@ class PreOrderService(BranchScopedMixin):
             branch_id=source.branch_id,
             price_level=source.price_level,
             variant=source.variant or 0,
+            # Pruned, not copied: the source may have closed long ago, and a
+            # hand adjustment today's catalog no longer admits (a half board it
+            # stopped selling, a changed kerf) must not make the copy fail.
+            layout_adjustments=self.optimization_service.prune_layout_adjustments(
+                self.build_request(source)
+            ),
             notes=source.notes,
             source=source.source,
         )
@@ -272,7 +292,18 @@ class PreOrderService(BranchScopedMixin):
             if self.db.get(ClientModel, data.client_id) is None:
                 raise EntityNotFoundError("Client", data.client_id)
             preorder.client_id = data.client_id
-        if data.materials is not None or data.requirements is not None:
+        inputs_changed = data.materials is not None or data.requirements is not None
+        next_materials = (
+            [m.model_dump(mode="json") for m in data.materials]
+            if data.materials is not None
+            else preorder.materials
+        )
+        next_requirements = (
+            [r.model_dump(mode="json") for r in data.requirements]
+            if data.requirements is not None
+            else preorder.requirements
+        )
+        if inputs_changed:
             # Validated on the MERGED pair and BEFORE anything is assigned. Merged,
             # because an update that only sends materials can still orphan a stored
             # requirement; before, because raising afterwards would leave the
@@ -280,22 +311,47 @@ class PreOrderService(BranchScopedMixin):
             # rest of the request from its identity map. Without this check the
             # pre-order was saved and only failed on the next READ, as a 500:
             # ``build_request`` re-validates and raises a raw Pydantic error.
-            next_materials = (
-                [m.model_dump(mode="json") for m in data.materials]
-                if data.materials is not None
-                else preorder.materials
-            )
-            next_requirements = (
-                [r.model_dump(mode="json") for r in data.requirements]
-                if data.requirements is not None
-                else preorder.requirements
-            )
             try:
                 validate_material_graph(next_materials, next_requirements)
             except ValueError as exc:
                 raise ValidationError(str(exc))
+        # The hand adjustments are checked against the inputs they will be read
+        # with, and before anything is assigned, for the same two reasons. Sent
+        # explicitly they must hold (422 otherwise); left out while the cut list
+        # or the materials change, the pools the change broke are dropped
+        # instead of failing an edit the seller made somewhere else.
+        next_adjustments = preorder.layout_adjustments
+        if "layout_adjustments" in fields:
+            next_adjustments = (
+                [a.model_dump(mode="json") for a in data.layout_adjustments]
+                if data.layout_adjustments
+                else None
+            )
+            if next_adjustments:
+                self.optimization_service.validate_layout_adjustments(
+                    OptimizeRequest(
+                        materials=next_materials,
+                        requirements=next_requirements,
+                        variant=(
+                            data.variant
+                            if data.variant is not None
+                            else preorder.variant or 0
+                        ),
+                        layout_adjustments=next_adjustments,
+                    )
+                )
+        elif inputs_changed and next_adjustments:
+            next_adjustments = self.optimization_service.prune_layout_adjustments(
+                OptimizeRequest(
+                    materials=next_materials,
+                    requirements=next_requirements,
+                    layout_adjustments=next_adjustments,
+                )
+            )
+        if inputs_changed:
             preorder.materials = next_materials
             preorder.requirements = next_requirements
+        preorder.layout_adjustments = next_adjustments
         if data.additional_services is not None:
             preorder.additional_services = [
                 s.model_dump(mode="json") for s in data.additional_services
@@ -342,7 +398,9 @@ class PreOrderService(BranchScopedMixin):
         Carries the price level so ``compute`` re-prices the marked boards and
         ``optimize_response`` attaches the ``pricing`` block (it doesn't affect
         geometry or the hash) and the stored ``variant`` to reproduce the same
-        layout (this one does affect geometry and the hash).
+        layout (this one does affect geometry and the hash). The stored hand
+        adjustments ride along and are laid over the result leniently: one that
+        no longer holds is dropped and reported, never an error on a read.
         """
         return OptimizeRequest(
             materials=preorder.materials,
@@ -350,6 +408,7 @@ class PreOrderService(BranchScopedMixin):
             client_id=preorder.client_id,
             price_level=preorder.price_level,
             variant=preorder.variant or 0,
+            layout_adjustments=preorder.layout_adjustments,
         )
 
     def compute_payload(self, preorder: PreOrderModel) -> Tuple[dict, str]:

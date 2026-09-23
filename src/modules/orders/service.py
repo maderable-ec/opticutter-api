@@ -282,6 +282,11 @@ class OrderService(BranchScopedMixin):
             # before the snapshot is frozen; it does not touch the hash.
             price_level=data.price_level,
             variant=data.variant,
+            # The seller's hand adjustments, laid over the plan like on every
+            # read of the quote: the snapshot freezes the adjusted plan, and the
+            # hash returned salts in what was applied, so the dedupe below tells
+            # two differently adjusted plans apart.
+            layout_adjustments=data.layout_adjustments,
         )
         payload, optimization_hash = self.optimization_service.compute(opt_request)
 
