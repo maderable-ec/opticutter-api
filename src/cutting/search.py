@@ -53,6 +53,7 @@ from src.cutting.constructors import (
     strip_fill,
 )
 from src.cutting.enums import Selection, SplitRule
+from src.cutting.lanes import lane_plan
 from src.cutting.models import BinSpec, CuttingLayout, Piece, PlacedPiece
 from src.cutting.packer import expand_pieces
 from src.cutting.parameters import CuttingParameters
@@ -107,8 +108,13 @@ from src.cutting.parameters import CuttingParameters
 # ``tests/unit/test_cutting_search.py``: 29 grain-locked pieces we billed as 2
 # full boards where the commercial program cuts them on 1 + 1/2. Also bump
 # this when the pinned ortools version moves, since a solver upgrade can return
-# a different solution.
-ENGINE_VERSION = 13
+# a different solution; 14 = a complete-plan candidate built from full-height
+# lanes (``lanes.py``) competes with the searched plan whenever it bills
+# strictly less. The beam decides the partition one sheet at a time and cannot
+# see a global width argument, which is what a furniture cut list mostly is.
+# The reference case is ``PREORDER_132`` in ``tests/unit/test_cutting_search.py``:
+# 54 pieces we billed as 3 whole boards that fit on 2 + 1/2.
+ENGINE_VERSION = 14
 
 # A half bin is only worth opening near the end of a job: gate it by remaining
 # area so early states don't waste decodes on fills the cost objective would
@@ -183,6 +189,19 @@ _REPAIR_FILL_GATE = 0.30
 # list it provably does not.
 _HALF_REPARTITION_GATE = 0.55
 _REPAIR_KERF_DELTAS = (1.0, 2.0)
+
+# The lane-plan candidate (``lanes.py``) reads the same symptom as the
+# re-partition above, and for the same reason: a plan that closes on a sheet
+# under half used is a plan whose PARTITION is wrong, and the partition is the
+# only thing a lane plan decides differently.
+#
+# It is a gate rather than an always-on candidate because the pass is not free
+# and almost never wins. Instrumented over 25 battery jobs: ungated it is 28.8s
+# of a 97.2s run -- 30% of the engine -- for zero jobs improved, since a plan
+# whose sheets are all well filled has no cheaper partition left to find. Gated,
+# it runs on the handful of plans that show the symptom, which is where
+# pre-order 132 lives (its emptiest sheet is 42% full).
+_LANE_PLAN_GATE = 0.55
 
 # The single-pass greedy that gives stage 0 its baseline and upper bound.
 _LEGACY_CONFIG = GreedyConfig(
@@ -1606,6 +1625,28 @@ def optimize_bins(
         )
         if rebalanced is not None and _plan_cost(rebalanced) < _plan_cost(layouts):
             layouts = rebalanced
+        # Last, and outside the search on purpose: a complete plan built from
+        # full-height lanes. It answers the question the beam cannot ask --
+        # which lanes go on which sheet -- and it is adopted only when it bills
+        # strictly less, so it can never displace a partition the search found
+        # (the hazard a cheaper bin inside the beam does carry).
+        if _emptiest_sheet(layouts) < _LANE_PLAN_GATE:
+            lanes = lane_plan(
+                placeable,
+                bins,
+                params,
+                below_cost=_plan_cost(layouts),
+                max_sheets=max_sheets,
+                min_rect_size=min_rect_size,
+            )
+            if lanes is not None:
+                candidate = _to_layouts(lanes)
+                placed = sum(len(layout.placed_pieces) for layout in candidate)
+                # A candidate that dropped a piece is a bug, not a cheaper plan.
+                if placed == len(placeable) and _plan_cost(candidate) < _plan_cost(
+                    layouts
+                ):
+                    layouts = candidate
 
     return layouts, unplaced + solution.unplaced
 
