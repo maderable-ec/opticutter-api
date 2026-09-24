@@ -225,7 +225,8 @@ def restore_users(db, path: Path) -> None:
 
         user.full_name = row.get("full_name")
         user.hashed_password = row["hashed_password"]
-        user.role = row.get("role") or UserRole.OPERATOR.value
+        # A backup taken before migration 013 only carries the single ``role``.
+        user.roles = row.get("roles") or [row.get("role") or UserRole.OPERATOR.value]
         user.is_active = bool(row.get("is_active", True))
         user.branch_id = branch_id
 

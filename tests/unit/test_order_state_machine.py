@@ -58,8 +58,10 @@ def _service(mock_session, order: OrderModel) -> OrderService:
     return svc
 
 
-def _actor(role: UserRole | None) -> Actor:
-    return Actor("staff", user_id=1, label="Tester", role=role.value if role else None)
+def _actor(*roles: UserRole) -> Actor:
+    return Actor(
+        "staff", user_id=1, label="Tester", roles=tuple(r.value for r in roles)
+    )
 
 
 # --- Invalid transitions / authorization ---------------------------------------
@@ -287,13 +289,44 @@ def test_admin_cancels_from_the_queue(mock_session):
     mock_session.commit.assert_called_once()
 
 
-@pytest.mark.parametrize("role", [UserRole.SELLER, UserRole.OPERATOR, UserRole.BANDER])
-def test_only_the_admin_cancels_from_the_queue(mock_session, role):
+@pytest.mark.parametrize(
+    "roles",
+    [
+        (UserRole.SELLER,),
+        (UserRole.OPERATOR,),
+        (UserRole.BANDER,),
+        (UserRole.OPERATOR, UserRole.BANDER),
+    ],
+)
+def test_only_the_admin_cancels_from_the_queue(mock_session, roles):
     """Not even the seller who raised it: the sale was already collected."""
     svc = _service(mock_session, _order(OrderStatus.queued))
     with pytest.raises(AuthorizationError):
-        svc.transition(1, OrderStatus.cancelled, actor=_actor(role), note="motivo")
+        svc.transition(1, OrderStatus.cancelled, actor=_actor(*roles), note="motivo")
     mock_session.commit.assert_not_called()
+
+
+def test_several_workshop_roles_still_cannot_dispatch(mock_session):
+    """The union of two shop-floor roles is still the shop floor."""
+    svc = _service(mock_session, _order(OrderStatus.finished))
+    with pytest.raises(AuthorizationError):
+        svc.transition(
+            1,
+            OrderStatus.dispatched,
+            actor=_actor(UserRole.OPERATOR, UserRole.BANDER),
+        )
+    mock_session.commit.assert_not_called()
+
+
+def test_a_bander_who_also_cuts_can_take_the_order(mock_session):
+    """``queued -> in_process`` is an operator's move; holding operador is enough."""
+    order = _order(OrderStatus.queued)
+    svc = _service(mock_session, order)
+    svc.transition(
+        1, OrderStatus.in_process, actor=_actor(UserRole.BANDER, UserRole.OPERATOR)
+    )
+    assert order.status == OrderStatus.in_process.value
+    mock_session.commit.assert_called_once()
 
 
 def test_seller_still_cancels_from_confirmed(mock_session):

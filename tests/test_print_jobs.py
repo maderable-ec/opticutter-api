@@ -518,13 +518,13 @@ def test_agent_management_requires_admin(client, db_session):
         UserCreate(
             email="op-print@empresa.com",
             password="password1",
-            role="operador",
+            roles=["operador"],
             full_name="Op",
             branch_id=1,
         )
     )
     op_auth = {
-        "Authorization": f"Bearer {create_access_token(operator.id, operator.role)}"
+        "Authorization": f"Bearer {create_access_token(operator.id, operator.roles)}"
     }
     assert client.get("/api/v1/print/agents", headers=op_auth).status_code == 403
 

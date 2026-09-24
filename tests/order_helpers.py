@@ -407,17 +407,19 @@ def _cut_first_banded_piece(client, oid):
 
 
 def _token_for(client, db_session, role, branch_id=_BRANCH, email=None):
-    """Seeds a user with the given role and returns a Bearer header (real login)."""
-    email = email or f"{role}@empresa.com"
+    """Seeds a user with the given role (or list of roles) and returns a Bearer
+    header (real login)."""
+    roles = [role] if isinstance(role, str) else list(role)
+    email = email or f"{'-'.join(roles)}@empresa.com"
     svc = UserService(db_session)
     if svc.get_by_email(email) is None:
         svc.create(
             UserCreate(
                 email=email,
                 password=_PWD,
-                role=role,
-                full_name=role.title(),
-                branch_id=None if role == "administrador" else branch_id,
+                roles=roles,
+                full_name=" ".join(roles).title(),
+                branch_id=None if "administrador" in roles else branch_id,
             )
         )
     token = client.post(

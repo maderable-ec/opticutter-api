@@ -9,7 +9,7 @@ and lifetimes) from ``shared.config``.
 import hashlib
 import secrets
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Optional, Sequence
 
 import bcrypt
 import jwt
@@ -42,9 +42,15 @@ def verify_password(plain: str, hashed: str) -> bool:
 
 
 def create_access_token(
-    subject: str | int, role: str, expires_minutes: Optional[int] = None
+    subject: str | int, roles: Sequence[str], expires_minutes: Optional[int] = None
 ) -> str:
-    """Issues a JWT signed with ``sub`` (user id), ``role``, ``iat`` and ``exp``."""
+    """Issues a JWT signed with ``sub`` (user id), ``roles``, ``iat`` and ``exp``.
+
+    ``roles`` is informational: authorization reads the live roles from the DB.
+    """
+    if isinstance(roles, str):
+        # A bare string is a Sequence[str] too, and would land as its letters.
+        raise TypeError("roles must be a list of role values, not a string")
     minutes = (
         expires_minutes
         if expires_minutes is not None
@@ -53,7 +59,7 @@ def create_access_token(
     now = datetime.now(timezone.utc)
     payload = {
         "sub": str(subject),
-        "role": role,
+        "roles": list(roles),
         "iss": config.JWT_ISSUER,
         "aud": config.JWT_AUDIENCE,
         "iat": now,

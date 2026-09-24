@@ -27,8 +27,17 @@ from src.modules.users.enums import UserRole
 from src.shared.audit import Actor
 from src.shared.exceptions import AuthorizationError, BusinessRuleError
 
-_BANDER = Actor("staff", user_id=3, label="Canteador", role=UserRole.BANDER.value)
-_OPERATOR = Actor("staff", user_id=2, label="Operador", role=UserRole.OPERATOR.value)
+_BANDER = Actor("staff", user_id=3, label="Canteador", roles=(UserRole.BANDER.value,))
+_OPERATOR = Actor(
+    "staff", user_id=2, label="Operador", roles=(UserRole.OPERATOR.value,)
+)
+# A bander learning to cut: both workshop roles on one user.
+_APPRENTICE = Actor(
+    "staff",
+    user_id=5,
+    label="Aprendiz",
+    roles=(UserRole.OPERATOR.value, UserRole.BANDER.value),
+)
 
 
 def _order(
@@ -159,7 +168,7 @@ def test_bander_cannot_cut(mock_session):
 def test_seller_cannot_touch_the_shop_floor(mock_session):
     order = _order(_cut(ActivityStatus.in_progress), _banding(ActivityStatus.pending))
     svc = _service(mock_session, order)
-    seller = Actor("staff", user_id=4, label="Vendedor", role=UserRole.SELLER.value)
+    seller = Actor("staff", user_id=4, label="Vendedor", roles=(UserRole.SELLER.value,))
     with pytest.raises(AuthorizationError):
         svc.transition_activity(
             1, ActivityType.banding, ActivityStatus.in_progress, actor=seller
@@ -293,3 +302,39 @@ def test_the_order_waits_for_the_other_activities(mock_session):
     )
     assert resp.order_status == OrderStatus.in_process
     assert order.status == OrderStatus.in_process.value
+
+
+# --------------------------------------------------------------------------- #
+# Several roles: the permissions are their union
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    "activity_type",
+    [ActivityType.cutting, ActivityType.banding, ActivityType.additional],
+)
+def test_the_apprentice_works_every_activity(mock_session, activity_type):
+    """Operador + canteador registers the cut without giving up the banding."""
+    order = _order(
+        _cut(ActivityStatus.in_progress),
+        _banding(ActivityStatus.pending),
+        _additional(ActivityStatus.pending),
+    )
+    if activity_type is ActivityType.cutting:
+        order.activities[0].status = ActivityStatus.pending.value
+    svc = _service(mock_session, order)
+    resp = svc.transition_activity(
+        1, activity_type, ActivityStatus.in_progress, actor=_APPRENTICE
+    )
+    assert resp.activity.status == ActivityStatus.in_progress
+    assert resp.activity.started_by_label == "Aprendiz"
+    mock_session.commit.assert_called_once()
+
+
+def test_the_apprentice_takes_the_order_from_the_queue(mock_session):
+    """Starting the cut derives ``queued -> in_process``, an operator's move."""
+    order = _order(_cut(ActivityStatus.pending), status=OrderStatus.queued)
+    svc = _service(mock_session, order, pieces=(0, 4))
+    resp = svc.transition_activity(
+        1, ActivityType.cutting, ActivityStatus.in_progress, actor=_APPRENTICE
+    )
+    assert resp.order_status == OrderStatus.in_process
+    assert order.assigned_to_label == "Aprendiz"

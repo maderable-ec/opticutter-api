@@ -91,14 +91,14 @@ def test_seller_has_full_service_crud(client, db_session):
         UserCreate(
             email="seller-services@empresa.com",
             password="seller-password",
-            role="vendedor",
+            roles=["vendedor"],
             full_name="Seller",
             branch_id=1,
         )
     )
     admin_auth = client.headers["Authorization"]
     client.headers["Authorization"] = (
-        f"Bearer {create_access_token(seller.id, seller.role)}"
+        f"Bearer {create_access_token(seller.id, seller.roles)}"
     )
     try:
         assert client.get("/api/v1/additional-services/").status_code == 200

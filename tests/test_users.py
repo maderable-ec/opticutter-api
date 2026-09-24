@@ -40,10 +40,11 @@ def _user_payload(
     full_name="Vendedor Uno",
     branch_id=_BRANCH,
 ):
+    """``role`` is one role or a list of them; the payload always sends ``roles``."""
     return {
         "email": email,
         "password": password,
-        "role": role,
+        "roles": [role] if isinstance(role, str) else list(role),
         "fullName": full_name,
         "branchId": branch_id,
     }
@@ -82,7 +83,7 @@ def auth(client, db_session):
                 UserCreate(
                     email=email,
                     password=_PWD,
-                    role=role,
+                    roles=[role],
                     full_name=role.title(),
                     branch_id=branch_id,
                 )
@@ -111,20 +112,26 @@ def test_verify_password_with_corrupt_hash_is_false():
 
 
 def test_jwt_round_trip_carries_claims():
-    token = create_access_token(subject=42, role="administrador")
+    token = create_access_token(subject=42, roles=["operador", "canteador"])
     payload = decode_access_token(token)
     assert payload["sub"] == "42"
-    assert payload["role"] == "administrador"
+    assert payload["roles"] == ["operador", "canteador"]
+
+
+def test_jwt_rejects_a_bare_string_for_roles():
+    """A string is a Sequence[str] too: it would be signed as its letters."""
+    with pytest.raises(TypeError):
+        create_access_token(subject=1, roles="vendedor")
 
 
 def test_expired_token_raises_authentication_error():
-    token = create_access_token(subject=1, role="vendedor", expires_minutes=-1)
+    token = create_access_token(subject=1, roles=["vendedor"], expires_minutes=-1)
     with pytest.raises(AuthenticationError):
         decode_access_token(token)
 
 
 def test_tampered_token_raises_authentication_error():
-    token = create_access_token(subject=1, role="vendedor")
+    token = create_access_token(subject=1, roles=["vendedor"])
     # We alter the FIRST character of the signature (a whole byte). Changing the
     # last base64 character was flaky ~6% of the time: it only encodes 4 useful
     # bits + 2 padding bits, so for some signatures it decoded to the same bytes
@@ -138,12 +145,12 @@ def test_tampered_token_raises_authentication_error():
 # --- require_role / require_permission (unit) --------------------------------
 
 
-def _fake_user(role):
+def _fake_user(*roles):
     return UserModel(
         id=1,
         email="x@y.com",
         hashed_password="x",
-        role=role,
+        roles=list(roles),
         is_active=True,
     )
 
@@ -162,7 +169,25 @@ def test_require_role_blocks_other_role():
 
 def test_require_permission_resolves_matrix():
     dep = require_permission("orders:read")  # admin + vendedor + operador
-    assert dep(current_user=_fake_user("operador")).role == "operador"
+    assert dep(current_user=_fake_user("operador")).roles == ["operador"]
+
+
+def test_require_role_grants_the_union_of_the_roles():
+    """A bander learning to cut reaches the cutter's areas without losing their own."""
+    apprentice = _fake_user("canteador", "operador")
+    assert require_permission("orders:cut")(current_user=apprentice) is apprentice
+    assert require_permission("orders:workshop")(current_user=apprentice) is apprentice
+    with pytest.raises(AuthorizationError):
+        require_permission("orders:write")(current_user=apprentice)
+
+
+def test_model_stores_roles_canonically_and_mirrors_the_primary():
+    """``roles[0]`` is the primary role, and the legacy ``role`` column follows it."""
+    user = _fake_user("canteador", "operador", "canteador")
+    assert user.roles == ["operador", "canteador"]
+    assert user.role == "operador"
+    assert user.is_global is False
+    assert _fake_user("vendedor").is_global is True
 
 
 def test_require_permission_blocks_disallowed_role():
@@ -185,6 +210,8 @@ def test_create_user_hashes_password_and_hides_it(client, auth):
     assert resp.status_code == 201
     data = resp.json()["data"]
     assert data["email"] == "seller@empresa.com"
+    assert data["roles"] == ["vendedor"]
+    # Deprecated single role, kept for the previous web until migration 014.
     assert data["role"] == "vendedor"
     assert data["isActive"] is True
     assert "id" in data
@@ -197,7 +224,7 @@ def test_create_user_role_is_case_insensitive(client, auth):
         client, auth("administrador"), email="admin2@empresa.com", role="ADMINISTRADOR"
     )
     assert resp.status_code == 201
-    assert resp.json()["data"]["role"] == "administrador"
+    assert resp.json()["data"]["roles"] == ["administrador"]
 
 
 def test_create_duplicate_email_returns_409(client, auth):
@@ -242,13 +269,13 @@ def test_update_user_fields(client, auth):
     created = _create_user(client, admin).json()["data"]
     resp = client.put(
         f"/api/v1/users/{created['id']}",
-        json={"fullName": "Nuevo Nombre", "role": "operador"},
+        json={"fullName": "Nuevo Nombre", "roles": ["operador"]},
         headers=admin,
     )
     assert resp.status_code == 200
     data = resp.json()["data"]
     assert data["fullName"] == "Nuevo Nombre"
-    assert data["role"] == "operador"
+    assert data["roles"] == ["operador"]
 
 
 def test_update_password_allows_login_with_new_password(client, auth):
@@ -280,6 +307,106 @@ def test_create_user_invalid_role_returns_422(client, auth):
     assert resp.status_code == 422
 
 
+# --- Several roles per user ----------------------------------------------------
+
+
+def test_create_user_with_both_workshop_roles(client, auth):
+    """The bander learning to cut: both workshop roles, stored in canonical order."""
+    resp = _create_user(
+        client,
+        auth("administrador"),
+        email="aprendiz@empresa.com",
+        role=["canteador", "operador"],
+    )
+    assert resp.status_code == 201
+    data = resp.json()["data"]
+    assert data["roles"] == ["operador", "canteador"]
+    assert data["role"] == "operador"
+    assert data["branchId"] == _BRANCH
+
+
+@pytest.mark.parametrize(
+    "roles",
+    [
+        ["administrador", "operador"],
+        ["vendedor", "canteador"],
+        ["vendedor", "operador"],
+    ],
+)
+def test_only_the_workshop_roles_combine(client, auth, roles):
+    resp = _create_user(client, auth("administrador"), role=roles)
+    assert resp.status_code == 422
+    assert resp.json()["errors"][0]["field"] == "roles"
+
+
+def test_a_user_needs_at_least_one_role(client, auth):
+    resp = _create_user(client, auth("administrador"), role=[])
+    assert resp.status_code == 422
+
+
+def test_update_rejects_a_forbidden_combination(client, auth):
+    admin = auth("administrador")
+    created = _create_user(client, admin, role="operador").json()["data"]
+    resp = client.put(
+        f"/api/v1/users/{created['id']}",
+        json={"roles": ["operador", "vendedor"]},
+        headers=admin,
+    )
+    assert resp.status_code == 422
+    assert resp.json()["errors"][0]["field"] == "roles"
+
+
+def test_legacy_single_role_is_still_accepted(client, auth):
+    """The previous web sends ``role``; until migration 014 it becomes ``roles``."""
+    admin = auth("administrador")
+    payload = _user_payload(email="legado@empresa.com")
+    payload.pop("roles")
+    created = client.post(
+        "/api/v1/users/", json={**payload, "role": "canteador"}, headers=admin
+    )
+    assert created.status_code == 201
+    assert created.json()["data"]["roles"] == ["canteador"]
+
+    updated = client.put(
+        f"/api/v1/users/{created.json()['data']['id']}",
+        json={"role": "operador"},
+        headers=admin,
+    )
+    assert updated.status_code == 200
+    assert updated.json()["data"]["roles"] == ["operador"]
+
+    # A null ``role`` was ignored before and still is; ``roles`` wins over it.
+    same = client.put(
+        f"/api/v1/users/{created.json()['data']['id']}",
+        json={"role": None, "fullName": "Legado"},
+        headers=admin,
+    )
+    assert same.status_code == 200
+    assert same.json()["data"]["roles"] == ["operador"]
+    both = client.put(
+        f"/api/v1/users/{created.json()['data']['id']}",
+        json={"role": "vendedor", "roles": ["canteador", "operador"]},
+        headers=admin,
+    )
+    assert both.json()["data"]["roles"] == ["operador", "canteador"]
+
+
+def test_promoting_to_admin_clears_the_branch(client, auth):
+    """The admin is global: the branch is dropped whatever roles it came from."""
+    admin = auth("administrador")
+    created = _create_user(
+        client, admin, email="sube@empresa.com", role=["operador", "canteador"]
+    ).json()["data"]
+    resp = client.put(
+        f"/api/v1/users/{created['id']}",
+        json={"roles": ["administrador"]},
+        headers=admin,
+    )
+    assert resp.status_code == 200
+    assert resp.json()["data"]["roles"] == ["administrador"]
+    assert resp.json()["data"]["branchId"] is None
+
+
 # --- Login / refresh / logout --------------------------------------------------
 
 
@@ -293,7 +420,7 @@ def test_login_success_returns_token_pair_and_user(client, auth):
     assert data["refreshToken"]
     assert data["expiresIn"] > 0
     assert data["user"]["email"] == "administrador@empresa.com"
-    assert data["user"]["role"] == "administrador"
+    assert data["user"]["roles"] == ["administrador"]
 
 
 def test_login_records_event_but_refresh_does_not(client, auth, db_session):
@@ -424,7 +551,7 @@ def test_me_with_token_of_deleted_user_returns_401(client, auth):
 
 
 def test_me_with_nonnumeric_subject_returns_401(client):
-    token = create_access_token(subject="no-soy-un-id", role="vendedor")
+    token = create_access_token(subject="no-soy-un-id", roles=["vendedor"])
     assert client.get("/api/v1/auth/me", headers=_auth_header(token)).status_code == 401
 
 
@@ -435,14 +562,18 @@ def test_update_me_changes_full_name_only(client, auth):
     headers = auth("operador")
     resp = client.patch(
         "/api/v1/auth/me",
-        json={"fullName": "Operario Renombrado", "role": "administrador"},
+        json={
+            "fullName": "Operario Renombrado",
+            "roles": ["administrador"],
+            "role": "administrador",
+        },
         headers=headers,
     )
     assert resp.status_code == 200
     data = resp.json()["data"]
     assert data["fullName"] == "Operario Renombrado"
-    # The role CANNOT be self-changed: the extra field is ignored.
-    assert data["role"] == "operador"
+    # The roles CANNOT be self-changed: the extra fields are ignored.
+    assert data["roles"] == ["operador"]
 
 
 def test_update_me_requires_auth(client):
@@ -609,6 +740,14 @@ def test_list_users_filter_by_role_branch_and_active(client, auth, db_session):
     _create_user(
         client, admin, email="caro@empresa.com", full_name="Caro", role="operador"
     )
+    # Holds BOTH workshop roles: a filter by either one finds her, once.
+    _create_user(
+        client,
+        admin,
+        email="dora@empresa.com",
+        full_name="Dora",
+        role=["operador", "canteador"],
+    )
 
     by_role = client.get(
         "/api/v1/users/", params={"role": "operador"}, headers=admin
@@ -616,7 +755,17 @@ def test_list_users_filter_by_role_branch_and_active(client, auth, db_session):
     assert [u["email"] for u in by_role["data"]] == [
         "beto@empresa.com",
         "caro@empresa.com",
+        "dora@empresa.com",
     ]
+
+    banders = client.get(
+        "/api/v1/users/", params={"role": "canteador"}, headers=admin
+    ).json()
+    assert [u["email"] for u in banders["data"]] == ["dora@empresa.com"]
+    both_workshop = client.get(
+        "/api/v1/users/", params={"role": ["operador", "canteador"]}, headers=admin
+    ).json()
+    assert both_workshop["meta"]["pagination"]["total"] == 3
 
     # Repeating the parameter filters by several roles at once.
     two_roles = client.get(
@@ -626,6 +775,7 @@ def test_list_users_filter_by_role_branch_and_active(client, auth, db_session):
         "ana@empresa.com",
         "beto@empresa.com",
         "caro@empresa.com",
+        "dora@empresa.com",
     }
 
     by_branch = client.get(
@@ -633,7 +783,7 @@ def test_list_users_filter_by_role_branch_and_active(client, auth, db_session):
         params={"branchId": _BRANCH, "role": "operador"},
         headers=admin,
     ).json()
-    assert by_branch["meta"]["pagination"]["total"] == 2
+    assert by_branch["meta"]["pagination"]["total"] == 3
 
     db_session.query(UserModel).filter(UserModel.id == beto["id"]).update(
         {"is_active": False}
@@ -648,7 +798,7 @@ def test_list_users_filter_by_role_branch_and_active(client, auth, db_session):
     both = client.get(
         "/api/v1/users/", params={"role": "operador"}, headers=admin
     ).json()
-    assert both["meta"]["pagination"]["total"] == 2
+    assert both["meta"]["pagination"]["total"] == 3
 
 
 def test_list_users_is_ordered_by_name_and_sort_switches_it(client, auth):

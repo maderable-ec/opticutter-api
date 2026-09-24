@@ -52,7 +52,7 @@ _PRODUCT_TYPE_QUERY = Query(
     description="Restricts the low-stock report to one product type (empty = all)",
 )
 
-_ROLE_QUERY = Query(default=None, description="Filters by role (empty = all)")
+_ROLE_QUERY = Query(default=None, description="Users holding this role (empty = all)")
 
 
 @router.get("/summary", response_model=DataResponse[AnalyticsSummary])

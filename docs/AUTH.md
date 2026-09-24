@@ -18,12 +18,34 @@ Auth contract for the Cutter API, consumed by the Maderable web dashboard
 `administrador` and `vendedor` are global (see
 [`MULTI_BRANCH.md`](MULTI_BRANCH.md)).
 
+### Several roles per user
+
+A user holds a **list** of roles (`roles`) and is granted the **union** of their
+permissions, at every layer: the area matrix below, `TRANSITION_ROLES` and
+`ACTIVITY_ROLES`. The case it exists for is a `canteador` learning to cut:
+`["operador", "canteador"]` takes the order, marks pieces cut, and registers
+the cutting, banding and additional work.
+
+- **Only the workshop roles combine** (`operador` + `canteador`).
+  `administrador` and `vendedor` are exclusive; any other combination, or an
+  empty list, is a `422` with `field: "roles"`. So a user with several roles is
+  always a workshop user, bound to their branch.
+- `roles` comes back in **canonical order** (`administrador`, `vendedor`,
+  `operador`, `canteador`), whatever order it was sent in.
+- `?role=` filters (users listing, analytics) match a user **holding** that role.
+- **Deprecated, until migration 014:** every response that carried the single
+  `role` still carries it, as the *primary* role (the first of `roles`), and
+  `POST/PUT /users` still accept `role` in place of `roles`. Read and send
+  `roles`.
+
 Login is by `email` (unique). Passwords are stored only as a bcrypt hash.
 
 ## Session flow
 
 1. **Login** → `POST /api/v1/auth/login` with `{ email, password }`.
-   Response: `{ accessToken, refreshToken, tokenType: "bearer", expiresIn, user }`.
+   Response: `{ accessToken, refreshToken, tokenType: "bearer", expiresIn, user }`
+   (`user.roles` is the list of roles; the JWT's `roles` claim is informational,
+   because every request re-reads the live roles from the database).
    - `accessToken`: short-lived JWT (`ACCESS_TOKEN_EXPIRE_MINUTES`, default 30 min).
    - `refreshToken`: long-lived opaque token (`REFRESH_TOKEN_EXPIRE_DAYS`, default 1
      day). Kept short as a backstop: the frontend already forces a real login once
@@ -52,7 +74,7 @@ Login is by `email` (unique). Passwords are stored only as a bcrypt hash.
 
 - `GET /api/v1/auth/me` → the current user.
 - `PATCH /api/v1/auth/me` with `{ fullName }` → edits **only** the user's own
-  name. Does not allow changing `role`, `isActive` or `email` (admin-only
+  name. Does not allow changing `roles`, `isActive` or `email` (admin-only
   management).
 - `POST /api/v1/auth/change-password` with `{ currentPassword, newPassword }`
   → changes the user's own password after verifying the current one.
@@ -64,14 +86,15 @@ Login is by `email` (unique). Passwords are stored only as a bcrypt hash.
 | Code | Meaning | Frontend action |
 |------|---------|------------------|
 | `401 UNAUTHORIZED` | Token missing/invalid/expired, or bad credentials. | Try `refresh`; if that also `401`s, redirect to login. |
-| `403 FORBIDDEN`    | Authenticated, but the **role** lacks permission for that area. | Show "not authorized"; do not retry. |
+| `403 FORBIDDEN`    | Authenticated, but none of the user's **roles** grants that area. | Show "not authorized"; do not retry. |
 
 All errors share the envelope `{ errors: [{ code, message, field? }], meta }`.
 
 ## Permission matrix by endpoint
 
 Source of truth: `src/modules/users/permissions.py` (`RESOURCE_ROLES`). Every
-route is protected with `Depends(require_permission("<key>"))`.
+route is protected with `Depends(require_permission("<key>"))`, which passes
+when **any** of the user's roles is in the row.
 
 | Area (`key`)        | administrador | vendedor | operador | canteador | Endpoints |
 |----------------------|:---:|:---:|:---:|:---:|---|

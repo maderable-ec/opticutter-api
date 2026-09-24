@@ -92,7 +92,7 @@ def _token_for(client, db_session, role, email=None):
             UserCreate(
                 email=email,
                 password=_PWD,
-                role=role,
+                roles=[role],
                 full_name=role.title(),
                 branch_id=None if role == "administrador" else _BRANCH,
             )

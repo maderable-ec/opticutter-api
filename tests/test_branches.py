@@ -29,7 +29,7 @@ def _staff_headers(client, db_session, role, email, branch_id):
             UserCreate(
                 email=email,
                 password=_PWD,
-                role=role,
+                roles=[role],
                 full_name=email,
                 branch_id=branch_id,
             )

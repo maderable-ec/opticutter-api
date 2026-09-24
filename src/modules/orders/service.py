@@ -552,10 +552,11 @@ class OrderService(BranchScopedMixin):
         current = OrderStatus(order.status)
         self._ensure_valid_transition(current, to_status)
 
-        # Per-transition role validation before touching the state.
-        if actor.role is not None:
+        # Per-transition role validation before touching the state. Any one of
+        # the actor's roles is enough (permissions are a union).
+        if actor.roles:
             allowed = TRANSITION_ROLES.get((current, to_status), ())
-            if allowed and actor.role not in (r.value for r in allowed):
+            if allowed and not set(actor.roles) & {r.value for r in allowed}:
                 raise AuthorizationError(
                     f"Tu rol no puede ejecutar la transición "
                     f"'{current.value}' → '{to_status.value}'"
@@ -920,9 +921,9 @@ class OrderService(BranchScopedMixin):
         self._ensure_activities(order)
         label = ACTIVITY_LABELS[activity_type]
 
-        if actor.role is not None and actor.role not in (
+        if actor.roles and not set(actor.roles) & {
             r.value for r in ACTIVITY_ROLES[activity_type]
-        ):
+        }:
             raise AuthorizationError(f"Tu rol no puede registrar el {label}")
 
         activity = self._activity(order, activity_type)

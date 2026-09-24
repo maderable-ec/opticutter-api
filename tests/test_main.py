@@ -165,7 +165,7 @@ def test_unhandled_exception_returns_500_envelope(db_session, monkeypatch):
                 UserCreate(
                     email="boom-admin@empresa.com",
                     password="boom-admin-pwd",
-                    role="administrador",
+                    roles=["administrador"],
                     full_name="Boom",
                 )
             )

@@ -335,8 +335,9 @@ def notify_order_transition(
     """Fan-out for a just-committed status transition (best-effort).
 
     One emission per plan, and they are independent on purpose: the audiences are
-    disjoint (a user holds one role), and if the second fan-out fails the first
-    still stands -- the same trade the branch change makes.
+    disjoint (only the workshop roles combine on one user, so nobody is both an
+    admin and an operator), and if the second fan-out fails the first still
+    stands -- the same trade the branch change makes.
 
     ``fromStatus`` rides in the payload because the copy of a cancellation turns
     on it: the same event reads differently depending on whether the order was
