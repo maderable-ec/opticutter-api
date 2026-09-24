@@ -1447,14 +1447,14 @@ def test_seller_can_sync_the_catalog_but_not_edit_products(
         UserCreate(
             email="seller-sync@empresa.com",
             password="seller-password",
-            role="vendedor",
+            roles=["vendedor"],
             full_name="Seller",
             branch_id=1,
         )
     )
     admin_auth = client.headers["Authorization"]
     client.headers["Authorization"] = (
-        f"Bearer {create_access_token(seller.id, seller.role)}"
+        f"Bearer {create_access_token(seller.id, seller.roles)}"
     )
     try:
         assert _sync(client, dry_run=True).status_code == 200

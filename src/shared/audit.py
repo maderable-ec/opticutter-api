@@ -8,7 +8,7 @@ that survives the user being deleted/renamed).
 """
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Tuple
 
 ACTOR_STAFF = "staff"
 ACTOR_CLIENT = "client"
@@ -22,7 +22,8 @@ class Actor:
     type: str
     user_id: Optional[int] = None
     label: Optional[str] = None
-    role: Optional[str] = None
+    # Empty for the client and the system: the role gates skip them.
+    roles: Tuple[str, ...] = ()
 
 
 def staff_actor(user) -> Actor:
@@ -31,7 +32,7 @@ def staff_actor(user) -> Actor:
         ACTOR_STAFF,
         user_id=user.id,
         label=user.full_name or user.email,
-        role=user.role,
+        roles=tuple(user.roles),
     )
 
 

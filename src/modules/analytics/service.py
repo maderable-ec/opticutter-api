@@ -451,6 +451,7 @@ class AnalyticsService:
                 UserAttendance(
                     user_id=uid,
                     full_name=user.full_name or "",
+                    roles=user.roles,
                     role=user.role,
                     branch_name=branches.get(user.branch_id),
                     days=days,
@@ -535,12 +536,13 @@ class AnalyticsService:
         rows = []
         for uid, a in acc.items():
             user = users.get(uid)
-            if user is None or (role is not None and user.role != role):
+            if user is None or not self._matches(user, None, role):
                 continue
             rows.append(
                 UserProductivity(
                     user_id=uid,
                     full_name=user.full_name or "",
+                    roles=user.roles,
                     role=user.role,
                     branch_name=branches.get(user.branch_id),
                     pieces_cut=a["pieces_cut"],
@@ -583,10 +585,13 @@ class AnalyticsService:
     def _matches(
         user: UserModel, branch_id: Optional[int], role: Optional[str]
     ) -> bool:
-        """Does the user pass the optional branch and role filters?"""
+        """Does the user pass the optional branch and role filters?
+
+        The role filter matches a user HOLDING that role, among others.
+        """
         if branch_id is not None and user.branch_id != branch_id:
             return False
-        if role is not None and user.role != role:
+        if role is not None and role not in user.roles:
             return False
         return True
 

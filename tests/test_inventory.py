@@ -233,7 +233,7 @@ def _as(anon_client, db_session, role, branch=None):
     user = UserModel(
         email=f"{role}@test.com",
         hashed_password="x",
-        role=role,
+        roles=[role],
         full_name=role,
         is_active=True,
         branch_id=branch.id if branch else None,
@@ -241,7 +241,7 @@ def _as(anon_client, db_session, role, branch=None):
     db_session.add(user)
     db_session.commit()
     anon_client.headers.update(
-        {"Authorization": f"Bearer {create_access_token(user.id, user.role)}"}
+        {"Authorization": f"Bearer {create_access_token(user.id, user.roles)}"}
     )
     return anon_client
 

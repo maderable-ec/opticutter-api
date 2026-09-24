@@ -75,6 +75,8 @@ def _mint_order(client, db_session, identifier="0100000397", code="MEL18", width
 
 
 def _seed_user(db_session, role, email, branch_id=_BRANCH):
+    """``role`` is one role or a list of them."""
+    roles = [role] if isinstance(role, str) else list(role)
     svc = UserService(db_session)
     user = svc.get_by_email(email)
     if user is None:
@@ -82,16 +84,16 @@ def _seed_user(db_session, role, email, branch_id=_BRANCH):
             UserCreate(
                 email=email,
                 password=_PWD,
-                role=role,
+                roles=roles,
                 full_name=email.split("@")[0].title(),
-                branch_id=None if role == "administrador" else branch_id,
+                branch_id=None if "administrador" in roles else branch_id,
             )
         )
     return user
 
 
 def _headers(user):
-    return {"Authorization": f"Bearer {create_access_token(user.id, user.role)}"}
+    return {"Authorization": f"Bearer {create_access_token(user.id, user.roles)}"}
 
 
 def _second_branch(db_session):
@@ -236,6 +238,22 @@ def test_finished_notifies_admins_sellers_excluding_actor(client, db_session):
 # --------------------------------------------------------------------------- #
 # in_process -> queued rollback: nobody is notified
 # --------------------------------------------------------------------------- #
+def test_a_bander_who_also_cuts_hears_the_queue_once(client, db_session):
+    """Holding operador is what puts them in the branch operators' audience."""
+    order = _mint_order(client, db_session)
+    apprentice = _seed_user(
+        db_session, ["canteador", "operador"], "aprendiz@empresa.com"
+    )
+    bander = _seed_user(db_session, "canteador", "canta@empresa.com")
+
+    assert _patch_status(client, order["id"], "queued").status_code == 200
+
+    items = _list(client, _headers(apprentice))
+    assert [n["type"] for n in items] == ["order.queued"]
+    # A bander alone is still not told: the queue is the cutters' news.
+    assert _unread_count(client, _headers(bander)) == 0
+
+
 def test_rollback_to_queued_does_not_notify(client, db_session):
     order = _mint_order(client, db_session)
     op1 = _seed_user(db_session, "operador", "op1@empresa.com", branch_id=_BRANCH)

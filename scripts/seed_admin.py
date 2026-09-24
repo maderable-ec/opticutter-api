@@ -35,7 +35,7 @@ try:
         UserModel(
             email=config.ADMIN_EMAIL,
             hashed_password=hash_password(password),
-            role=UserRole.ADMIN.value,
+            roles=[UserRole.ADMIN.value],
             is_active=True,
         )
     )

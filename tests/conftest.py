@@ -135,14 +135,14 @@ def client(anon_client, db_session):
             UserCreate(
                 email=_CONFTEST_ADMIN_EMAIL,
                 password=_CONFTEST_ADMIN_PWD,
-                role="administrador",
+                roles=["administrador"],
                 full_name="Conftest Admin",
             )
         )
     # Mint the JWT directly instead of hitting /auth/login: ``get_current_user``
     # resolves the live role via ``sub`` (user id), so neither the bcrypt verify
     # nor the login's HTTP round-trip is needed on every test.
-    token = create_access_token(admin.id, admin.role)
+    token = create_access_token(admin.id, admin.roles)
     anon_client.headers.update({"Authorization": f"Bearer {token}"})
     return anon_client
 

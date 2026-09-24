@@ -30,7 +30,7 @@ router = APIRouter(prefix="/auth", tags=["auth"], responses=ERROR_RESPONSES)
 def _token_response(user: UserModel, refresh_token: str) -> TokenResponse:
     """Builds the token pair (access JWT + refresh) and the user's data."""
     return TokenResponse(
-        access_token=create_access_token(user.id, user.role),
+        access_token=create_access_token(user.id, user.roles),
         refresh_token=refresh_token,
         expires_in=config.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
         user=UserResponse.model_validate(user),

@@ -4,8 +4,9 @@
 restricts by role and ``require_permission`` by **area** (key of the
 ``RESOURCE_ROLES`` matrix). Endpoints declare intent with
 ``Depends(require_permission("orders:write"))`` and the matrix stays the single
-source of truth. ``require_role`` validates against the role **read from the DB**
-(via ``get_current_user``), so a role change takes effect instantly.
+source of truth. ``require_role`` validates against the roles **read from the DB**
+(via ``get_current_user``), so a role change takes effect instantly. A user with
+several roles is granted the UNION of their permissions.
 """
 
 from typing import Optional
@@ -44,15 +45,14 @@ def get_current_user(
 
 
 def require_role(*roles: UserRole):
-    """Dependency factory: requires the user to have one of ``roles``.
+    """Dependency factory: requires the user to hold at least one of ``roles``.
 
     e.g. ``Depends(require_role(UserRole.ADMIN))``. Prefer ``require_permission``
     when an area key exists in ``RESOURCE_ROLES`` (centralizes the policy).
     """
-    allowed = {role.value for role in roles}
 
     def dependency(current_user: UserModel = Depends(get_current_user)) -> UserModel:
-        if current_user.role not in allowed:
+        if not current_user.has_any_role(*roles):
             raise AuthorizationError("No tienes permiso para realizar esta acción")
         return current_user
 
@@ -80,9 +80,10 @@ def get_branch_scope(
     effect instantly. A workshop role with no assigned branch is an invalid state
     (403). Note: the vendedor keeps their ``branch_id`` as a **base branch**
     (default on create, see ``resolve_branch_for_create``), even though their
-    reads are global.
+    reads are global. The global roles never combine with another, so a user
+    holding several roles is always a workshop one.
     """
-    if current_user.role in (UserRole.ADMIN.value, UserRole.SELLER.value):
+    if current_user.is_global:
         return None
     if current_user.branch_id is None:
         raise AuthorizationError(

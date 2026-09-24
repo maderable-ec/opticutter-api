@@ -391,14 +391,14 @@ def test_the_seller_cannot_stamp_an_alias(client, db_session):
         UserCreate(
             email="seller-alias@empresa.com",
             password="seller-password",
-            role="vendedor",
+            roles=["vendedor"],
             full_name="Seller",
             branch_id=1,
         )
     )
     admin_auth = client.headers["Authorization"]
     client.headers["Authorization"] = (
-        f"Bearer {create_access_token(seller.id, seller.role)}"
+        f"Bearer {create_access_token(seller.id, seller.roles)}"
     )
     try:
         resp = client.post(
@@ -500,14 +500,14 @@ def test_the_seller_reads_families_but_cannot_change_them(client, db_session):
         UserCreate(
             email="seller-families@empresa.com",
             password="seller-password",
-            role="vendedor",
+            roles=["vendedor"],
             full_name="Seller",
             branch_id=1,
         )
     )
     admin_auth = client.headers["Authorization"]
     client.headers["Authorization"] = (
-        f"Bearer {create_access_token(seller.id, seller.role)}"
+        f"Bearer {create_access_token(seller.id, seller.roles)}"
     )
     try:
         assert client.get("/api/v1/product-families/").status_code == 200

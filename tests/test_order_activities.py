@@ -464,6 +464,57 @@ def test_the_bander_finishes_an_order_the_operator_left(client, db_session):
     assert closed.json()["data"]["orderStatus"] == "finished"
 
 
+def test_a_bander_learning_to_cut_runs_the_whole_order(client, db_session):
+    """Operador + canteador on one user: takes the order, cuts it and bands it.
+
+    The permissions are the union of the roles, at both layers -- the area that
+    opens the endpoint and the per-activity table that narrows it.
+    """
+    order = _order_with_banding(client, db_session)
+    oid = order["id"]
+    assert _patch_status(client, oid, "queued").status_code == 200
+    apprentice = _token_for(client, db_session, ["canteador", "operador"])
+
+    taken = _patch_activity(client, oid, "cutting", "in_progress", headers=apprentice)
+    assert taken.status_code == 200
+    assert taken.json()["data"]["orderStatus"] == "in_process"
+
+    # ``orders:cut`` and ``orders:read`` come from operador...
+    plan = client.get(f"/api/v1/orders/{oid}/cutting-plan", headers=apprentice)
+    assert plan.status_code == 200
+    for board in plan.json()["data"]["boards"]:
+        for piece in board["pieces"]:
+            assert (
+                client.patch(
+                    f"/api/v1/orders/{oid}/cutting-plan/pieces/{piece['id']}",
+                    json={"cut": True},
+                    headers=apprentice,
+                ).status_code
+                == 200
+            )
+    assert client.get(f"/api/v1/orders/{oid}", headers=apprentice).status_code == 200
+    assert (
+        _patch_activity(client, oid, "cutting", "done", headers=apprentice).status_code
+        == 200
+    )
+
+    # ...and the banding stays theirs, which is what closes the order.
+    assert (
+        _patch_activity(
+            client, oid, "banding", "in_progress", headers=apprentice
+        ).status_code
+        == 200
+    )
+    closed = _patch_activity(client, oid, "banding", "done", headers=apprentice)
+    assert closed.status_code == 200
+    assert closed.json()["data"]["orderStatus"] == "finished"
+
+    # Still shop floor: the commercial acts stay closed to them.
+    assert (
+        _patch_status(client, oid, "dispatched", headers=apprentice).status_code == 403
+    )
+
+
 # --------------------------------------------------------------------------- #
 # The per-activity clocks (``ready_at``)
 # --------------------------------------------------------------------------- #

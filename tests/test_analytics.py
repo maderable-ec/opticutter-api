@@ -126,11 +126,12 @@ def _hist(to_status, created_at, from_status=None):
 
 
 def _seed_user(db, *, role="operador", full_name="User", branch_id=1, email=None):
+    """``role`` is one role or a list of them."""
     user = UserModel(
         email=email or f"{full_name.replace(' ', '').lower()}@e.com",
         full_name=full_name,
         hashed_password="x",
-        role=role,
+        roles=[role] if isinstance(role, str) else list(role),
         branch_id=branch_id,
     )
     db.add(user)
@@ -630,6 +631,31 @@ def test_attendance_filters_by_role(client, db_session):
         "/api/v1/analytics/attendance", params={**_RANGE, "role": "operador"}
     ).json()["data"]
     assert [u["userId"] for u in data["users"]] == [op.id]
+
+
+def test_role_filter_matches_a_user_holding_that_role(client, db_session):
+    """A bander learning to cut shows up under both roles, once each."""
+    apprentice = _seed_user(
+        db_session, role=["canteador", "operador"], full_name="Aprendiz"
+    )
+    bander = _seed_user(db_session, role="canteador", full_name="Canta")
+    op = _seed_user(db_session, role="operador", full_name="Op")
+    for user in (apprentice, bander, op):
+        _seed_login(db_session, user.id, datetime(2026, 6, 15, 8, 0))
+
+    def _ids(role):
+        data = client.get(
+            "/api/v1/analytics/attendance", params={**_RANGE, "role": role}
+        ).json()["data"]
+        return sorted(u["userId"] for u in data["users"])
+
+    assert _ids("canteador") == sorted([apprentice.id, bander.id])
+    assert _ids("operador") == sorted([apprentice.id, op.id])
+
+    rows = client.get("/api/v1/analytics/attendance", params=_RANGE).json()["data"]
+    row = next(u for u in rows["users"] if u["userId"] == apprentice.id)
+    assert row["roles"] == ["operador", "canteador"]
+    assert row["role"] == "operador"
 
 
 def test_attendance_empty_range(client):
