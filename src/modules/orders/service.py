@@ -288,7 +288,12 @@ class OrderService(BranchScopedMixin):
             # two differently adjusted plans apart.
             layout_adjustments=data.layout_adjustments,
         )
-        payload, optimization_hash = self.optimization_service.compute(opt_request)
+        # The last net: an order is never frozen with a piece its plan does not
+        # cut (``UNPLACED_PIECES``). Before the dedupe, so a retry cannot link a
+        # quote to one either.
+        payload, optimization_hash = self.optimization_service.compute(
+            opt_request, require_complete=True
+        )
 
         # Orders accept materials outside the catalog (offcuts/manual): they're
         # frozen as-is from the snapshot. Their lines/pieces end up with a null

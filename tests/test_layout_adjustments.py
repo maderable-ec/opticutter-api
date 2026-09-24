@@ -164,15 +164,20 @@ def test_the_editor_keeps_pending_pieces_and_says_which(client):
     ).json()["data"]
 
     assert data["pools"][0]["pending"] == ["P#2"]
-    assert data["unplaced"] == [
-        {
-            "materialKey": "m1",
-            "label": "P",
-            "height": 450.0,
-            "width": 450.0,
-            "quantity": 1,
-        }
-    ]
+    [unplaced] = data["unplaced"]
+    # The useful area depends on the trims of the environment the suite runs in.
+    unplaced.pop("usableHeight")
+    unplaced.pop("usableWidth")
+    assert unplaced == {
+        "materialKey": "m1",
+        "label": "P",
+        "height": 450.0,
+        "width": 450.0,
+        "quantity": 1,
+        "materialName": "tablero 1000×1000 mm",
+        # It fits: the adjustment left it out, nothing ran out.
+        "reason": "pending",
+    }
 
 
 def test_the_editor_refuses_a_sheet_that_cannot_be_cut(client):

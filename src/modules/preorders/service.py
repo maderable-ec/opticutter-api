@@ -150,6 +150,7 @@ class PreOrderService(BranchScopedMixin):
         branch_scope: Optional[int] = None,
         default_branch_id: Optional[int] = None,
         note: str = "Pre-orden creada",
+        require_complete: bool = True,
     ) -> PreOrderModel:
         """Creates an open (``draft``) pre-order with the optimizer inputs.
 
@@ -162,6 +163,9 @@ class PreOrderService(BranchScopedMixin):
         ``note`` is what the birth entry of the history says; ``duplicate``
         overrides it to name the quote this one was copied from, which is the
         whole of the copy's traceability (there is no ``duplicated_from`` column).
+
+        A quote whose plan leaves a piece uncut is refused (``_require_complete``);
+        only ``duplicate`` turns that off, see there.
         """
         actor = actor or system_actor()
         if self.db.get(ClientModel, data.client_id) is None:
@@ -178,6 +182,13 @@ class PreOrderService(BranchScopedMixin):
                     variant=data.variant,
                     layout_adjustments=data.layout_adjustments,
                 )
+            )
+        if require_complete:
+            self._require_complete(
+                data.materials,
+                data.requirements,
+                data.variant,
+                data.layout_adjustments,
             )
         validity_days = self.settings_service.get_preorder_config()[
             "preorder_validity_days"
@@ -274,6 +285,11 @@ class PreOrderService(BranchScopedMixin):
             # default covers the admin, who has no base branch to fall back to.
             default_branch_id=source.branch_id,
             note=f"Duplicada desde {source.code}",
+            # Not checked for pieces left uncut, on purpose: copying a closed quote
+            # is how one that has them gets fixed, and the copy is a draft that can
+            # be neither saved nor sent until it is. It also keeps this endpoint
+            # from running the optimization (see the router).
+            require_complete=False,
         )
 
     def update(
@@ -291,7 +307,6 @@ class PreOrderService(BranchScopedMixin):
         if data.client_id is not None:
             if self.db.get(ClientModel, data.client_id) is None:
                 raise EntityNotFoundError("Client", data.client_id)
-            preorder.client_id = data.client_id
         inputs_changed = data.materials is not None or data.requirements is not None
         next_materials = (
             [m.model_dump(mode="json") for m in data.materials]
@@ -348,6 +363,18 @@ class PreOrderService(BranchScopedMixin):
                     layout_adjustments=next_adjustments,
                 )
             )
+        # On every edit, not only one that touches the cut list: a quote saved
+        # before this rule existed with pieces left out (pre-order 157) must not
+        # be saved again as it is. Costs nothing extra, since the detail the
+        # router answers with computes this same plan right after.
+        self._require_complete(
+            next_materials,
+            next_requirements,
+            data.variant if data.variant is not None else preorder.variant or 0,
+            next_adjustments,
+        )
+        if data.client_id is not None:
+            preorder.client_id = data.client_id
         if inputs_changed:
             preorder.materials = next_materials
             preorder.requirements = next_requirements
@@ -409,6 +436,24 @@ class PreOrderService(BranchScopedMixin):
             price_level=preorder.price_level,
             variant=preorder.variant or 0,
             layout_adjustments=preorder.layout_adjustments,
+        )
+
+    def _require_complete(
+        self, materials, requirements, variant: int, layout_adjustments
+    ) -> None:
+        """Refuses (422 ``UNPLACED_PIECES``) inputs whose plan leaves a piece uncut.
+
+        Cache-first like every read: the wizard optimized these same inputs a
+        moment ago, so on a create this is a cache hit.
+        """
+        self.optimization_service.compute(
+            OptimizeRequest(
+                materials=materials,
+                requirements=requirements,
+                variant=variant,
+                layout_adjustments=layout_adjustments,
+            ),
+            require_complete=True,
         )
 
     def compute_payload(self, preorder: PreOrderModel) -> Tuple[dict, str]:
