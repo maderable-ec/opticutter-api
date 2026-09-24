@@ -82,6 +82,13 @@ from src.modules.optimizations.schemas import (
     SpecialEdge,
 )
 from src.modules.optimizations.summary import build_materials_summary
+from src.modules.optimizations.unplaced import (
+    PoolGeometry,
+    UnplacedPiecesError,
+    explain_unplaced,
+    format_mm,
+    unplaced_message,
+)
 from src.modules.optimizations.whole_boards import apply_whole_boards
 from src.modules.products.model import ProductModel, ProductType
 from src.modules.products.service import ProductService
@@ -319,9 +326,10 @@ class OptimizationService:
             edge_bandings_summary=payload.get("edge_bandings_summary"),
             layout_groups=payload["layout_groups"],
             pricing=PricingSummary(**pricing),
-            # ``get``, not ``[]``: a payload cached before this field existed is
-            # still served for a whole OPT_RESULT_TTL_SECONDS after the deploy.
-            unplaced=payload.get("unplaced") or [],
+            # Explained here, per response and never in the cache: the name, the
+            # useful area and the reason are derived from the same pools the
+            # search ran on, so the payload (and its hash) stay what they were.
+            unplaced=self._explain_unplaced(computed),
             layout_issues=payload.get("layout_issues") or [],
             adjustment_summary=payload.get("adjustment_summary"),
             layout_adjustments=payload.get("layout_adjustments"),
@@ -626,7 +634,10 @@ class OptimizationService:
         return kept or None
 
     def compute(
-        self, request: OptimizeRequest, mode: str = LENIENT
+        self,
+        request: OptimizeRequest,
+        mode: str = LENIENT,
+        require_complete: bool = False,
     ) -> Tuple[dict, str]:
         """Computes (or retrieves from cache) the optimization result.
 
@@ -641,6 +652,12 @@ class OptimizationService:
         the cache key, salted with the adjustments actually applied, so two
         orders that differ only by a hand adjustment are not deduplicated.
 
+        ``require_complete`` is for the writes (a quote saved or sent, an order
+        minted): a plan that leaves any piece uncut is refused with
+        ``UnplacedPiecesError``, naming every piece, its board and why. Checked
+        on the final plan, hand adjustments included, since a pending piece is
+        just as uncut as one the engine could not place.
+
         Timed from here — before the cache lookup, not around the search — because
         the question the log has to answer is "why was that quote slow", and a
         Redis that has started failing open (``src/shared/cache.py`` swallows every
@@ -648,7 +665,55 @@ class OptimizationService:
         symptom.
         """
         computed = self._compute(request, mode)
+        if require_complete and computed.payload.get("unplaced"):
+            raise UnplacedPiecesError(
+                unplaced_message(self._explain_unplaced(computed))
+            )
         return computed.payload, computed.plan_hash
+
+    def _explain_unplaced(self, computed: "_Computed") -> List[dict]:
+        """The payload's ``unplaced`` with each group's board, useful area and reason."""
+        # ``get``, not ``[]``: a payload cached before this field existed is
+        # still served for a whole OPT_RESULT_TTL_SECONDS after the deploy.
+        unplaced = computed.payload.get("unplaced") or []
+        if not unplaced:
+            return []
+        return explain_unplaced(
+            unplaced, self._pool_geometry(computed.prepared, set(computed.realized))
+        )
+
+    def _pool_geometry(
+        self, prepared: "_Prepared", adjusted: set
+    ) -> Dict[str, PoolGeometry]:
+        """Per pool, the sheets and trims its pieces were packed under.
+
+        Read off the objects the search got: the anchor plus its pooled offcuts,
+        and ``_pool_params``, so ``skipTrim`` counts exactly as it did there.
+        ``adjusted`` names the pools a hand adjustment was laid over.
+        """
+        out: Dict[str, PoolGeometry] = {}
+        for key, requirements in prepared.requirements_by_key.items():
+            anchor = prepared.resolved[key]
+            params = self._pool_params(anchor, prepared.cutting_params)
+            sheets = [anchor, *(prepared.pools.get(key) or ())]
+            kind = "retazo" if anchor.is_finite else "tablero"
+            out[key] = PoolGeometry(
+                name=anchor.name
+                or anchor.code
+                or f"{kind} {format_mm(anchor.height)}×{format_mm(anchor.width)} mm",
+                sheets=tuple((m.height, m.width) for m in sheets),
+                trims=(
+                    params.top_trim,
+                    params.bottom_trim,
+                    params.left_trim,
+                    params.right_trim,
+                ),
+                rotatable=frozenset(
+                    (r.height, r.width) for r in requirements if r.can_rotate
+                ),
+                adjusted=key in adjusted,
+            )
+        return out
 
     def _compute(self, request: OptimizeRequest, mode: str) -> "_Computed":
         started = time.perf_counter()

@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
+from src.modules.optimizations.unplaced import UnplacedPiecesError
 from src.modules.orders.model import OrderModel
 from src.modules.orders.schemas import OrderCreate
 from src.modules.orders.service import OrderService
@@ -1306,3 +1307,18 @@ def test_detail_names_the_material_of_every_piece(client, db_session):
     assert by_label["Tapa"]["materialKey"] == "r1"
     assert by_label["Tapa"]["productId"] is None
     assert by_label["Tapa"]["productCode"]
+
+
+def test_an_order_is_never_minted_with_a_piece_its_plan_does_not_cut(
+    client, db_session
+):
+    """The last net under the quote's own gates (pre-order 157)."""
+    c = _create_client(client)
+    b = _create_board(client)
+    # Taller than the 2440 mm board in any orientation, trimmed or not.
+    payload = _order_payload(c["id"], b["id"], height=2500)
+
+    with pytest.raises(UnplacedPiecesError, match="2 «Puerta» de 2500×700 mm"):
+        _mint_order(db_session, payload)
+
+    assert db_session.query(OrderModel).count() == 0

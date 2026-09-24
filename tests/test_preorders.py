@@ -2,6 +2,7 @@
 
 from datetime import datetime, timedelta
 
+from src.modules.orders.model import OrderModel
 from src.modules.preorders.model import PreOrderModel
 
 from .test_orders import _BRANCH, _create_board, _create_client, _order_payload
@@ -315,11 +316,10 @@ def test_update_preorder_rejects_orphaning_a_stored_requirement(client):
     assert client.get(f"/api/v1/preorders/{pre['id']}").status_code == 200
 
 
-def test_preorder_on_client_offcuts_only_round_trips(client):
-    """The retazo-anchored shape survives store → re-optimize → read."""
-    c = _create_client(client)
-    payload = {
-        "clientId": c["id"],
+def _offcut_only_payload(client_id, quantity=2):
+    """Two 1000×1000 client retazos, one pooled off the other, and 900×900 pieces."""
+    return {
+        "clientId": client_id,
         "branchId": _BRANCH,
         "materials": [
             {
@@ -345,7 +345,7 @@ def test_preorder_on_client_offcuts_only_round_trips(client):
                 "priority": 0,
                 "height": 900,
                 "width": 900,
-                "quantity": 3,
+                "quantity": quantity,
                 "materialKey": "r1",
                 "label": "Puerta",
                 "canRotate": True,
@@ -353,7 +353,12 @@ def test_preorder_on_client_offcuts_only_round_trips(client):
         ],
     }
 
-    created = client.post("/api/v1/preorders/", json=payload)
+
+def test_preorder_on_client_offcuts_only_round_trips(client):
+    """The retazo-anchored shape survives store → re-optimize → read."""
+    c = _create_client(client)
+
+    created = client.post("/api/v1/preorders/", json=_offcut_only_payload(c["id"]))
     assert created.status_code == 201
     data = created.json()["data"]
 
@@ -363,9 +368,9 @@ def test_preorder_on_client_offcuts_only_round_trips(client):
 
     opt = data["optimization"]
     assert opt["totalBoardsUsed"] == 0
-    # Two retazos hold one 900×900 each; the third piece is reported, not dropped.
+    # Two retazos hold one 900×900 each.
     assert len(opt["layouts"]) == 2
-    assert opt["unplaced"][0]["quantity"] == 1
+    assert opt["unplaced"] == []
 
 
 def test_skip_trim_survives_the_preorder_round_trip(client):
@@ -565,3 +570,154 @@ def test_duplicate_respects_the_open_cap(client, db_session):
 
 def test_duplicate_unknown_preorder_404(client):
     assert client.post("/api/v1/preorders/999999/duplicate").status_code == 404
+
+
+# --- Pieces the plan does not cut ---------------------------------------------
+#
+# Pre-order 157 went out to the client with five pieces its boards could not
+# hold, behind a warning nobody read. No write accepts that any more: the quote
+# is not created, saved or sent and the order is not minted. Reads still work,
+# so a quote stored before the rule opens and can be fixed.
+
+# Taller than the 2440 mm board whether it is trimmed or not, and too wide for
+# its 1220 mm turned: it fits in no orientation under any trim setting.
+_TOO_TALL = 2500
+
+
+def _make_uncut(db_session, preorder_id):
+    """Turns a stored quote into one saved before the rule: a piece too tall."""
+    db_pre = db_session.get(PreOrderModel, preorder_id)
+    db_pre.requirements = [dict(db_pre.requirements[0], height=_TOO_TALL)]
+    db_session.commit()
+
+
+def _unplaced_error(resp):
+    assert resp.status_code == 422
+    [error] = resp.json()["errors"]
+    assert error["code"] == "UNPLACED_PIECES"
+    return error["message"]
+
+
+def test_create_refuses_a_piece_larger_than_the_board(client):
+    c, b = _setup(client)
+
+    message = _unplaced_error(_create_preorder(client, c, b, height=_TOO_TALL))
+
+    assert message.startswith(
+        "Hay 2 piezas que no entran en el material y quedarían sin cortar: "
+    )
+    assert f"2 «Puerta» de {_TOO_TALL}×700 mm en Melamina MEL18" in message
+    assert client.get("/api/v1/preorders/").json()["meta"]["pagination"]["total"] == 0
+
+
+def test_create_refuses_retazos_that_run_out(client):
+    c = _create_client(client)
+
+    message = _unplaced_error(
+        client.post(
+            "/api/v1/preorders/", json=_offcut_only_payload(c["id"], quantity=3)
+        )
+    )
+
+    assert "1 «Puerta» de 900×900 mm en Retazo grande (no alcanza el material" in (
+        message
+    )
+
+
+def test_update_refuses_a_piece_that_does_not_fit_and_keeps_the_row(client):
+    c, b = _setup(client)
+    pre = _create_preorder(client, c, b).json()["data"]
+
+    resp = client.put(
+        f"/api/v1/preorders/{pre['id']}",
+        json={
+            "notes": "no debe quedar",
+            "requirements": [dict(pre["requirements"][0], height=_TOO_TALL)],
+        },
+    )
+
+    _unplaced_error(resp)
+    stored = client.get(f"/api/v1/preorders/{pre['id']}").json()["data"]
+    assert stored["requirements"][0]["height"] == 800
+    assert stored["notes"] is None
+
+
+def test_a_quote_saved_with_uncut_pieces_still_opens(client, db_session):
+    c, b = _setup(client)
+    pre = _create_preorder(client, c, b).json()["data"]
+    _make_uncut(db_session, pre["id"])
+
+    resp = client.get(f"/api/v1/preorders/{pre['id']}")
+
+    assert resp.status_code == 200
+    [unplaced] = resp.json()["data"]["optimization"]["unplaced"]
+    assert unplaced["reason"] == "larger_than_sheet"
+    assert unplaced["materialName"] == "Melamina MEL18"
+
+
+def test_a_quote_saved_with_uncut_pieces_is_neither_saved_nor_sent(client, db_session):
+    c, b = _setup(client)
+    pre = _create_preorder(client, c, b).json()["data"]
+    _make_uncut(db_session, pre["id"])
+
+    # Not even an edit elsewhere: the quote as it is must not be saved again.
+    _unplaced_error(
+        client.put(f"/api/v1/preorders/{pre['id']}", json={"notes": "otra cosa"})
+    )
+    _unplaced_error(client.post(f"/api/v1/preorders/{pre['id']}/review-link"))
+
+    stored = client.get(f"/api/v1/preorders/{pre['id']}").json()["data"]
+    assert stored["status"] == "draft"
+    assert stored["notes"] is None
+    assert stored["sentAt"] is None
+
+
+def test_fixing_the_pieces_unblocks_the_quote(client, db_session):
+    c, b = _setup(client)
+    pre = _create_preorder(client, c, b).json()["data"]
+    _make_uncut(db_session, pre["id"])
+
+    fixed = client.put(
+        f"/api/v1/preorders/{pre['id']}",
+        json={"requirements": [dict(pre["requirements"][0], height=2400)]},
+    )
+
+    assert fixed.status_code == 200
+    assert fixed.json()["data"]["optimization"]["unplaced"] == []
+    assert client.post(f"/api/v1/preorders/{pre['id']}/review-link").status_code == 201
+
+
+def test_duplicate_copies_a_quote_with_uncut_pieces(client, db_session):
+    """Copying is how such a quote gets fixed; the copy is gated on its own."""
+    c, b = _setup(client)
+    pre = _create_preorder(client, c, b).json()["data"]
+    _make_uncut(db_session, pre["id"])
+    _expire(db_session, pre["id"])
+
+    resp = client.post(f"/api/v1/preorders/{pre['id']}/duplicate")
+
+    assert resp.status_code == 201
+    copy_id = resp.json()["data"]["id"]
+    _unplaced_error(client.post(f"/api/v1/preorders/{copy_id}/review-link"))
+
+
+def test_the_client_cannot_confirm_a_quote_with_uncut_pieces(client, db_session):
+    c, b = _setup(client)
+    pre = _create_preorder(client, c, b).json()["data"]
+    link = client.post(f"/api/v1/preorders/{pre['id']}/review-link").json()["data"]
+    # Sent before the rule existed, like pre-order 157.
+    _make_uncut(db_session, pre["id"])
+
+    resp = client.post(f"/api/v1/public/review/{link['token']}/confirm")
+
+    assert resp.status_code == 422
+    [error] = resp.json()["errors"]
+    # The client gets no boards and trims, only that sales has to fix it.
+    assert error["code"] == "BUSINESS_RULE_ERROR"
+    assert "contacta a ventas" in error["message"]
+    assert db_session.query(OrderModel).count() == 0
+    stored = client.get(f"/api/v1/preorders/{pre['id']}").json()["data"]
+    assert stored["status"] == "sent"
+    assert stored["orderId"] is None
+    # The link is still active: once fixed, the client confirms with it.
+    assert client.get(f"/api/v1/public/review/{link['token']}").status_code == 200

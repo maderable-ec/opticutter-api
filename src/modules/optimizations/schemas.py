@@ -14,6 +14,7 @@ from pydantic import (
 from pydantic.alias_generators import to_camel
 
 from src.modules.clients.schemas import ClientResponse
+from src.modules.optimizations.unplaced import UnplacedReason
 from src.shared.schemas import CamelModel
 
 
@@ -894,11 +895,12 @@ class LayoutGroup(CamelModel):
 class UnplacedPiece(CamelModel):
     """A piece the available stock could not hold.
 
-    Only reachable when supply is finite — a catalog board is unlimited, so a
-    quote anchored on one only lists a piece here when it is larger than the
-    board itself. A job cut on the client's retazos, on the other hand, can run
-    out of material, and saying so is the whole point: the seller then raises the
-    retazo count, attaches a board, or drops the piece.
+    A catalog board is unlimited, so a quote anchored on one only lists a piece
+    here when it is larger than the board's useful area. A job cut on the
+    client's retazos can also run out of material. Either way the plan does not
+    cut it, and no write accepts that: the quote is not saved or sent and the
+    order is not minted (``UNPLACED_PIECES``) until the seller fixes the size,
+    changes the material, adds retazos or drops the piece.
     """
 
     material_key: str
@@ -906,6 +908,25 @@ class UnplacedPiece(CamelModel):
     height: float
     width: float
     quantity: int = Field(..., description="How many instances did not fit")
+    material_name: Optional[str] = Field(
+        default=None, description="The board or retazo the pieces were meant for"
+    )
+    usable_height: Optional[float] = Field(
+        default=None, description="That material's useful height, trims off"
+    )
+    usable_width: Optional[float] = Field(
+        default=None, description="That material's useful width, trims off"
+    )
+    reason: Optional[UnplacedReason] = Field(
+        default=None,
+        description=(
+            "`larger_than_sheet`: bigger than the sheet itself; "
+            "`larger_than_trimmed_sheet`: bigger than the useful area, but it "
+            "would fit untrimmed (`skipTrim`); `out_of_stock`: it fits, but the "
+            "finite retazos ran out; `pending`: it fits, but the hand adjustment "
+            "of its pool left it on no sheet"
+        ),
+    )
 
 
 class OptimizeResponse(CamelModel):
@@ -954,10 +975,11 @@ class OptimizeResponse(CamelModel):
     unplaced: List[UnplacedPiece] = Field(
         default_factory=list,
         description=(
-            "Pieces that did not fit the available stock, grouped by size. Empty "
-            "on every catalog-anchored quote; populated when a pool of finite "
-            "offcuts runs out. The plan returned is still valid for everything "
-            "else — these are the pieces it does NOT cut."
+            "Pieces that did not fit the available stock, grouped by size: a "
+            "piece larger than its board, or a pool of finite offcuts that ran "
+            "out. The plan returned is valid for everything else, but these are "
+            "pieces it does NOT cut, so no quote or order can be saved with any "
+            "(422 `UNPLACED_PIECES`)."
         ),
     )
     layout_issues: List["LayoutIssue"] = Field(

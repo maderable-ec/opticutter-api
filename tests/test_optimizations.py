@@ -1120,15 +1120,20 @@ def test_optimize_offcut_only_reports_what_does_not_fit(client):
     data = client.post("/api/v1/optimize/", json=payload).json()["data"]
 
     assert len(data["layouts"]) == 2
-    assert data["unplaced"] == [
-        {
-            "materialKey": "r1",
-            "label": "Puerta",
-            "height": 900,
-            "width": 900,
-            "quantity": 1,
-        }
-    ]
+    [unplaced] = data["unplaced"]
+    # The useful area depends on the trims of the environment the suite runs in.
+    unplaced.pop("usableHeight")
+    unplaced.pop("usableWidth")
+    assert unplaced == {
+        "materialKey": "r1",
+        "label": "Puerta",
+        "height": 900,
+        "width": 900,
+        "quantity": 1,
+        # Why, for the seller: it fits a retazo, the retazos ran out.
+        "materialName": "Retazo grande",
+        "reason": "out_of_stock",
+    }
 
 
 def test_optimize_offcut_supply_is_finite(client):

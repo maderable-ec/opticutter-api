@@ -29,6 +29,7 @@ from src.modules.notifications.emitter import (
     notify_order_confirmed,
     notify_order_low_stock,
 )
+from src.modules.optimizations.unplaced import UnplacedPiecesError
 from src.modules.orders.schemas import OrderCreate
 from src.modules.orders.service import OrderService
 from src.modules.preorders.model import (
@@ -81,7 +82,9 @@ class PreOrderReviewService:
         """Creates a new link (revoking the previous active one) and returns the token.
 
         Only for open pre-orders (``draft``/``sent``); requires the client to have
-        a phone number (a quote isn't sent to someone who can't be invoiced).
+        a phone number (a quote isn't sent to someone who can't be invoiced) and
+        a plan that cuts every piece (``UNPLACED_PIECES`` otherwise: the gate for
+        a quote saved before that rule, or a copy made by ``duplicate``).
         Transitions the pre-order to ``sent`` and refreshes its validity. Returns
         ``(link, raw_token)``; the token only ever exists in this response.
         """
@@ -93,6 +96,9 @@ class PreOrderReviewService:
                 "abierta (no confirmada, rechazada ni vencida)."
             )
         require_phone(preorder.client)
+        self.preorders.optimization_service.compute(
+            self.preorders.build_request(preorder), require_complete=True
+        )
         for previous in preorder.review_links:
             if previous.status == ReviewLinkStatus.active.value:
                 previous.status = ReviewLinkStatus.revoked.value
@@ -165,21 +171,30 @@ class PreOrderReviewService:
             return preorder  # already confirmed: benign retry
 
         actor = client_actor()
-        order = self.orders.create(
-            OrderCreate(
-                materials=preorder.materials,
-                requirements=preorder.requirements,
-                additional_services=preorder.additional_services,
-                client_id=preorder.client_id,
-                branch_id=preorder.branch_id,
-                price_level=preorder.price_level,
-                variant=preorder.variant or 0,
-                layout_adjustments=preorder.layout_adjustments,
-                notes=preorder.notes,
-                source=preorder.source,
-            ),
-            actor=actor,
-        )
+        try:
+            order = self.orders.create(
+                OrderCreate(
+                    materials=preorder.materials,
+                    requirements=preorder.requirements,
+                    additional_services=preorder.additional_services,
+                    client_id=preorder.client_id,
+                    branch_id=preorder.branch_id,
+                    price_level=preorder.price_level,
+                    variant=preorder.variant or 0,
+                    layout_adjustments=preorder.layout_adjustments,
+                    notes=preorder.notes,
+                    source=preorder.source,
+                ),
+                actor=actor,
+            )
+        except UnplacedPiecesError:
+            # The staff message names boards and trims; the client only needs to
+            # know it is not their doing and who fixes it. Nothing was written:
+            # the pre-order stays open and the link active.
+            raise BusinessRuleError(
+                "La cotización tiene piezas que no entran en el material y no se "
+                "puede confirmar todavía; contacta a ventas para corregirla."
+            )
 
         now = datetime.utcnow()
         self.preorders._record_transition(
