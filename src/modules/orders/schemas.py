@@ -506,6 +506,9 @@ class CuttingPlanResponse(CamelModel):
     order_id: int
     order_code: Optional[str] = None
     status: OrderStatus
+    client: ClientResponse = Field(
+        ..., description="Whose job is on the saw, next to its reference"
+    )
     notes: Optional[str] = Field(
         default=None,
         description="Commercial reference (project/site) frozen on the order",

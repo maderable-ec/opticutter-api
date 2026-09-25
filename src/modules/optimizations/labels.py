@@ -65,6 +65,7 @@ def edge_notation(
     band_type: Optional[str] = None,
     alias: Optional[str] = None,
     special: Iterable[Mapping[str, Optional[str]]] = (),
+    sep: str = " · ",
 ) -> str:
     """The whole banding of a piece: the auto part, then each special tape.
 
@@ -77,7 +78,8 @@ def edge_notation(
     went special reads ``1L1C``. ``special`` holds mappings with ``side``
     (nominal), ``band_type`` and ``alias``. With no special edge this IS
     ``edge_banding_notation``, byte for byte, which is what keeps every existing
-    document and label unchanged.
+    document and label unchanged. ``sep`` joins the groups; the piece export
+    passes a space, the shop's own ``1L CD 1C CS``, to stay in ASCII.
     """
     special = list(special or ())
     if not special:
@@ -93,7 +95,7 @@ def edge_notation(
         edge_banding_notation(group, tape_type, tape_alias)
         for (tape_type, tape_alias), group in tapes.items()
     ]
-    return " · ".join(p for p in parts if p)
+    return sep.join(p for p in parts if p)
 
 
 # How each workshop code is named where it is printed, in printing order. Keyed
@@ -108,15 +110,16 @@ _WORKSHOP_CODE_ABBR = (
 )
 
 
-def workshop_codes_line(codes: Mapping[str, Optional[str]]) -> str:
+def workshop_codes_line(codes: Mapping[str, Optional[str]], sep: str = " · ") -> str:
     """The workshop codes of a piece as one line.
 
     ``'Abis X1 · Ran R2 · Ens E3 · Div D1'``: abisagrado, ranurado, ensamble,
     división, in that order. Only the codes present are written, each after the
     service it belongs to -- a code alone would not say whether the piece is
-    hinged or grooved. Returns ``''`` for a piece with none.
+    hinged or grooved. Returns ``''`` for a piece with none. ``sep`` as in
+    ``edge_notation``.
     """
-    return " · ".join(
+    return sep.join(
         f"{abbr} {codes[field]}"
         for field, abbr in _WORKSHOP_CODE_ABBR
         if codes.get(field)

@@ -3,7 +3,7 @@ from typing import List, Literal, Optional
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, Query, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 
 from src.modules.optimizations.carrier import DocumentCarrier
 from src.modules.optimizations.documents import build_order_packet, pdf_response
@@ -13,6 +13,7 @@ from src.modules.orders.attachment_service import (
     attachment_service,
 )
 from src.modules.orders.model import ActivityStatus, ActivityType, OrderStatus
+from src.modules.orders.pieces_export import customer_name, pieces_csv, pieces_xml
 from src.modules.orders.schemas import (
     ActivityResult,
     ActivityUpdate,
@@ -389,6 +390,38 @@ def get_order_document(
         carrier, att_svc.iter_annex_bytes(order_id, branch_scope=branch_scope)
     )
     return pdf_response(packet, f"orden_pedido_{order.code or order.id}.pdf", format)
+
+
+_PIECES_MEDIA_TYPES = {"csv": "text/csv; charset=utf-8", "xml": "application/xml"}
+
+
+# Exempt from the JSON envelope: the file itself, for another program to read.
+@router.get("/{order_id}/pieces/export", dependencies=[_READ])
+def export_order_pieces(
+    order_id: int,
+    format: Literal["csv", "xml"] = Query(
+        ...,
+        description="'csv' or 'xml', both in the commercial cutting program's shape",
+    ),
+    svc: OrderService = Depends(order_service),
+    branch_scope: Optional[int] = Depends(get_branch_scope),
+):
+    """The order's cut list, to load into the workshop's commercial cutting program.
+
+    The inverse of the web's piece import: the frozen pieces, with the banding,
+    the piece's own text and its workshop codes in the label.
+    """
+    order = svc.get_scoped_or_404(order_id, branch_scope)
+    if format == "csv":
+        content = pieces_csv(order.pieces)
+    else:
+        content = pieces_xml(order.pieces, customer_name(order.client))
+    filename = f"piezas_{order.code or order.id}.{format}"
+    return Response(
+        content,
+        media_type=_PIECES_MEDIA_TYPES[format],
+        headers={"Content-Disposition": _content_disposition(filename, "attachment")},
+    )
 
 
 # --------------------------------------------------------------------------- #
