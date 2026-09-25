@@ -2,8 +2,10 @@
 
 Consumed by the Maderable frontend from the link's URL. They don't expose
 internal identifiers or the client's contact details (see
-``ReviewPreOrderResponse``); the breakdown and prices are recomputed live. The
-client reviews the quote on-screen (no PDF download from the public link).
+``ReviewPreOrderResponse``); the breakdown and prices are recomputed live until
+the client confirms, and from then on they are the ones the order froze
+(``PreOrderService.quoted_payload``). The client reviews the quote on-screen (no
+PDF download from the public link).
 """
 
 from typing import List, Optional
@@ -205,7 +207,7 @@ def _to_review_layouts(payload: dict) -> List[ReviewLayoutGroup]:
 def _to_review_response(
     preorder: PreOrderModel, payload: dict, pricing: dict
 ) -> ReviewPreOrderResponse:
-    """Sanitized projection of the pre-order + its recomputed optimization.
+    """Sanitized projection of the pre-order + the optimization it shows.
 
     Lines are already at the price level the seller chose (the boards they
     marked); the tax is the single document-level addition (``pricing``).
@@ -288,10 +290,12 @@ def _to_review_response(
 def get_review(
     token: str, svc: PreOrderReviewService = Depends(preorder_review_service)
 ):
-    """Sanitized detail of the quote associated with the token (live prices)."""
+    """Sanitized detail of the quote associated with the token.
+
+    Live prices while open; once confirmed, the plan and prices of its order.
+    """
     preorder = svc.get_review(token)
-    payload, _ = svc.preorders.compute_payload(preorder)
-    pricing = svc.preorders.build_pricing_for(preorder, payload)
+    payload, pricing = svc.preorders.quoted_payload(preorder)
     return ok(_to_review_response(preorder, payload, pricing))
 
 
@@ -305,8 +309,7 @@ def confirm_review(
     """The client confirms: creates the immutable Order; benign retry."""
     note = data.note if data else None
     preorder = svc.confirm(token, note=note, meta=_client_meta(request))
-    payload, _ = svc.preorders.compute_payload(preorder)
-    pricing = svc.preorders.build_pricing_for(preorder, payload)
+    payload, pricing = svc.preorders.quoted_payload(preorder)
     return ok(_to_review_response(preorder, payload, pricing))
 
 
@@ -320,8 +323,7 @@ def reject_review(
     """The client rejects the quote (``sent → rejected``)."""
     note = data.note if data else None
     preorder = svc.reject(token, note=note, meta=_client_meta(request))
-    payload, _ = svc.preorders.compute_payload(preorder)
-    pricing = svc.preorders.build_pricing_for(preorder, payload)
+    payload, pricing = svc.preorders.quoted_payload(preorder)
     return ok(_to_review_response(preorder, payload, pricing))
 
 
@@ -336,6 +338,5 @@ def request_changes_review(
     """The client requests adjustments (``sent → changes_requested``); the link stays alive."""
     note = data.note if data else None
     preorder = svc.request_changes(token, note=note)
-    payload, _ = svc.preorders.compute_payload(preorder)
-    pricing = svc.preorders.build_pricing_for(preorder, payload)
+    payload, pricing = svc.preorders.quoted_payload(preorder)
     return ok(_to_review_response(preorder, payload, pricing))

@@ -45,7 +45,12 @@ router = APIRouter(
 
 
 def _detail(svc: PreOrderService, preorder: PreOrderModel) -> PreOrderResponse:
-    """Pre-order detail with its recomputed optimization (live prices)."""
+    """Pre-order detail with its optimization.
+
+    Recomputed at live prices, except a confirmed quote, which shows the plan and
+    prices its order froze (``optimizationSource`` says which).
+    """
+    optimization, source = svc.build_optimize_response(preorder)
     return PreOrderResponse(
         id=preorder.id,
         code=preorder.code,
@@ -68,7 +73,8 @@ def _detail(svc: PreOrderService, preorder: PreOrderModel) -> PreOrderResponse:
         materials=preorder.materials,
         requirements=preorder.requirements,
         additional_services=preorder.additional_services,
-        optimization=svc.build_optimize_response(preorder),
+        optimization=optimization,
+        optimization_source=source,
         history=preorder.history,
     )
 
@@ -163,7 +169,7 @@ def get_preorder(
     svc: PreOrderService = Depends(preorder_service),
     branch_scope: Optional[int] = Depends(get_branch_scope),
 ):
-    """Gets a pre-order by ID with its recomputed optimization."""
+    """Gets a pre-order by ID with its optimization (the order's once confirmed)."""
     return ok(_detail(svc, svc.get_scoped_or_404(preorder_id, branch_scope)))
 
 

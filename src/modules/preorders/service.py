@@ -1,7 +1,9 @@
+import logging
 from datetime import date, datetime, time, timedelta
 from typing import List, Optional, Tuple
 
 from fastapi import Depends
+from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy.orm import Session, joinedload
 
 from src.modules.branches.service import resolve_branch_for_create
@@ -24,7 +26,11 @@ from src.modules.preorders.model import (
     PreOrderStatus,
     PreOrderStatusHistoryModel,
 )
-from src.modules.preorders.schemas import PreOrderCreate, PreOrderUpdate
+from src.modules.preorders.schemas import (
+    OptimizationSource,
+    PreOrderCreate,
+    PreOrderUpdate,
+)
 from src.modules.settings.service import SettingsService
 from src.shared.audit import Actor, system_actor
 from src.shared.branch_scope import BranchScopedMixin
@@ -35,6 +41,8 @@ from src.shared.exceptions import (
     ValidationError,
 )
 
+logger = logging.getLogger(__name__)
+
 _OPEN_VALUES = [s.value for s in OPEN_STATUSES]
 _TERMINAL_VALUES = [s.value for s in TERMINAL_STATUSES]
 
@@ -44,8 +52,11 @@ class PreOrderService(BranchScopedMixin):
 
     Freezes nothing: stores the inputs (``materials`` + ``requirements``) and
     delegates the computation to ``OptimizationService.compute`` (cache-first)
-    every time the quote or the PDF needs to be shown. The immutable Order is
-    minted separately, when the client confirms (see ``PreOrderReviewService``).
+    every time the quote needs to be shown. The immutable Order is minted
+    separately, when the client confirms (see ``PreOrderReviewService``), and
+    from then on a confirmed quote shows the plan and the money its order froze
+    (``_frozen_order``): an engine upgrade or a catalog price change must never
+    rewrite what was confirmed and cut.
 
     Branch-scoped (``BranchScopedMixin``): staff only sees/edits the ones in their
     branch; the admin (scope ``None``) sees all of them.
@@ -456,6 +467,36 @@ class PreOrderService(BranchScopedMixin):
             require_complete=True,
         )
 
+    @staticmethod
+    def _frozen_order(preorder: PreOrderModel) -> Optional[OrderModel]:
+        """The order whose snapshot a confirmed pre-order shows, if it has one.
+
+        Only ``confirmed``: every other status still quotes live. The FK is
+        ``SET NULL``, so a confirmed pre-order may have lost its order, and a
+        snapshot without ``layouts`` or ``pricing`` is no quote to show; all of
+        those recompute.
+        """
+        if preorder.status != PreOrderStatus.confirmed.value:
+            return None
+        order = preorder.order
+        snapshot = (order.optimization_snapshot if order is not None else None) or {}
+        if not snapshot.get("layouts") or not snapshot.get("pricing"):
+            return None
+        return order
+
+    def quoted_payload(self, preorder: PreOrderModel) -> Tuple[dict, dict]:
+        """The payload and money block the quote shows: ``(payload, pricing)``.
+
+        A confirmed quote reads its order's snapshot, whose ``pricing`` is the
+        money frozen with it; any other recomputes (cache-first) at live prices.
+        """
+        order = self._frozen_order(preorder)
+        if order is not None:
+            snapshot = order.optimization_snapshot
+            return snapshot, snapshot["pricing"]
+        payload, _ = self.compute_payload(preorder)
+        return payload, self.build_pricing_for(preorder, payload)
+
     def compute_payload(self, preorder: PreOrderModel) -> Tuple[dict, str]:
         """Optimizer payload (cache-first) for the pre-order."""
         return self.optimization_service.compute(self.build_request(preorder))
@@ -474,15 +515,42 @@ class PreOrderService(BranchScopedMixin):
             self.settings_service.get_tax_rate(),
         )
 
-    def build_optimize_response(self, preorder: PreOrderModel) -> OptimizeResponse:
+    def build_optimize_response(
+        self, preorder: PreOrderModel
+    ) -> Tuple[OptimizeResponse, OptimizationSource]:
         """Optimization response (with client) for the internal detail view.
 
-        Threads the stored services so ``optimization.pricing`` already reflects
-        the services-inclusive total.
+        A confirmed quote answers with its order's snapshot (``"order"``).
+        Otherwise it recomputes (``"live"``), threading the stored services so
+        ``optimization.pricing`` already reflects the services-inclusive total.
+        A snapshot that no longer validates falls back to the recompute: a read
+        never raises (rule 4).
         """
-        return self.optimization_service.optimize_response(
-            self.build_request(preorder),
-            additional_services=preorder.additional_services,
+        order = self._frozen_order(preorder)
+        if order is not None:
+            try:
+                return (
+                    self.optimization_service.frozen_response(
+                        order.optimization_snapshot,
+                        client=preorder.client,
+                        plan_hash=order.optimization_hash,
+                    ),
+                    "order",
+                )
+            except (PydanticValidationError, KeyError):
+                logger.warning(
+                    "preorder %s: the snapshot of order %s does not validate; "
+                    "recomputing the quote live",
+                    preorder.id,
+                    order.id,
+                    exc_info=True,
+                )
+        return (
+            self.optimization_service.optimize_response(
+                self.build_request(preorder),
+                additional_services=preorder.additional_services,
+            ),
+            "live",
         )
 
     def _record_transition(
