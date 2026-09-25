@@ -7,6 +7,7 @@ public endpoints, and idempotent order creation.
 
 from datetime import datetime, timedelta
 
+from src.modules.orders.model import OrderModel
 from src.modules.preorders.model import PreOrderModel
 from src.shared.config import config
 
@@ -565,3 +566,92 @@ def test_confirmed_order_continues_state_machine(client):
     )
     assert ok.status_code == 200
     assert ok.json()["data"]["status"] == "queued"
+
+
+# ---------------------------------------------------------------------------
+# A confirmed quote shows what its order froze
+# ---------------------------------------------------------------------------
+
+
+def _confirm_then_reprice(client, new_price=91.0):
+    """A confirmed quote whose board then changes price in the catalog.
+
+    The price is in the optimization hash, so a recompute would miss the cache
+    and quote the new price: the same thing an engine upgrade does to the plan.
+    """
+    c = _create_client(client)
+    b = _create_board(client)
+    pre = _create_preorder(client, c, b)
+    link = _generate_link(client, pre["id"])
+    client.post(f"/api/v1/public/review/{link['token']}/confirm")
+    order_id = client.get(f"/api/v1/preorders/{pre['id']}").json()["data"]["orderId"]
+    order = client.get(f"/api/v1/orders/{order_id}").json()["data"]
+    assert (
+        client.put(f"/api/v1/products/{b['id']}", json={"price": new_price}).status_code
+        == 200
+    )
+    return c, b, pre, link, order
+
+
+def test_a_confirmed_quote_shows_the_plan_its_order_froze(client):
+    c, b, pre, _, order = _confirm_then_reprice(client)
+
+    detail = client.get(f"/api/v1/preorders/{pre['id']}").json()["data"]
+    assert detail["optimizationSource"] == "order"
+    optimization = detail["optimization"]
+    assert optimization["pricing"]["total"] == order["total"]
+    assert optimization["optimizationHash"] == order["optimizationHash"]
+    assert optimization["totalBoardsUsed"] == order["totalBoardsUsed"]
+    assert optimization["client"]["id"] == c["id"]
+    assert optimization["layouts"]
+    assert optimization["unplaced"] == []
+
+    # Control: the same inputs, still open, do quote the new price.
+    draft = client.get(
+        f"/api/v1/preorders/{_create_preorder(client, c, b)['id']}"
+    ).json()["data"]
+    assert draft["optimizationSource"] == "live"
+    assert draft["optimization"]["pricing"]["total"] > order["total"]
+
+
+def test_the_review_link_of_a_confirmed_quote_shows_its_order(client):
+    _, _, _, link, order = _confirm_then_reprice(client)
+
+    review = client.get(f"/api/v1/public/review/{link['token']}").json()["data"]
+    assert review["status"] == "confirmed"
+    assert review["orderCode"] == order["code"]
+    assert review["total"] == order["total"]
+    assert review["layoutGroups"]
+
+    # The benign re-confirm answers with the same frozen quote.
+    again = client.post(f"/api/v1/public/review/{link['token']}/confirm")
+    assert again.json()["data"]["total"] == order["total"]
+
+
+def test_a_confirmed_quote_without_its_order_recomputes(client, db_session):
+    """The FK is ``SET NULL``: a read without the order must still answer."""
+    _, _, pre, link, order = _confirm_then_reprice(client)
+    db_pre = db_session.get(PreOrderModel, pre["id"])
+    db_pre.order_id = None
+    db_session.commit()
+
+    resp = client.get(f"/api/v1/preorders/{pre['id']}")
+    assert resp.status_code == 200
+    detail = resp.json()["data"]
+    assert detail["optimizationSource"] == "live"
+    assert detail["optimization"]["pricing"]["total"] > order["total"]
+    assert client.get(f"/api/v1/public/review/{link['token']}").status_code == 200
+
+
+def test_a_snapshot_that_no_longer_validates_recomputes(client, db_session):
+    """Rule 4: an old snapshot the schema rejects is a live read, never a 500."""
+    _, _, pre, _, order = _confirm_then_reprice(client)
+    db_order = db_session.get(OrderModel, order["id"])
+    snapshot = dict(db_order.optimization_snapshot)
+    del snapshot["materials_summary"]
+    db_order.optimization_snapshot = snapshot
+    db_session.commit()
+
+    resp = client.get(f"/api/v1/preorders/{pre['id']}")
+    assert resp.status_code == 200
+    assert resp.json()["data"]["optimizationSource"] == "live"

@@ -243,6 +243,29 @@ class _Prepared:
         return {key for key, rm in self.resolved.items() if rm.is_finite}
 
 
+def _payload_fields(payload: dict) -> dict:
+    """The ``OptimizeResponse`` fields read straight off a computed payload.
+
+    Shared by the live response and the frozen one, so an order's snapshot is
+    served with exactly the fields a fresh computation would carry.
+    """
+    return dict(
+        variant=payload.get("variant", 0),
+        total_boards_used=payload["total_boards_used"],
+        total_boards_cost=payload["total_boards_cost"],
+        total_edge_banding_cost=payload.get("total_edge_banding_cost", 0.0),
+        total_cut_linear_m=payload.get("total_cut_linear_m", 0.0),
+        total_edge_banding_linear_m=payload.get("total_edge_banding_linear_m", 0.0),
+        layouts=payload["layouts"],
+        materials_summary=payload["materials_summary"],
+        edge_bandings_summary=payload.get("edge_bandings_summary"),
+        layout_groups=payload["layout_groups"],
+        layout_issues=payload.get("layout_issues") or [],
+        adjustment_summary=payload.get("adjustment_summary"),
+        layout_adjustments=payload.get("layout_adjustments"),
+    )
+
+
 @dataclass
 class _Computed:
     """One computation, with what the layout editor needs besides the payload."""
@@ -315,24 +338,31 @@ class OptimizationService:
             id=None,
             client=client,
             optimization_hash=computed.plan_hash,
-            variant=payload.get("variant", 0),
-            total_boards_used=payload["total_boards_used"],
-            total_boards_cost=payload["total_boards_cost"],
-            total_edge_banding_cost=payload.get("total_edge_banding_cost", 0.0),
-            total_cut_linear_m=payload.get("total_cut_linear_m", 0.0),
-            total_edge_banding_linear_m=payload.get("total_edge_banding_linear_m", 0.0),
-            layouts=payload["layouts"],
-            materials_summary=payload["materials_summary"],
-            edge_bandings_summary=payload.get("edge_bandings_summary"),
-            layout_groups=payload["layout_groups"],
+            **_payload_fields(payload),
             pricing=PricingSummary(**pricing),
             # Explained here, per response and never in the cache: the name, the
             # useful area and the reason are derived from the same pools the
             # search ran on, so the payload (and its hash) stay what they were.
             unplaced=self._explain_unplaced(computed),
-            layout_issues=payload.get("layout_issues") or [],
-            adjustment_summary=payload.get("adjustment_summary"),
-            layout_adjustments=payload.get("layout_adjustments"),
+        )
+
+    @staticmethod
+    def frozen_response(
+        payload: dict, *, client: ClientModel | None, plan_hash: str | None
+    ) -> OptimizeResponse:
+        """The response for a plan already frozen, such as an order's snapshot.
+
+        Computes nothing and never touches the cache: the plan and the money are
+        the ones stored with the payload (``pricing``). ``unplaced`` is empty
+        because an order is only minted from a plan that cuts every piece.
+        """
+        return OptimizeResponse(
+            id=None,
+            client=client,
+            optimization_hash=plan_hash,
+            **_payload_fields(payload),
+            pricing=PricingSummary(**payload["pricing"]),
+            unplaced=[],
         )
 
     def evaluate_layout(

@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from pydantic import Field, model_validator
 
@@ -16,6 +16,10 @@ from src.modules.optimizations.schemas import (
 )
 from src.modules.preorders.model import PreOrderStatus, ReviewLinkStatus
 from src.shared.schemas import CamelModel
+
+# Where the plan a pre-order shows comes from: recomputed now at live prices, or
+# the snapshot its order froze when the client confirmed.
+OptimizationSource = Literal["live", "order"]
 
 
 class PreOrderCreate(CamelModel):
@@ -125,7 +129,7 @@ class PreOrderStatusHistoryResponse(CamelModel):
 
 
 class PreOrderResponse(CamelModel):
-    """Pre-order detail with its recomputed optimization (live prices)."""
+    """Pre-order detail with its optimization: live, or the order's once confirmed."""
 
     id: int
     code: Optional[str] = None
@@ -168,7 +172,15 @@ class PreOrderResponse(CamelModel):
         default_factory=list, description="Stored additional services (editable)"
     )
     optimization: OptimizeResponse = Field(
-        ..., description="Recomputed cutting result with live prices (incl. services)"
+        ...,
+        description="Cutting result with its prices (incl. services): recomputed "
+        "live, or frozen by the order once confirmed (see `optimizationSource`)",
+    )
+    optimization_source: OptimizationSource = Field(
+        default="live",
+        description="`live`: recomputed on this read, at today's prices and "
+        "engine. `order`: the plan and money the order froze when the client "
+        "confirmed; engine upgrades and catalog changes never move it",
     )
     history: List[PreOrderStatusHistoryResponse] = Field(default_factory=list)
 
@@ -389,7 +401,9 @@ class ReviewPreOrderResponse(CamelModel):
 
     Deliberately excludes internal identifiers (numeric id, client_id), the
     client's contact details, the raw inputs and internal commercial metadata.
-    Prices are live (recomputed); the breakdown is built from the optimization.
+    Prices are live (recomputed) until the client confirms; a confirmed quote
+    shows the plan and prices its order froze. The breakdown is built from that
+    optimization.
     """
 
     reference: Optional[str] = Field(
@@ -442,5 +456,6 @@ class ReviewPreOrderResponse(CamelModel):
     pieces: List[ReviewPieceResponse] = Field(default_factory=list)
     layout_groups: List[ReviewLayoutGroup] = Field(
         default_factory=list,
-        description="Cutting patterns of the live optimization, for the diagram",
+        description="Cutting patterns of the quote's optimization (the order's "
+        "once confirmed), for the diagram",
     )
