@@ -147,6 +147,15 @@ def test_cutting_plan_carries_the_commercial_reference(client, db_session):
     assert _get_plan(client, order["id"])["notes"] == "Obra Los Álamos — closets"
 
 
+def test_cutting_plan_carries_the_client(client, db_session):
+    """Next to the reference, the touch view names whose job is on the saw."""
+    order = _create_order(client, db_session)
+
+    plan_client = _get_plan(client, order["id"])["client"]
+    assert plan_client["firstName"] == "Ada"
+    assert plan_client["lastName"] == "Lovelace"
+
+
 def test_cutting_plan_carries_the_branch_printing_switch(client, db_session):
     """The touch view gates its own label dispatch, so marking a piece cut in a shop
     with no thermal printer never fires the print request."""
