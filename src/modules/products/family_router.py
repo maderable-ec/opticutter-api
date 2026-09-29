@@ -30,6 +30,7 @@ from src.modules.products.family_service import (
     product_family_service,
 )
 from src.modules.products.model import ProductFamilyModel
+from src.modules.products.service import ProductService, product_service
 from src.modules.users.dependencies import require_permission
 from src.shared.crud import ListSort
 from src.shared.pagination import PageParams
@@ -161,13 +162,15 @@ def list_families(
     dependencies=[_READ],
 )
 def get_family(
-    family_id: int, svc: ProductFamilyService = Depends(product_family_service)
+    family_id: int,
+    svc: ProductFamilyService = Depends(product_family_service),
+    products: ProductService = Depends(product_service),
 ):
     """One family with its stats and its members, split into boards and tapes."""
     family, stats, boards, bandings = svc.detail(family_id)
     payload = _to_response(family, stats)
-    payload["boards"] = boards
-    payload["edge_bandings"] = bandings
+    payload["boards"] = products.with_tax(boards)
+    payload["edge_bandings"] = products.with_tax(bandings)
     return ok(payload)
 
 

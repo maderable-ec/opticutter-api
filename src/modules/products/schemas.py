@@ -109,6 +109,13 @@ class ProductResponse(CamelModel):
     price: float
     price_2: Optional[float] = None
     price_3: Optional[float] = None
+    # The same three levels WITH tax, at the configured rate. Computed here
+    # because the seller lists the catalog but cannot read ``/settings/taxes``.
+    # Null for a level whose net price is null. Filled by
+    # ``ProductService.with_tax``; a route that skips it returns nulls.
+    price_with_tax: Optional[float] = None
+    price_2_with_tax: Optional[float] = None
+    price_3_with_tax: Optional[float] = None
     is_active: bool
     attributes: dict
     family_id: Optional[int] = None
