@@ -1473,3 +1473,68 @@ def test_seller_can_sync_the_catalog_but_not_edit_products(
         assert client.delete(f"/api/v1/products/{created['id']}").status_code == 403
     finally:
         client.headers["Authorization"] = admin_auth
+
+
+# --- Prices with tax ------------------------------------------------------------
+def test_a_product_carries_every_level_with_tax_at_the_configured_rate(client):
+    """The seller lists the catalog but cannot read ``/settings/taxes``, so the
+    product itself brings its gross prices. A level with no net price has none."""
+    created = client.post(
+        "/api/v1/products/", json={**_board_payload(), "price": 100.0, "price2": 90.0}
+    ).json()["data"]
+    assert created["priceWithTax"] == 115.0
+    assert created["price2WithTax"] == 103.5
+    assert created["price3WithTax"] is None
+    # The net prices are untouched: they are still what the documents bill.
+    assert created["price"] == 100.0 and created["price2"] == 90.0
+
+    client.patch("/api/v1/settings/taxes", json={"taxRate": 0.12})
+    got = client.get(f"/api/v1/products/{created['id']}").json()["data"]
+    assert got["priceWithTax"] == 112.0
+    assert got["price2WithTax"] == 100.8
+
+
+def test_the_price_with_tax_rounds_the_tax_the_way_a_quote_does(client):
+    # 17.39 * 0.15 = 2.6085 -> 2.61, so 20.00: the total a one-unit quote prints.
+    created = client.post(
+        "/api/v1/products/", json={**_board_payload(), "price": 17.39}
+    ).json()["data"]
+    assert created["priceWithTax"] == 20.0
+
+
+def test_every_route_that_returns_a_product_fills_its_price_with_tax(client):
+    """``with_tax`` is opt-in per route, so this is the net for one that forgets."""
+    family = client.post("/api/v1/product-families/", json={"name": "Cashmere"}).json()[
+        "data"
+    ]
+    board = client.post(
+        "/api/v1/products/",
+        json={**_board_payload(code="IVA18"), "familyId": family["id"]},
+    ).json()["data"]
+    client.post(
+        "/api/v1/products/",
+        json={**_edge_banding_payload(code="IVA22"), "familyId": family["id"]},
+    )
+
+    responses = {
+        "create": [board],
+        "get": [client.get(f"/api/v1/products/{board['id']}").json()["data"]],
+        "code": [client.get("/api/v1/products/code/IVA18").json()["data"]],
+        "list": client.get("/api/v1/products/").json()["data"],
+        "update": [
+            client.put(f"/api/v1/products/{board['id']}", json={"price": 50.0}).json()[
+                "data"
+            ]
+        ],
+        "edge-bandings": client.get(
+            f"/api/v1/products/{board['id']}/edge-bandings"
+        ).json()["data"],
+    }
+    detail = client.get(f"/api/v1/product-families/{family['id']}").json()["data"]
+    responses["family detail"] = detail["boards"] + detail["edgeBandings"]
+
+    for route, products in responses.items():
+        assert products, route
+        for p in products:
+            assert p["priceWithTax"] is not None, route
+    assert responses["update"][0]["priceWithTax"] == 57.5

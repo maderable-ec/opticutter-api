@@ -43,7 +43,7 @@ _SYNC = Depends(require_permission("products:sync"))
 )
 def create_product(data: ProductCreate, svc: ProductService = Depends(product_service)):
     """Creates a product (``attributes`` are validated according to ``type``)."""
-    return ok(svc.create(data))
+    return ok(svc.with_tax([svc.create(data)])[0])
 
 
 @router.post(
@@ -126,7 +126,7 @@ def list_products(
         family_id,
         unassigned,
     )
-    return page(items, total, paging.limit, paging.offset)
+    return page(svc.with_tax(items), total, paging.limit, paging.offset)
 
 
 @router.get(
@@ -148,7 +148,7 @@ def get_board_edge_bandings(
     only. An empty ``data`` means there's no coordinated edge banding for that
     combination.
     """
-    return ok(svc.find_edge_bandings_for_board(board_id, band_type))
+    return ok(svc.with_tax(svc.find_edge_bandings_for_board(board_id, band_type)))
 
 
 @router.get(
@@ -156,7 +156,7 @@ def get_board_edge_bandings(
 )
 def get_product(product_id: int, svc: ProductService = Depends(product_service)):
     """Gets a product by ID."""
-    return ok(svc.get_or_404(product_id))
+    return ok(svc.with_tax([svc.get_or_404(product_id)])[0])
 
 
 @router.get(
@@ -167,7 +167,7 @@ def get_product_by_code(code: str, svc: ProductService = Depends(product_service
     product = svc.get_by_code(code)
     if product is None:
         raise EntityNotFoundError("Product", code)
-    return ok(product)
+    return ok(svc.with_tax([product])[0])
 
 
 @router.put(
@@ -179,7 +179,7 @@ def update_product(
     svc: ProductService = Depends(product_service),
 ):
     """Updates a product."""
-    return ok(svc.update(product_id, data))
+    return ok(svc.with_tax([svc.update(product_id, data)])[0])
 
 
 @router.delete("/{product_id}", status_code=204, dependencies=[_WRITE])

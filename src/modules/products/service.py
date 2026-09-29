@@ -1,4 +1,4 @@
-from typing import List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple
 
 from fastapi import Depends
 from sqlalchemy import func
@@ -10,8 +10,14 @@ from src.modules.products.model import (
     ProductType,
 )
 from src.modules.products.registry import attributes_schema_for
-from src.modules.products.schemas import ProductBase, ProductCreate, ProductUpdate
+from src.modules.products.schemas import (
+    ProductBase,
+    ProductCreate,
+    ProductResponse,
+    ProductUpdate,
+)
 from src.modules.products.types.edge_banding import BandType
+from src.modules.settings.service import SettingsService
 from src.shared.crud import CRUDService
 from src.shared.database import get_db
 from src.shared.exceptions import BusinessRuleError, EntityNotFoundError
@@ -63,6 +69,19 @@ def normalize_family(value: Optional[str]) -> str:
     family) have to agree on it.
     """
     return (value or "").strip().casefold()
+
+
+def gross_price(net: Optional[float], tax_rate: float) -> Optional[float]:
+    """A catalog price with tax, rounded the way a quote rounds it.
+
+    Same arithmetic as ``build_pricing`` for a one-unit document: the tax is
+    rounded on its own and then added, so the number the catalog shows is the
+    total a quote for one of it would print. ``None`` stays ``None``: a level the
+    source never loaded has no price, net or gross.
+    """
+    if net is None:
+        return None
+    return round(net + round(net * tax_rate, 2), 2)
 
 
 class ProductService(CRUDService[ProductModel, ProductBase, ProductUpdate]):
@@ -134,6 +153,25 @@ class ProductService(CRUDService[ProductModel, ProductBase, ProductUpdate]):
         for field, value in fields.items():
             setattr(obj, field, value)
         return self._persist(obj)
+
+    def with_tax(self, products: Iterable[ProductModel]) -> List[ProductResponse]:
+        """Responses for ``products`` with their prices with tax filled in.
+
+        Every route that returns a product goes through here: the rate lives in
+        the ``settings`` singleton, which the seller cannot read, so the catalog
+        carries its own gross prices. Read once per call, not once per row.
+        """
+        tax_rate = SettingsService(self.db).get_tax_rate()
+        return [
+            ProductResponse.model_validate(p).model_copy(
+                update={
+                    "price_with_tax": gross_price(p.price, tax_rate),
+                    "price_2_with_tax": gross_price(p.price_2, tax_rate),
+                    "price_3_with_tax": gross_price(p.price_3, tax_rate),
+                }
+            )
+            for p in products
+        ]
 
     def get_by_code(self, code: str) -> Optional[ProductModel]:
         """Gets a product by its code."""

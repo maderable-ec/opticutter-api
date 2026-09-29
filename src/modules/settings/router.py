@@ -74,7 +74,8 @@ def get_tax_settings(svc: SettingsService = Depends(settings_service)):
 
     Not readable by the seller on purpose: nothing in the quoting UI needs to
     look the rate up, because every priced response already carries the
-    ``taxRate`` it was computed with.
+    ``taxRate`` it was computed with, and every product its prices with tax
+    (``ProductService.with_tax``).
     """
     return ok(svc.get_or_init())
 
