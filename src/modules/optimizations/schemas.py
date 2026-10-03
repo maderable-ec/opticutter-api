@@ -132,7 +132,8 @@ class EdgeBandingSpec(CamelModel):
 class SpecialEdge(CamelModel):
     """A canto especial: one side of the piece banded with a tape of its own.
 
-    What the seller types as ``2L CS BLN`` (the auto banding's own notation)
+    It adds to the auto banding, on a side that one leaves bare (see
+    ``Requirement._special_edges_add_to_the_canto``). What the seller types as ``2L CS BLN`` (the auto banding's own notation)
     arrives resolved to one entry per side, each with its product: the band
     type and the alias are the PRODUCT's, read from the catalog when the
     payload is built, never stored here. Unlike ``EdgeBandingSpec.product_id``
@@ -491,19 +492,19 @@ class Requirement(CamelModel):
     edge_banding: Optional[EdgeBandingSpec] = Field(
         default=None, description="Optional edge banding for this piece"
     )
-    # Cantos especiales: per-side tapes that WIN over ``edge_banding`` on the
-    # sides they name, and add the side when ``edge_banding`` did not band it.
-    # The seller's input is kept as typed and the precedence is resolved when
-    # the payload is built (``side_products``): normalizing ``edge_banding.sides``
-    # instead would not survive the round trip, since the web writes the auto
-    # sides as a count (``1L`` is always ``left``). Empty is left out of the
-    # hash and of the cached payload, so no existing quote moves.
+    # Cantos especiales: per-side tapes ADDED to ``edge_banding``, on sides it
+    # leaves bare -- the two never share a side (``_special_edges_add_to_the_canto``
+    # coerces a quote saved when a special edge still replaced the auto tape).
+    # The web keeps them apart by re-seating a special edge on another free side
+    # of its kind when the Canto takes its side: the piece is symmetric, so only
+    # the count per kind means anything. Empty is left out of the hash and of
+    # the cached payload, so no existing quote moves.
     special_edges: List[SpecialEdge] = Field(
         default_factory=list,
         max_length=4,
         description=(
-            "Per-side edge banding overriding (or adding to) `edgeBanding` on "
-            "the sides it names; at most one entry per side"
+            "Per-side edge banding added to `edgeBanding` on sides it leaves "
+            "bare; at most one entry per side"
         ),
     )
     # The shop's own work on the piece, as the codes the workshop already knows.
@@ -549,25 +550,45 @@ class Requirement(CamelModel):
             raise ValueError("specialEdges must not repeat a side")
         return edges
 
-    def side_products(self) -> Dict[str, Optional[int]]:
-        """The tape each banded side actually gets: ``{side: product_id}``.
+    @model_validator(mode="after")
+    def _special_edges_add_to_the_canto(self) -> "Requirement":
+        """A side carries the auto tape or a special one, never both.
 
-        The single definition of the precedence: a canto especial wins on its
-        side, ``edge_banding`` keeps the rest of its sides (its ``product_id``
-        may be ``None`` — geometry-only banding), and a special side the auto
-        banding did not cover is added. Sides come in ``edge_banding.sides``
-        order first, then the added ones: for a piece with no special edge that
-        is exactly the order every length sum ran in before they existed.
+        Special edges used to REPLACE the auto tape on their side, so a quote
+        saved then may name a side twice. It is read as what it always meant:
+        the side goes to the special edge and leaves ``edge_banding`` (which
+        goes ``None`` when no side is left). Lossless -- ``side_products``,
+        the metres and the notation come out the same. Coerced, not rejected:
+        pre-orders re-validate on every read (``build_request``), and a piece
+        with no overlap is untouched, so its hash does not move.
         """
-        special = {e.side.value: e.product_id for e in self.special_edges}
+        taken = {e.side for e in self.special_edges}
+        if self.edge_banding is None or not taken.intersection(self.edge_banding.sides):
+            return self
+        remaining = [s for s in self.edge_banding.sides if s not in taken]
+        self.edge_banding = (
+            self.edge_banding.model_copy(update={"sides": remaining})
+            if remaining
+            else None
+        )
+        return self
+
+    def side_products(self) -> Dict[str, Optional[int]]:
+        """The tape each banded side gets: ``{side: product_id}``.
+
+        ``edge_banding`` bands its sides (its ``product_id`` may be ``None`` —
+        geometry-only banding) and each canto especial adds its own; they never
+        share a side (``_special_edges_add_to_the_canto``). Sides come in
+        ``edge_banding.sides`` order first, then the special ones: for a piece
+        with no special edge that is exactly the order every length sum ran in
+        before they existed.
+        """
         sides: Dict[str, Optional[int]] = {}
         if self.edge_banding is not None:
             for side in self.edge_banding.sides:
-                sides[side.value] = special.get(
-                    side.value, self.edge_banding.product_id
-                )
-        for side, pid in special.items():
-            sides.setdefault(side, pid)
+                sides[side.value] = self.edge_banding.product_id
+        for edge in self.special_edges:
+            sides[edge.side.value] = edge.product_id
         return sides
 
     def side_length(self, side: str) -> int:
