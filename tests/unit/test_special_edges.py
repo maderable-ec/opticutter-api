@@ -1,10 +1,11 @@
-"""Unit: cantos especiales, the per-side tapes that win over the auto banding.
+"""Unit: cantos especiales, the per-side tapes added to the auto banding.
 
 No DB. What is load-bearing, and silent when wrong:
 
-- the precedence has ONE definition (``Requirement.side_products``): a special
-  edge replaces the auto tape on its side and adds the side when the auto
-  banding did not cover it, leaving every other side on the auto tape;
+- a special edge ADDS a side the auto banding leaves bare, and the two never
+  share a side: a quote saved when a special edge still replaced the auto tape
+  is coerced to the same tapes (``_special_edges_add_to_the_canto``), never
+  rejected, and a piece with no overlap is left untouched;
 - a requirement with no special edge dumps, hashes, bills and draws exactly as
   it did before the field existed -- a new key would empty Redis on deploy;
 - each side is billed to the tape it actually gets;
@@ -58,20 +59,54 @@ _TAPES = {7: _tape(7, "Soft", "CSH", price=1.0), 9: _tape(9, "Hard", "BLN", pric
 
 
 # --------------------------------------------------------------------------- #
-# Precedence
+# Additive
 # --------------------------------------------------------------------------- #
 def test_without_special_edges_every_auto_side_keeps_the_auto_tape():
     assert _req(_AUTO).side_products() == {"left": 7, "right": 7, "top": 7}
 
 
-def test_a_special_edge_replaces_the_auto_tape_on_its_side_only():
-    req = _req(_AUTO, [{"side": "left", "product_id": 9}])
-    assert req.side_products() == {"left": 9, "right": 7, "top": 7}
-
-
 def test_a_special_edge_adds_a_side_the_auto_banding_did_not_cover():
     req = _req(_AUTO, [{"side": "bottom", "product_id": 9}])
     assert req.side_products() == {"left": 7, "right": 7, "top": 7, "bottom": 9}
+    assert [s.value for s in req.edge_banding.sides] == ["left", "right", "top"]
+
+
+def test_a_saved_overlap_is_read_as_the_tapes_it_always_got():
+    """``2L1C`` + a special long side, saved when the special replaced: the
+    auto banding keeps ``1L1C`` and every side bills to the same tape."""
+    req = _req(_AUTO, [{"side": "left", "product_id": 9}])
+    assert [s.value for s in req.edge_banding.sides] == ["right", "top"]
+    assert req.edge_banding.product_id == 7
+    assert req.side_products() == {"left": 9, "right": 7, "top": 7}
+
+
+def test_a_saved_overlap_that_took_every_auto_side_drops_the_auto_banding():
+    req = _req(
+        {"sides": ["left"], "product_id": 7}, [{"side": "left", "product_id": 9}]
+    )
+    assert req.edge_banding is None
+    assert req.side_products() == {"left": 9}
+
+
+def test_a_piece_with_no_overlap_dumps_and_hashes_as_it_did():
+    special = [{"side": "bottom", "product_id": 9}]
+    raw = {
+        "priority": 0,
+        "height": 700,
+        "width": 400,
+        "quantity": 1,
+        "material_key": "b1",
+        "label": "Puerta",
+        "edge_banding": _AUTO,
+        "special_edges": special,
+    }
+    [dumped] = hashable_requirements([_req(_AUTO, special)])
+    assert dumped["edge_banding"] == {
+        "sides": ["left", "right", "top"],
+        "product_id": 7,
+    }
+    assert dumped["special_edges"] == special
+    assert {k: dumped[k] for k in raw} == raw
 
 
 def test_special_edges_band_a_piece_with_no_auto_banding():
@@ -80,7 +115,7 @@ def test_special_edges_band_a_piece_with_no_auto_banding():
 
 
 def test_geometry_only_auto_sides_stay_unpriced_next_to_a_special_edge():
-    req = _req({"sides": ["left", "right"]}, [{"side": "right", "product_id": 9}])
+    req = _req({"sides": ["left"]}, [{"side": "right", "product_id": 9}])
     assert req.side_products() == {"left": None, "right": 9}
 
 

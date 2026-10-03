@@ -73,9 +73,11 @@ def edge_notation(
     as the auto banding, which is also how the seller types them: they are
     grouped by tape (band type + alias) and each group is written with
     ``edge_banding_notation`` -- two long sides on one tape read ``2L CD BLN``,
-    two different tapes on them read ``1L CD BLN · 1L CS CHM``. The auto part
-    counts only the sides no special edge took, so a ``2L1C`` whose long side
-    went special reads ``1L1C``. ``special`` holds mappings with ``side``
+    two different tapes on them read ``1L CD BLN · 1L CS CHM``. The two parts
+    never share a side today, but an order frozen when a special edge still
+    replaced the auto tape may: the auto part counts only the sides no special
+    edge took, so its ``2L1C`` whose long side went special reads ``1L1C``.
+    ``special`` holds mappings with ``side``
     (nominal), ``band_type`` and ``alias``. With no special edge this IS
     ``edge_banding_notation``, byte for byte, which is what keeps every existing
     document and label unchanged. ``sep`` joins the groups; the piece export
