@@ -52,11 +52,14 @@ orders/pre-orders/drafts; its "Create" column follows the generic rule.)
 
 - `GET /api/v1/analytics/breakdown/branch` — comparison (count + revenue) per branch.
 - Every analytics endpoint accepts `?branchId=` to scope a single branch.
-- `GET /api/v1/analytics/low-stock` — boards and edge bandings under their
-  configured threshold, `?branchId=` + `?type=board|edge_banding`. The only
-  analytics endpoint with **no date range** (stock is a state, not a series) and
-  the only one reading an external source; `checked: false` means the vendor's
-  system did not answer, which is not the same as "nothing is low".
+
+### Per-branch stock (admin only)
+
+- `GET /api/v1/inventory/low-stock` — boards and edge bandings under their
+  configured threshold, `?branchId=` + `?type=board|edge_banding`. It lives with
+  inventory, not analytics: it has **no date range** (stock is a state, not a
+  series) and it is what the admin reorders from. `checked: false` means the
+  vendor's system did not answer, which is not the same as "nothing is low".
 
 ## Changes to existing endpoints
 

@@ -281,8 +281,8 @@ class Config:
     STOCK_CACHE_TTL_SECONDS = env.int("STOCK_CACHE_TTL_SECONDS", 300)
 
     # Maderable frontend base: composes the review link URL the client opens (the
-    # origin must also be in CORS_ORIGINS). The dashboard uses HashRouter, hence
-    # the base ends in "/#" (route = {base}/review/{token}).
+    # origin must also be in CORS_ORIGINS). The dashboard uses BrowserRouter, so
+    # the base is the bare origin (route = {base}/review/{token}).
     FRONTEND_BASE_URL = env("FRONTEND_BASE_URL", "http://localhost:3000")
 
     # Company data (document letterhead). Dummy defaults that only seed the

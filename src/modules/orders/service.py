@@ -596,7 +596,7 @@ class OrderService(BranchScopedMixin):
         # way into the queue is the moment the sale is actually collected, so
         # that is where the billing document gets stitched to the order. Reuses
         # ``external_invoice_id`` -- there is no second invoice field, and the
-        # existing ``POST /orders/{id}/invoice`` stays for corrections.
+        # existing ``PATCH /orders/{id}/invoice`` stays for corrections.
         # An order that already carries one passes without resending it.
         invoice = (external_invoice_id or "").strip()
         if is_payment_capture:

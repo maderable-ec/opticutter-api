@@ -148,7 +148,7 @@ def test_queued_freezes_the_invoice_number(mock_session):
 
 
 def test_an_order_that_already_has_an_invoice_need_not_resend_it(mock_session):
-    """It may have been associated earlier through POST /orders/{id}/invoice."""
+    """It may have been associated earlier through PATCH /orders/{id}/invoice."""
     order = _order(OrderStatus.confirmed)
     order.external_invoice_id = "FAC-001-42"
     svc = _service(mock_session, order)

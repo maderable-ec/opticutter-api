@@ -103,6 +103,8 @@ when **any** of the user's roles is in the row.
 | `branches:manage`    | ✅ | ❌ | ❌ | ❌ | `POST/PUT/DELETE /branches/*` |
 | `branches:read`      | ✅ | ✅ | ✅ | ✅ | `GET /branches/*` |
 | `analytics`          | ✅ | ❌ | ❌ | ❌ | `/analytics/*` |
+| `inventory:check`    | ✅ | ✅ | ❌ | ❌ | `POST /inventory/stock-check` (the alert beside a quote) |
+| `inventory:low-stock` | ✅ | ❌ | ❌ | ❌ | `GET /inventory/low-stock` (the report the admin reorders from) |
 | `products:read`      | ✅ | ✅ | ❌ | ❌ | `GET /products/*` |
 | `products:write`     | ✅ | ❌ | ❌ | ❌ | `POST/PUT/DELETE /products/*` |
 | `additional_services:read`  | ✅ | ✅ | ❌ | ❌ | `GET /additional-services/*` |
@@ -111,7 +113,7 @@ when **any** of the user's roles is in the row.
 | `optimizer`          | ✅ | ✅ | ❌ | ❌ | `/optimize/*`, `/optimization-drafts/*` |
 | `preorders`          | ✅ | ✅ | ❌ | ❌ | `/preorders/*` (internal; the client-facing flow is public, see below) |
 | `orders:read`        | ✅ | ✅ | ✅ | ❌ | `GET /orders`, `GET /orders/{id}`, `GET /orders/{id}/document` (the order's ONLY pdf: document + diagram + annexes) |
-| `orders:write`       | ✅ | ✅ | ❌ | ❌ | `POST /orders/{id}/invoice`, `GET /orders/{id}/export`, `PATCH /orders/{id}/branch`, `PATCH /orders/{id}/priority`, `POST/DELETE /orders/{id}/attachments[/{aid}]` |
+| `orders:write`       | ✅ | ✅ | ❌ | ❌ | `PATCH /orders/{id}/invoice`, `GET /orders/{id}/billing-export`, `PATCH /orders/{id}/branch`, `PATCH /orders/{id}/priority`, `POST/DELETE /orders/{id}/attachments[/{aid}]` |
 | `orders:transition`  | ✅ | ✅ | ✅* | ✅* | `PATCH /orders/{id}/status` (narrowed per-transition by `TRANSITION_ROLES`) |
 | `cutting_plan`       | ✅ | ✅ | ✅ | ❌ | `GET /orders/{id}/cutting-plan` |
 | `orders:cut`         | ✅ | ❌ | ✅ | ❌ | `PATCH /orders/{id}/cutting-plan/pieces/{id}` |
@@ -154,7 +156,7 @@ reachable: no transition targets them.
 
 ## Public endpoints (no token)
 
-- `GET /health`, `GET /api/v1/health/`, `/health/ready`, `/api/v1/cutter/*` —
+- `GET /health`, `GET /api/v1/health/`, `/health/ready` —
   diagnostics.
 - `POST /api/v1/auth/login`, `POST /api/v1/auth/refresh`,
   `POST /api/v1/auth/logout`.

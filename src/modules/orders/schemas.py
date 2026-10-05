@@ -114,7 +114,7 @@ class OrderStatusUpdate(CamelModel):
         description=(
             "Invoice ID issued by the external billing provider. Required when "
             "moving from 'confirmed' to 'queued', unless the order already "
-            "carries one. Same field as POST /orders/{id}/invoice"
+            "carries one. Same field as PATCH /orders/{id}/invoice"
         ),
     )
 
