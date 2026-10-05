@@ -9,14 +9,21 @@ The banding travels in the label, never in ``<edge_band>``: the program's files
 always leave that block empty, and an optimizer may shave the tape's thickness
 off the cut size, which would change every banded piece.
 
+The sizes are the CUT ones -- the program cuts what the file says: a side with
+a hard tape takes 1 mm off (``hard_edges.cut_size``), read off the tapes the
+order froze. ``<edge_band>`` staying empty is what keeps the program from
+taking it off again. The flip side: the web's import reads a size as FINAL, so
+re-importing this CSV into the wizard would take the millimetre off twice.
+
 Pure: it reads the order's frozen pieces and touches no session.
 """
 
 import csv
 import io
 import xml.etree.ElementTree as ET
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Optional, Tuple
 
+from src.modules.optimizations.hard_edges import cut_size, frozen_band_types
 from src.modules.optimizations.labels import edge_notation, workshop_codes_line
 from src.modules.optimizations.schemas import WORKSHOP_CODE_FIELDS
 from src.modules.orders.model import OrderPieceModel
@@ -68,6 +75,11 @@ def _material(piece: OrderPieceModel) -> str:
     return piece.product_name or piece.product_code or ""
 
 
+def _cut_size(piece: OrderPieceModel) -> Tuple[int, int]:
+    """``(largo, ancho)`` the saw cuts: the ordered size minus its hard tapes."""
+    return cut_size(piece.height, piece.width, frozen_band_types(piece.edges))
+
+
 def _ordered(pieces: Iterable[OrderPieceModel]) -> List[OrderPieceModel]:
     # ``order.pieces`` has no ORDER BY; the id is the cut list's own order.
     return sorted(pieces, key=lambda p: p.id or 0)
@@ -79,11 +91,12 @@ def pieces_csv(pieces: Iterable[OrderPieceModel]) -> bytes:
     writer = csv.writer(buffer)  # QUOTE_MINIMAL, CRLF
     writer.writerow(CSV_COLUMNS)
     for piece in _ordered(pieces):
+        height, width = _cut_size(piece)
         writer.writerow(
             (
                 _material(piece),
-                piece.height,
-                piece.width,
+                height,
+                width,
                 piece.quantity,
                 "",
                 piece_etiqueta(piece),
@@ -113,8 +126,9 @@ def pieces_xml(
     parts = ET.SubElement(root, "parts")
     for piece in _ordered(pieces):
         row = ET.SubElement(parts, "row")
-        _child(row, "length", str(piece.height))
-        _child(row, "width", str(piece.width))
+        height, width = _cut_size(piece)
+        _child(row, "length", str(height))
+        _child(row, "width", str(width))
         _child(row, "quantity", str(piece.quantity))
         _child(row, "grain", "0")
         _child(row, "allow_rotation", "1" if piece.can_rotate else "0")

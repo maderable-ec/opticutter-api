@@ -772,17 +772,21 @@ class _QuietFlags(CamelModel):
     The hand-adjustment markers (``adjusted``, ``kept_whole``) are new keys on
     shapes every quote has always returned. Emitting them only when they are
     true keeps the response of a plan nobody adjusted exactly what it was.
+    ``quiet_nulls`` does the same for optional values while they are ``None``
+    (the cut size of a piece no hard tape shortened).
     """
 
     quiet_flags: ClassVar[Tuple[str, ...]] = ()
+    quiet_nulls: ClassVar[Tuple[str, ...]] = ()
 
     @model_serializer(mode="wrap")
     def _drop_false_flags(self, handler: SerializerFunctionWrapHandler):
         data = handler(self)
-        for name in self.quiet_flags:
-            for key in (name, to_camel(name)):
-                if data.get(key) is False:
-                    del data[key]
+        for names, quiet in ((self.quiet_flags, False), (self.quiet_nulls, None)):
+            for name in names:
+                for key in (name, to_camel(name)):
+                    if key in data and data[key] is quiet:
+                        del data[key]
         return data
 
 
@@ -814,17 +818,25 @@ class PlacedPiece(_QuietFlags):
     x: float = Field(..., description="X position of the placed piece")
     y: float = Field(..., description="Y position of the placed piece")
     height: float = Field(
-        ..., description="Height of the placed piece (alto, after rotation)"
+        ...,
+        description=(
+            "Height of the placed piece (alto, after rotation) at its CUT size: "
+            "1 mm less per side with a hard tape"
+        ),
     )
     width: float = Field(
-        ..., description="Width of the placed piece (ancho, after rotation)"
+        ...,
+        description=(
+            "Width of the placed piece (ancho, after rotation) at its CUT size: "
+            "1 mm less per side with a hard tape"
+        ),
     )
     rotated: bool = Field(..., description="Indicates if the piece is rotated")
     original_height: float = Field(
-        ..., description="Piece height (alto) before rotation"
+        ..., description="Piece height (alto) as requested: before rotation, final size"
     )
     original_width: float = Field(
-        ..., description="Piece width (ancho) before rotation"
+        ..., description="Piece width (ancho) as requested: before rotation, final size"
     )
     edges: Optional[dict] = Field(
         default=None,
@@ -913,7 +925,7 @@ class LayoutGroup(CamelModel):
     layout: Layout = Field(..., description="Representative layout for this pattern")
 
 
-class UnplacedPiece(CamelModel):
+class UnplacedPiece(_QuietFlags):
     """A piece the available stock could not hold.
 
     A catalog board is unlimited, so a quote anchored on one only lists a piece
@@ -924,10 +936,20 @@ class UnplacedPiece(CamelModel):
     changes the material, adds retazos or drops the piece.
     """
 
+    quiet_nulls = ("cut_height", "cut_width")
+
     material_key: str
     label: Optional[str] = None
     height: float
     width: float
+    cut_height: Optional[float] = Field(
+        default=None,
+        description="Height the saw would cut, when a hard tape makes it smaller",
+    )
+    cut_width: Optional[float] = Field(
+        default=None,
+        description="Width the saw would cut, when a hard tape makes it smaller",
+    )
     quantity: int = Field(..., description="How many instances did not fit")
     material_name: Optional[str] = Field(
         default=None, description="The board or retazo the pieces were meant for"
@@ -1053,8 +1075,12 @@ class EditablePiece(CamelModel):
 
     piece_id: str
     label: str
+    # The CUT size, the one the piece is placed and checked at.
     width: float
     height: float
+    # The size the seller typed: the cut one plus what a hard tape took off.
+    original_width: float
+    original_height: float
     can_rotate: bool
 
 

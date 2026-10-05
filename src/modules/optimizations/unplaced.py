@@ -53,7 +53,8 @@ class PoolGeometry:
     sheets: Tuple[Tuple[float, float], ...]
     # ``(top, bottom, left, right)`` as the pool is cut: zeros under ``skipTrim``.
     trims: Tuple[float, float, float, float]
-    # ``(height, width)`` of the pieces of this pool that may be turned.
+    # ``(height, width)`` of the pieces of this pool that may be turned, at
+    # their CUT size (``hard_edges``).
     rotatable: FrozenSet[Tuple[float, float]]
     # A hand adjustment was laid over this pool: whatever it left out and fits is
     # a piece the seller has not placed yet, not material that ran out.
@@ -87,7 +88,10 @@ def explain_unplaced(
             continue
         top, bottom, left, right = pool.trims
         useful = [(h - top - bottom, w - left - right) for h, w in pool.sheets]
-        height, width = entry["height"], entry["width"]
+        # Measured at the size that did not fit: the cut one, when a hard tape
+        # made it smaller than the size the seller typed (``group_unplaced``).
+        height = entry.get("cut_height", entry["height"])
+        width = entry.get("cut_width", entry["width"])
         rotate = (height, width) in pool.rotatable
         if any(_fits(height, width, sheet, rotate) for sheet in useful):
             reason = (

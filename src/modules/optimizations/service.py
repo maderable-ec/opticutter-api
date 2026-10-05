@@ -30,6 +30,10 @@ from src.cutting.sheet_check import (
 )
 from src.modules.clients.model import ClientModel
 from src.modules.optimizations.engine_info import backend_name
+from src.modules.optimizations.hard_edges import (
+    HARD_EDGE_CUT_MM,
+    requirement_cut_size,
+)
 from src.modules.optimizations.labels import SPECIAL_SIDE_ORDER, edge_notation
 from src.modules.optimizations.layout_adjustments import (
     EDITING,
@@ -40,6 +44,7 @@ from src.modules.optimizations.layout_adjustments import (
     SheetBin,
     apply_layout_adjustments,
     group_by_pool,
+    group_unplaced,
     placed_pieces,
     realize_adjustments,
     sheets_from_layouts,
@@ -161,6 +166,23 @@ def _exact_config() -> ExactConfig:
         deterministic_time=config.OPT_EXACT_DETERMINISTIC_TIME,
         root_deterministic_time=config.OPT_EXACT_ROOT_DETERMINISTIC_TIME,
         root_patience=config.OPT_EXACT_ROOT_PATIENCE,
+    )
+
+
+def _editable_piece(piece: Piece, spec: PoolSpec) -> EditablePiece:
+    """One instance as the editor gets it: the cut size it is placed at, and
+    the size the seller typed (they differ only under a hard tape)."""
+    original_height, original_width = spec.finals.get(
+        piece.id, (piece.height, piece.width)
+    )
+    return EditablePiece(
+        piece_id=piece.id,
+        label=base_label(piece.id),
+        width=piece.width,
+        height=piece.height,
+        original_width=original_width,
+        original_height=original_height,
+        can_rotate=piece.can_rotate,
     )
 
 
@@ -416,14 +438,7 @@ class OptimizationService:
                         for b in spec.bins.values()
                     ],
                     pieces=[
-                        EditablePiece(
-                            piece_id=piece.id,
-                            label=base_label(piece.id),
-                            width=piece.width,
-                            height=piece.height,
-                            can_rotate=piece.can_rotate,
-                        )
-                        for piece in spec.pieces.values()
+                        _editable_piece(piece, spec) for piece in spec.pieces.values()
                     ],
                     pending=[pid for pid in spec.pieces if pid not in on_sheets],
                     sheets=[
@@ -738,8 +753,11 @@ class OptimizationService:
                     params.left_trim,
                     params.right_trim,
                 ),
+                # At the CUT size, the one ``unplaced`` is measured at.
                 rotatable=frozenset(
-                    (r.height, r.width) for r in requirements if r.can_rotate
+                    requirement_cut_size(r, prepared.eb_products)
+                    for r in requirements
+                    if r.can_rotate
                 ),
                 adjusted=key in adjusted,
             )
@@ -843,8 +861,11 @@ class OptimizationService:
         # and the payload is cached under a hash of the inputs.
         jobs: List[PoolJob] = []
         maps: List[Tuple[Dict[str, EdgeBandingSpec], Dict[str, float]]] = []
+        finals: List[Dict[str, Tuple[int, int]]] = []
         for key, reqs in requirements_by_key.items():
-            pieces, edge_map, net_map = self._build_pieces(reqs)
+            pieces, edge_map, net_map, pool_finals = self._build_pieces(
+                reqs, prepared.eb_products
+            )
             if not pieces:
                 # Raised here so no domain error ever crosses a process boundary.
                 raise ValidationError("La lista de piezas no puede estar vacía")
@@ -874,6 +895,7 @@ class OptimizationService:
             # The edge/net maps stay in the parent: cheap to build, pure, and the
             # optimizer has no use for them.
             maps.append((edge_map, net_map))
+            finals.append(pool_finals)
 
         pool_results = run_pool_jobs(jobs)
         results = [
@@ -887,7 +909,7 @@ class OptimizationService:
             resolved,
             prepared.eb_products,
             prepared.waste_factor,
-            self._build_unplaced(jobs, pool_results),
+            self._build_unplaced(jobs, pool_results, finals),
         )
         # Cached BEFORE the overrides: Redis has to hold the canonical payload
         # for this hash, or the next request with the flag off would be served a
@@ -1005,7 +1027,9 @@ class OptimizationService:
             reqs = prepared.requirements_by_key.get(key)
             if not reqs:
                 continue
-            pieces, edge_map, net_map = self._build_pieces(reqs)
+            pieces, edge_map, net_map, finals = self._build_pieces(
+                reqs, prepared.eb_products
+            )
             anchor = prepared.resolved[key]
             bins: Dict[Tuple[str, bool], SheetBin] = {
                 (key, False): _sheet_bin(anchor, pooled=False)
@@ -1039,6 +1063,7 @@ class OptimizationService:
                 finite=anchor.is_finite,
                 serialize=serialize,
                 min_usable_offcut=config.OPT_MIN_USABLE_OFFCUT_MM,
+                finals=finals,
             )
         return specs
 
@@ -1236,6 +1261,16 @@ class OptimizationService:
             for key, rm in resolved.items()
         }
         edge_bandings = edge_banding_salt(eb_products)
+        # A hard tape cuts its piece short (``hard_edges``): the tapes and their
+        # band types are already in the hash (the requirements and the salt),
+        # but the rule itself is not, and it moves the geometry. Emitted ONLY
+        # when some piece is actually cut short, like ``skip_trim``: every quote
+        # with no hard tape keeps its canonical JSON and its Redis entry, and
+        # ``ENGINE_VERSION`` stays put, since no hashed input changes its plan.
+        hard_edges = any(
+            requirement_cut_size(r, eb_products) != (r.height, r.width)
+            for r in request.requirements
+        )
         digest_input = {
             "materials": materials,
             "requirements": hashable_requirements(request.requirements),
@@ -1258,6 +1293,7 @@ class OptimizationService:
                 # Never moves a piece or a board, but it does decide the cut
                 # tree and therefore the leftovers this payload reports.
                 "min_usable_offcut": config.OPT_MIN_USABLE_OFFCUT_MM,
+                **({"hard_edge_cut_mm": HARD_EDGE_CUT_MM} if hard_edges else {}),
             },
             "edge_bandings": edge_bandings,
         }
@@ -1315,8 +1351,13 @@ class OptimizationService:
         )
 
     def _build_pieces(
-        self, reqs: List[Requirement]
-    ) -> Tuple[List[Piece], Dict[str, Requirement], Dict[str, float]]:
+        self, reqs: List[Requirement], eb_products: Dict[int, ProductModel]
+    ) -> Tuple[
+        List[Piece],
+        Dict[str, Requirement],
+        Dict[str, float],
+        Dict[str, Tuple[int, int]],
+    ]:
         """Expands the requirements into domain pieces with a unique id per instance.
 
         The piece id is the identity used to attribute edge banding and length to
@@ -1331,18 +1372,29 @@ class OptimizationService:
         ``left/right``, independent of rotation), not multiplied by quantity.
         ``edge_map`` holds the whole requirement of every banded piece, since
         its banding is two fields (``edge_banding`` + ``special_edges``).
+
+        The piece is built at its CUT size: the final size the seller typed
+        minus 1 mm per side with a hard tape (``hard_edges.cut_size``), which
+        is what the engine packs and the editor checks. The net length stays
+        the final one -- the tape covers the finished edge. ``finals`` maps
+        the id of every piece the discount shrank to its final
+        ``(height, width)``, for whatever shows the piece as it was ordered.
         """
         pieces: List[Piece] = []
         edge_map: Dict[str, Requirement] = {}
         net_map: Dict[str, float] = {}
+        finals: Dict[str, Tuple[int, int]] = {}
         for i, uid in piece_instance_ids([(p.label, p.quantity) for p in reqs]):
             p = reqs[i]
+            height, width = requirement_cut_size(p, eb_products)
+            if (height, width) != (p.height, p.width):
+                finals[uid] = (p.height, p.width)
             try:
                 pieces.append(
                     Piece(
                         id=uid,
-                        width=p.width,
-                        height=p.height,
+                        width=width,
+                        height=height,
                         quantity=1,
                         can_rotate=p.can_rotate,
                         priority=p.priority,
@@ -1353,7 +1405,7 @@ class OptimizationService:
             if p.edge_banding is not None or p.special_edges:
                 edge_map[uid] = p
                 net_map[uid] = sum(p.side_length(side) for side in p.side_products())
-        return pieces, edge_map, net_map
+        return pieces, edge_map, net_map, finals
 
     def _geometric_edges(
         self,
@@ -1463,11 +1515,24 @@ class OptimizationService:
 
         ``edge_map`` is indexed by the piece's unique id (see ``_build_pieces``), so
         the lookup uses the exact ``piece_id`` of the placed piece.
+
+        A piece a hard tape made smaller is placed at its cut size, and its
+        ``original_width``/``original_height`` would echo that: they are set
+        back to the size the seller typed, which is what every consumer reads
+        them as (the label, the hover, the review). ``width``/``height`` stay
+        the cut. Only a hard tape shrinks a piece and every banded piece is in
+        ``edge_map``, so the rest come out exactly as before.
         """
         for placed in layout_dict.get("placed_pieces", []):
             req = edge_map.get(str(placed.get("piece_id", "")))
             if req is None:
                 continue
+            if (placed["original_height"], placed["original_width"]) != (
+                req.height,
+                req.width,
+            ):
+                placed["original_width"] = float(req.width)
+                placed["original_height"] = float(req.height)
             placed["edges"] = self._geometric_edges(
                 req.edge_banding,
                 eb_products,
@@ -1576,35 +1641,21 @@ class OptimizationService:
 
     @staticmethod
     def _build_unplaced(
-        jobs: Sequence[PoolJob], results: Sequence[PoolResult]
+        jobs: Sequence[PoolJob],
+        results: Sequence[PoolResult],
+        finals: Sequence[Dict[str, Tuple[int, int]]],
     ) -> List[dict]:
-        """Pieces no sheet could hold, grouped by size.
-
-        Grouped because the seller reads "3 puertas de 600×400 no entran", not
-        three identical lines. Keyed on the base label so the ``#N`` instance
-        suffix ``_build_pieces`` adds doesn't split one group into singletons.
+        """Pieces no sheet could hold, grouped by size (``group_unplaced``).
 
         Almost always empty: only a pool of finite offcuts can actually run out
         of material. A catalog-anchored quote lands here only for a piece larger
         than the board itself — which used to vanish from the plan in silence.
+        ``finals`` runs parallel to ``jobs`` (``_build_pieces`` of each pool).
         """
-        grouped: Dict[tuple, dict] = {}
-        for job, result in zip(jobs, results):
-            for piece in result.unplaced:
-                label = base_label(piece.id)
-                key = (job.material_key, label, piece.width, piece.height)
-                entry = grouped.get(key)
-                if entry is None:
-                    grouped[key] = {
-                        "material_key": job.material_key,
-                        "label": label,
-                        "width": piece.width,
-                        "height": piece.height,
-                        "quantity": 1,
-                    }
-                else:
-                    entry["quantity"] += 1
-        return list(grouped.values())
+        out: List[dict] = []
+        for job, result, pool_finals in zip(jobs, results, finals):
+            out.extend(group_unplaced(job.material_key, result.unplaced, pool_finals))
+        return out
 
     def _serialize_layout(
         self,
