@@ -276,10 +276,19 @@ def mark_piece_cut(
     )
 
 
+@router.patch(
+    "/{order_id}/invoice",
+    response_model=DataResponse[OrderResponse],
+    dependencies=[_WRITE],
+)
+# Deprecated alias: it sets one attribute of the order, like status, branch and
+# priority, so it is a PATCH like them. The POST stays, out of the schema, for
+# the previous web build; drop it with the other aliases in the release after.
 @router.post(
     "/{order_id}/invoice",
     response_model=DataResponse[OrderResponse],
     dependencies=[_WRITE],
+    include_in_schema=False,
 )
 def set_order_invoice(
     order_id: int,
@@ -351,9 +360,18 @@ def set_order_priority(
 
 
 @router.get(
+    "/{order_id}/billing-export",
+    response_model=DataResponse[OrderExportResponse],
+    dependencies=[_WRITE],
+)
+# Deprecated alias: a bare "export" did not say what it exports next to
+# /pieces/export and /document. Drop it with the other aliases in the release
+# after.
+@router.get(
     "/{order_id}/export",
     response_model=DataResponse[OrderExportResponse],
     dependencies=[_WRITE],
+    include_in_schema=False,
 )
 def export_order(
     order_id: int,

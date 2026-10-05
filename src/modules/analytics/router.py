@@ -20,9 +20,8 @@ from src.modules.analytics.schemas import (
     UserProductivityReport,
 )
 from src.modules.analytics.service import AnalyticsService, analytics_service
+from src.modules.inventory.router import get_low_stock
 from src.modules.inventory.schemas import LowStockReport
-from src.modules.inventory.service import StockService, stock_service
-from src.modules.products.model import ProductType
 from src.modules.users.dependencies import require_permission
 from src.modules.users.enums import UserRole
 from src.shared.responses import ERROR_RESPONSES, DataResponse, ok
@@ -44,12 +43,6 @@ _BRANCH_QUERY = Query(
 
 _GRANULARITY_QUERY = Query(
     Granularity.day, description="Bucket size: day | week | month"
-)
-
-_PRODUCT_TYPE_QUERY = Query(
-    default=None,
-    alias="type",
-    description="Restricts the low-stock report to one product type (empty = all)",
 )
 
 _ROLE_QUERY = Query(default=None, description="Users holding this role (empty = all)")
@@ -116,7 +109,15 @@ def get_bottlenecks(
     return ok(svc.bottlenecks(dr, granularity, branch_id=branch_id))
 
 
-@router.get("/users", response_model=DataResponse[UserProductivityReport])
+@router.get("/productivity", response_model=DataResponse[UserProductivityReport])
+# Deprecated alias: the name said user admin, not productivity. Kept, out of the
+# schema, for the dashboards still open on the previous web build; drop it with
+# the other aliases in the release after.
+@router.get(
+    "/users",
+    response_model=DataResponse[UserProductivityReport],
+    include_in_schema=False,
+)
 def get_user_productivity(
     dr: DateRange = Depends(),
     branch_id: Optional[int] = _BRANCH_QUERY,
@@ -144,26 +145,13 @@ def get_attendance(
     )
 
 
-@router.get("/low-stock", response_model=DataResponse[LowStockReport])
-def get_low_stock(
-    branch_id: Optional[int] = _BRANCH_QUERY,
-    product_type: Optional[ProductType] = _PRODUCT_TYPE_QUERY,
-    svc: StockService = Depends(stock_service),
-):
-    """Boards and edge bandings below their configured threshold, per branch.
-
-    The one endpoint here that takes no ``DateRange``, and deliberately: stock
-    is a state right now, not a metric over a window — asking for "low stock
-    last March" has no answer the vendor's system could give.
-
-    Unpaginated like the rest of this module. The worst case is bounded by the
-    catalog (a few hundred rows with everything at zero), and the point of the
-    screen is to be read top to bottom in buying order: branch, then type, then
-    emptiest first.
-    """
-    return ok(
-        svc.low_stock(
-            branch_id=branch_id,
-            product_type=product_type.value if product_type else None,
-        )
-    )
+# Deprecated alias: the low-stock report moved to ``GET /inventory/low-stock``,
+# the domain it belongs to. Same roles here (``analytics`` is admin only, like
+# ``inventory:low-stock``). Drop it with the other aliases in the release after.
+router.add_api_route(
+    "/low-stock",
+    get_low_stock,
+    methods=["GET"],
+    response_model=DataResponse[LowStockReport],
+    include_in_schema=False,
+)

@@ -657,7 +657,7 @@ def test_order_charges_edge_banding(client, db_session):
     assert data["pieces"][0]["edges"]["sides"] == ["top", "bottom"]
 
     # The billing export includes the edge-banding line.
-    exported = client.get(f"/api/v1/orders/{data['id']}/export").json()["data"]
+    exported = client.get(f"/api/v1/orders/{data['id']}/billing-export").json()["data"]
     codes = {line["productCode"] for line in exported["lines"]}
     assert {"MEL18", "TAP22"} <= codes
 

@@ -1,14 +1,22 @@
-"""Stock endpoints consumed while quoting.
+"""Stock endpoints: the question a seller asks while quoting, and the report the
+administrator reorders from.
 
-Only the question a seller asks lives here. The low-stock **report** is an
-administrator's report and hangs off ``/analytics`` with the rest of them; both
-call the same ``StockService`` so the thresholds are applied once, in one place.
+Both call the same ``StockService``, so the thresholds are applied once, in one
+place. They hold different areas: the check is part of building a quote (admin
+and seller), the report is what gets bought (admin only).
 """
 
-from fastapi import APIRouter, Depends
+from typing import Optional
 
-from src.modules.inventory.schemas import StockCheckRequest, StockCheckResult
+from fastapi import APIRouter, Depends, Query
+
+from src.modules.inventory.schemas import (
+    LowStockReport,
+    StockCheckRequest,
+    StockCheckResult,
+)
 from src.modules.inventory.service import StockService, stock_service
+from src.modules.products.model import ProductType
 from src.modules.users.dependencies import require_permission
 from src.shared.responses import ERROR_RESPONSES, DataResponse, ok
 
@@ -16,11 +24,26 @@ router = APIRouter(
     prefix="/inventory",
     tags=["inventory"],
     responses=ERROR_RESPONSES,
-    dependencies=[Depends(require_permission("inventory:check"))],
+)
+
+_BRANCH_QUERY = Query(
+    default=None,
+    alias="branchId",
+    description="Restricts the report to a branch (empty = every branch with a warehouse)",
+)
+
+_PRODUCT_TYPE_QUERY = Query(
+    default=None,
+    alias="type",
+    description="Restricts the low-stock report to one product type (empty = all)",
 )
 
 
-@router.post("/stock-check", response_model=DataResponse[StockCheckResult])
+@router.post(
+    "/stock-check",
+    response_model=DataResponse[StockCheckResult],
+    dependencies=[Depends(require_permission("inventory:check"))],
+)
 def check_stock(data: StockCheckRequest, svc: StockService = Depends(stock_service)):
     """Low-stock alerts for the products a quote consumes, in one branch.
 
@@ -33,3 +56,32 @@ def check_stock(data: StockCheckRequest, svc: StockService = Depends(stock_servi
     this is information beside a quote and must not be able to block one.
     """
     return ok(svc.check(data.branch_id, data.items))
+
+
+@router.get(
+    "/low-stock",
+    response_model=DataResponse[LowStockReport],
+    dependencies=[Depends(require_permission("inventory:low-stock"))],
+)
+def get_low_stock(
+    branch_id: Optional[int] = _BRANCH_QUERY,
+    product_type: Optional[ProductType] = _PRODUCT_TYPE_QUERY,
+    svc: StockService = Depends(stock_service),
+):
+    """Boards and edge bandings below their configured threshold, per branch.
+
+    It takes no date range, and deliberately: stock is a state right now, not a
+    metric over a window — asking for "low stock last March" has no answer the
+    vendor's system could give. That is also why it lives here and not under
+    ``/analytics``: it is what the admin reorders from, not a look back.
+
+    Unpaginated. The worst case is bounded by the catalog (a few hundred rows
+    with everything at zero), and the point of the screen is to be read top to
+    bottom in buying order: branch, then type, then emptiest first.
+    """
+    return ok(
+        svc.low_stock(
+            branch_id=branch_id,
+            product_type=product_type.value if product_type else None,
+        )
+    )

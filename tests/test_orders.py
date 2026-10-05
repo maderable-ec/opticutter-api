@@ -244,18 +244,18 @@ def test_queueing_freezes_the_invoice_number(client, db_session):
     assert ok.status_code == 200
     assert ok.json()["data"]["externalInvoiceId"] == "FAC-001-42"
     # Same field the billing seam reads, so the export shows it too.
-    export = client.get(f"/api/v1/orders/{oid}/export").json()["data"]
+    export = client.get(f"/api/v1/orders/{oid}/billing-export").json()["data"]
     assert export["externalInvoiceId"] == "FAC-001-42"
 
 
 def test_an_order_invoiced_beforehand_queues_without_resending_it(client, db_session):
-    """``POST /orders/{id}/invoice`` still exists and still associates one."""
+    """``PATCH /orders/{id}/invoice`` still exists and still associates one."""
     c = _create_client(client)
     b = _create_board(client)
     order = _create_order(client, db_session, _order_payload(c["id"], b["id"]))
     oid = order["id"]
     assert (
-        client.post(
+        client.patch(
             f"/api/v1/orders/{oid}/invoice", json={"externalInvoiceId": "FAC-001-42"}
         ).status_code
         == 200
@@ -274,7 +274,7 @@ def test_queueing_never_replaces_an_issued_invoice(client, db_session):
     b = _create_board(client)
     order = _create_order(client, db_session, _order_payload(c["id"], b["id"]))
     oid = order["id"]
-    client.post(
+    client.patch(
         f"/api/v1/orders/{oid}/invoice", json={"externalInvoiceId": "FAC-001-42"}
     )
 
@@ -722,7 +722,7 @@ def test_order_export_document(client, db_session):
     b = _create_board(client)
     order = _create_order(client, db_session, _order_payload(c["id"], b["id"]))
 
-    resp = client.get(f"/api/v1/orders/{order['id']}/export")
+    resp = client.get(f"/api/v1/orders/{order['id']}/billing-export")
     assert resp.status_code == 200
     data = resp.json()["data"]
 
@@ -752,20 +752,20 @@ def test_set_external_invoice_id_and_reflect_in_export(client, db_session):
     order = _create_order(client, db_session, _order_payload(c["id"], b["id"]))
     oid = order["id"]
 
-    resp = client.post(
+    resp = client.patch(
         f"/api/v1/orders/{oid}/invoice", json={"externalInvoiceId": "FAC-001-42"}
     )
     assert resp.status_code == 200
     assert resp.json()["data"]["externalInvoiceId"] == "FAC-001-42"
 
     # Idempotent with the same ID.
-    again = client.post(
+    again = client.patch(
         f"/api/v1/orders/{oid}/invoice", json={"externalInvoiceId": "FAC-001-42"}
     )
     assert again.status_code == 200
 
     # The export reflects the associated invoice.
-    exported = client.get(f"/api/v1/orders/{oid}/export").json()["data"]
+    exported = client.get(f"/api/v1/orders/{oid}/billing-export").json()["data"]
     assert exported["externalInvoiceId"] == "FAC-001-42"
 
 
@@ -775,20 +775,20 @@ def test_set_external_invoice_id_conflict_on_different_id(client, db_session):
     order = _create_order(client, db_session, _order_payload(c["id"], b["id"]))
     oid = order["id"]
 
-    client.post(
+    client.patch(
         f"/api/v1/orders/{oid}/invoice", json={"externalInvoiceId": "FAC-001-42"}
     )
     # A different ID on an already-invoiced order → 409 (doesn't overwrite the issued invoice).
-    conflict = client.post(
+    conflict = client.patch(
         f"/api/v1/orders/{oid}/invoice", json={"externalInvoiceId": "FAC-999-00"}
     )
     assert conflict.status_code == 409
 
 
 def test_billing_seam_404(client):
-    assert client.get("/api/v1/orders/999999/export").status_code == 404
+    assert client.get("/api/v1/orders/999999/billing-export").status_code == 404
     assert (
-        client.post(
+        client.patch(
             "/api/v1/orders/999999/invoice", json={"externalInvoiceId": "X"}
         ).status_code
         == 404

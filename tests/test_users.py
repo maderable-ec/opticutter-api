@@ -711,6 +711,10 @@ def test_public_endpoints_need_no_auth(client):
 def test_permission_matrix_reflects_roles():
     assert RESOURCE_ROLES["users:manage"] == (UserRole.ADMIN,)
     assert RESOURCE_ROLES["analytics"] == (UserRole.ADMIN,)
+    # The low-stock report is what the admin reorders from: admin only, apart
+    # from the stock check a seller runs while quoting.
+    assert RESOURCE_ROLES["inventory:low-stock"] == (UserRole.ADMIN,)
+    assert RESOURCE_ROLES["inventory:check"] == (UserRole.ADMIN, UserRole.SELLER)
     assert RESOURCE_ROLES["products:read"] == (UserRole.ADMIN, UserRole.SELLER)
     # The catalog sync is deliberately its own key: the seller pulls fresh prices
     # (it is what loads price_2/price_3) without gaining product CRUD.

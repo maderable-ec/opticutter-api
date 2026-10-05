@@ -2,6 +2,8 @@ import os
 import subprocess
 import sys
 
+import pytest
+from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
 from main import app
@@ -80,25 +82,49 @@ def test_readiness_check():
     assert "checks" in data
 
 
-def test_cutter_info():
-    """Test of the Cutter info endpoint"""
-    response = client.get("/api/v1/cutter/")
-    assert response.status_code == 200
-    data = response.json()
-    assert "message" in data
-    assert "version" in data
-    assert "features" in data
-    assert isinstance(data["features"], list)
+def test_the_old_cutter_placeholders_are_gone():
+    """They answered fixed data (``active_processes: 0``) under the project's old
+    name, and nothing read them: health lives at ``/health`` and ``/api/v1/health/``."""
+    assert client.get("/api/v1/cutter/").status_code == 404
+    assert client.get("/api/v1/cutter/status").status_code == 404
 
 
-def test_cutter_status():
-    """Test of the Cutter status endpoint"""
-    response = client.get("/api/v1/cutter/status")
-    assert response.status_code == 200
-    data = response.json()
-    assert data["status"] == "operational"
-    assert "active_processes" in data
-    assert "last_update" in data
+# The previous web build still calls these paths from any tab left open across the
+# deploy. Each one answers through the very handler of its new path, out of the
+# OpenAPI schema; this table goes, with the aliases, in the release after.
+_DEPRECATED_ALIASES = [
+    ("GET", "/api/v1/analytics/low-stock", "GET", "/api/v1/inventory/low-stock"),
+    ("GET", "/api/v1/analytics/users", "GET", "/api/v1/analytics/productivity"),
+    (
+        "GET",
+        "/api/v1/orders/{order_id}/export",
+        "GET",
+        "/api/v1/orders/{order_id}/billing-export",
+    ),
+    (
+        "POST",
+        "/api/v1/orders/{order_id}/invoice",
+        "PATCH",
+        "/api/v1/orders/{order_id}/invoice",
+    ),
+]
+
+
+@pytest.mark.parametrize("old_method,old_path,new_method,new_path", _DEPRECATED_ALIASES)
+def test_a_deprecated_alias_serves_its_new_route_out_of_the_schema(
+    old_method, old_path, new_method, new_path
+):
+    def route(method, path):
+        return next(
+            r
+            for r in app.routes
+            if isinstance(r, APIRoute) and r.path == path and method in r.methods
+        )
+
+    old, new = route(old_method, old_path), route(new_method, new_path)
+    assert old.endpoint is new.endpoint
+    assert old.include_in_schema is False
+    assert new.include_in_schema is True
 
 
 def test_success_response_has_meta_and_request_id_header(client):

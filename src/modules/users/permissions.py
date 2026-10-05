@@ -24,6 +24,8 @@ route is protected with ``require_role(*RESOURCE_ROLES[key])`` (see ``dependenci
 | cutting_plan (view plan)      | yes           | yes      | yes      | no        |
 | orders:cut (mark pieces)      | yes           | no       | yes      | no        |
 | orders:activities (work)      | yes           | no       | yes*     | yes*      |
+| inventory:check (quoting)     | yes           | yes      | no       | no        |
+| inventory:low-stock (report)  | yes           | no       | no       | no        |
 | analytics                     | yes           | no       | no       | no        |
 | notifications:read            | yes           | yes      | yes      | yes       |
 | print:agents (register/token) | yes           | no       | no       | no        |
@@ -87,9 +89,11 @@ RESOURCE_ROLES: dict[str, tuple[UserRole, ...]] = {
     # decision in two places.
     "orders:activities": (_ADMIN, _OPERATOR, _BANDER),
     # The stock question a seller asks while quoting. Same pair as "optimizer"
-    # and "preorders": it is part of building a quote, not a report. The
-    # low-stock REPORT is admin-only and lives under "analytics".
+    # and "preorders": it is part of building a quote, not a report.
     "inventory:check": (_ADMIN, _SELLER),
+    # The low-stock report the admin reorders from (GET /inventory/low-stock).
+    # Admin only, as it was while it hung off /analytics.
+    "inventory:low-stock": (_ADMIN,),
     "analytics": (_ADMIN,),
     # Any authenticated role reads/acks its own notifications; the service scopes
     # every query to the current user's id.

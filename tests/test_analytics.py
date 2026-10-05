@@ -539,7 +539,7 @@ def test_user_productivity_operator_cutting(client, db_session):
         piece_id="p#2",
     )
 
-    data = client.get("/api/v1/analytics/users", params=_RANGE).json()["data"]
+    data = client.get("/api/v1/analytics/productivity", params=_RANGE).json()["data"]
     row = next(u for u in data["users"] if u["userId"] == op.id)
     assert row["role"] == "operador"
     assert row["piecesCut"] == 2
@@ -576,7 +576,7 @@ def test_user_productivity_seller_and_bander(client, db_session):
     )
     db_session.commit()
 
-    data = client.get("/api/v1/analytics/users", params=_RANGE).json()["data"]
+    data = client.get("/api/v1/analytics/productivity", params=_RANGE).json()["data"]
     by_id = {u["userId"]: u for u in data["users"]}
     assert by_id[seller.id]["ordersCreated"] == 1
     assert by_id[seller.id]["revenueGenerated"] == 250.0
@@ -600,7 +600,7 @@ def test_user_productivity_filters_by_role(client, db_session):
     _seed_placed_piece(db_session, order_id=o2.id, board_id=board.id, cut_by=op.id)
 
     data = client.get(
-        "/api/v1/analytics/users", params={**_RANGE, "role": "operador"}
+        "/api/v1/analytics/productivity", params={**_RANGE, "role": "operador"}
     ).json()["data"]
     assert [u["userId"] for u in data["users"]] == [op.id]
 
