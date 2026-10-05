@@ -142,7 +142,9 @@ def test_the_xml_reads_back_as_the_benchmarks_read_the_shops_files():
     ]
     root = ET.fromstring(pieces_xml(pieces, "Ada Lovelace"))
     rows = [{child.tag: child.text for child in row} for row in root.find("parts")]
-    # Same reading as scripts/bench_shopfiles.py, in cut-list (id) order.
+    # Same reading as scripts/bench_shopfiles.py, in cut-list (id) order. The
+    # hard tape on both long sides takes 2 mm off the WIDTH: 720x400 is cut
+    # 720x398, the size the program has to cut.
     assert [
         (
             r["material"],
@@ -159,7 +161,7 @@ def test_the_xml_reads_back_as_the_benchmarks_read_the_shops_files():
         (
             "Melamina Blanca RH 15",
             720,
-            400,
+            398,
             2,
             True,
             "2L CD Puerta",
@@ -193,3 +195,31 @@ def test_the_csv_is_the_web_exports_layout():
         ["Melamina Blanca RH 15", "720", "400", "2", "", "1C CS Puerta", "sí"],
         ["Melamina Blanca RH 15", "720", "400", "2", "", "Tapa, frontal", "no"],
     ]
+
+
+# --------------------------------------------------------------------------- #
+# Cut size: a hard tape takes 1 mm off per side, a soft one nothing
+# --------------------------------------------------------------------------- #
+def test_both_files_carry_the_cut_size_of_a_hard_banded_piece():
+    # A soft auto tape on a long side takes nothing off; a hard canto especial
+    # on a short side takes 1 mm off the largo.
+    edges = {
+        "sides": ["left"],
+        "band_type": "Soft",
+        "alias": None,
+        "special_edges": [{"side": "bottom", "band_type": "Hard", "alias": "BLN"}],
+    }
+    row = ET.fromstring(pieces_xml([_piece(edges=edges)])).find("parts/row")
+    assert (row.find("length").text, row.find("width").text) == ("719", "400")
+
+    hard_long = {"sides": ["right"], "band_type": "Hard", "alias": None}
+    reader = csv.reader(io.StringIO(pieces_csv([_piece(edges=hard_long)]).decode()))
+    next(reader)
+    assert next(reader)[1:3] == ["720", "399"]
+
+
+def test_a_soft_or_unknown_tape_exports_the_ordered_size():
+    for band_type in ("Soft", None):
+        edges = {"sides": ["left", "right", "top"], "band_type": band_type}
+        row = ET.fromstring(pieces_xml([_piece(edges=edges)])).find("parts/row")
+        assert (row.find("length").text, row.find("width").text) == ("720", "400")

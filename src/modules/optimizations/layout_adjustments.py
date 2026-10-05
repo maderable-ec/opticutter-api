@@ -131,6 +131,9 @@ class PoolSpec:
     finite: bool
     serialize: Callable[[CuttingLayout], dict]
     min_usable_offcut: float
+    # Instance id -> final ``(height, width)`` of every piece a hard tape made
+    # smaller (``pieces`` are at the CUT size); see ``hard_edges``.
+    finals: Dict[str, Tuple[int, int]] = field(default_factory=dict)
 
     @property
     def material_keys(self) -> set:
@@ -482,21 +485,41 @@ def _number_sheets(layouts: Sequence[dict]) -> None:
         layout["material"]["sheet_number"] = counter[key]
 
 
-def _group_pending(pool_key: str, pending: Sequence[Piece]) -> List[dict]:
-    """Pending pieces as ``unplaced`` entries, grouped the way the engine groups."""
+def group_unplaced(
+    pool_key: str,
+    pieces: Sequence[Piece],
+    finals: Optional[Dict[str, Tuple[int, int]]] = None,
+) -> List[dict]:
+    """A pool's uncut pieces as ``unplaced`` entries, grouped by size.
+
+    Grouped because the seller reads "3 puertas de 600×400 no entran", not
+    three identical lines. Keyed on the base label so the ``#N`` instance
+    suffix ``_build_pieces`` adds doesn't split one group into singletons. The
+    engine's leftovers and a hand adjustment's pending pieces go through here
+    alike.
+
+    ``height``/``width`` are the size the seller typed: a piece a hard tape
+    made smaller (``finals``) also carries ``cut_height``/``cut_width``, the
+    size that did not fit, which is what ``explain_unplaced`` measures.
+    """
+    finals = finals or {}
     grouped: Dict[tuple, dict] = {}
-    for piece in pending:
+    for piece in pieces:
         label = base_label(piece.id)
         key = (label, piece.width, piece.height)
         entry = grouped.get(key)
         if entry is None:
-            grouped[key] = {
+            entry = grouped[key] = {
                 "material_key": pool_key,
                 "label": label,
                 "width": piece.width,
                 "height": piece.height,
                 "quantity": 1,
             }
+            final = finals.get(piece.id)
+            if final is not None:
+                entry["cut_width"], entry["cut_height"] = piece.width, piece.height
+                entry["height"], entry["width"] = (float(v) for v in final)
         else:
             entry["quantity"] += 1
     return list(grouped.values())
@@ -592,7 +615,7 @@ def apply_layout_adjustments(
         if entry.get("material_key") not in realized
     ]
     for key, pool in realized.items():
-        unplaced.extend(_group_pending(key, pool.pending))
+        unplaced.extend(group_unplaced(key, pool.pending, specs[key].finals))
 
     result = dict(payload)
     result["layouts"] = layouts

@@ -296,13 +296,35 @@ def _fit_label(
     return (truncated + "…") if truncated else None
 
 
-def _legend_entries(band_types: Set[str]) -> List[Tuple[str, str, int, str, str]]:
+def _cut_short(piece: dict) -> bool:
+    """A hard tape made this piece smaller than the size it was ordered at.
+
+    The placed size is the cut one and ``original_*`` the ordered one
+    (``OptimizationService._enrich_layout_pieces``); an order frozen before the
+    rule has the two equal, and so reads ``False``.
+    """
+    height, width = piece.get("height"), piece.get("width")
+    if piece.get("rotated"):
+        height, width = width, height
+    return (height, width) != (
+        piece.get("original_height", height),
+        piece.get("original_width", width),
+    )
+
+
+def _legend_entries(
+    band_types: Set[str], cut_short: bool = False
+) -> List[Tuple[str, str, int, str, str]]:
     """The legend's entries: ``(fill, outline, width, text, swatch)``.
 
     ``swatch`` is ``""`` for a plain box, ``"hatch"`` for the hard-edge hatching
     or ``"grain"`` for the veta. The two banding types get one entry each and only
     the ones present in the pattern: with no colour, the hatching is the only
     thing that tells them apart, so it has to be spelled out.
+
+    ``cut_short``: some piece of the pattern is drawn and measured at its cut
+    size, 1 mm short per hard side (``hard_edges``). The hard-edge entry says
+    so, since the numbers on those pieces are not the ones the client ordered.
     """
     entries = [
         (COLOR_PIECE_FILL, COLOR_INK, PIECE_OUTLINE_WIDTH, "Pieza", ""),
@@ -318,7 +340,8 @@ def _legend_entries(band_types: Set[str]) -> List[Tuple[str, str, int, str, str]
     if "Soft" in band_types:
         entries.append((COLOR_INK, COLOR_INK, 1, "Canto suave", ""))
     if "Hard" in band_types:
-        entries.append(("white", COLOR_INK, 1, "Canto duro", "hatch"))
+        text = "Canto duro (corte -1 mm por lado)" if cut_short else "Canto duro"
+        entries.append(("white", COLOR_INK, 1, text, "hatch"))
     return entries
 
 
@@ -457,7 +480,9 @@ class VisualizationService:
         # Laid out once and handed to the drawing below: the legend's own height
         # is what sets the band, so measuring it here and letting ``_draw_legend``
         # measure it again is both wasted work and two places to disagree.
-        legend = _legend_entries(band_types)
+        legend = _legend_entries(
+            band_types, any(_cut_short(p) for p in layout.get("placed_pieces", []))
+        )
         legend_positions, legend_bottom = _legend_layout(
             legend, legend_font, MARGIN, LEGEND_TOP, canvas_width - MARGIN
         )
