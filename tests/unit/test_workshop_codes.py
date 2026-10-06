@@ -26,6 +26,10 @@ from src.modules.optimizations.service import (
     OptimizationService,
     hashable_requirements,
 )
+from src.modules.optimizations.workshop_codes import (
+    with_piece_workshop_codes,
+    workshop_codes_by_instance,
+)
 from src.modules.orders.model import ACTIVITY_PIECES, ActivityType, OrderModel
 from src.modules.orders.service import (
     _PIECE_IN_SET,
@@ -34,7 +38,6 @@ from src.modules.orders.service import (
     _attach_cutting_plan,
     _build_activities,
     _with_workshop_codes,
-    _workshop_codes_by_instance,
 )
 
 
@@ -109,8 +112,9 @@ def test_the_codes_never_reach_the_hash():
     # Excluded, not emitted as null: the dump is exactly what it was before the
     # fields existed, so every Redis entry survives the deploy.
     legacy = _req().model_dump(mode="json")
-    # Younger than the codes and left out the same way while empty.
+    # Younger than the codes and left out the same way while at their default.
     legacy.pop("special_edges")
+    legacy.pop("hard_edge_cut")
     for field in WORKSHOP_CODE_FIELDS:
         legacy.pop(field)
         assert field not in with_codes[0]
@@ -141,7 +145,7 @@ def test_the_positional_pairing_refuses_a_count_mismatch():
 # Placed pieces: the same names the optimizer gave them
 # --------------------------------------------------------------------------- #
 def test_codes_follow_the_instance_names_within_a_group():
-    codes = _workshop_codes_by_instance(
+    codes = workshop_codes_by_instance(
         [
             _dumped(label="Puerta", quantity=2, hinging_code="B2"),
             _dumped(label="Lateral"),
@@ -161,7 +165,7 @@ def test_codes_follow_the_instance_names_within_a_group():
 
 
 def test_two_materials_can_cut_the_same_label():
-    codes = _workshop_codes_by_instance(
+    codes = workshop_codes_by_instance(
         [
             _dumped(material_key="b1", label="Puerta", hinging_code="B2"),
             _dumped(material_key="b2", label="Puerta"),
@@ -208,6 +212,42 @@ def test_without_anchors_every_material_is_its_own_group():
     by_id = {p.piece_id: p for p in order.boards[0].pieces}
     assert by_id["Puerta"].hinging_code == "B2"
     assert by_id["Z"].hinging_code is None
+
+
+# --------------------------------------------------------------------------- #
+# The seller's diagram: the same codes laid over the response's layouts
+# --------------------------------------------------------------------------- #
+def test_the_response_layouts_carry_each_pieces_codes():
+    layouts = [_layout("b1", "Puerta#1", "Lateral"), _layout("off1", "Puerta#2")]
+    out = with_piece_workshop_codes(
+        layouts,
+        [
+            _dumped(label="Puerta", quantity=2, hinging_code="B2"),
+            _dumped(label="Lateral"),
+        ],
+        anchor_of={"b1": "b1", "off1": "b1"},
+    )
+    by_id = {p["piece_id"]: p for layout in out for p in layout["placed_pieces"]}
+    assert by_id["Puerta#1"]["hinging_code"] == "B2"
+    # Cut on a pooled retazo, named after its anchor's cut list.
+    assert by_id["Puerta#2"]["hinging_code"] == "B2"
+    assert "hinging_code" not in by_id["Lateral"]
+
+
+def test_laying_the_codes_never_mutates_the_cached_layouts():
+    layouts = [_layout("b1", "Puerta"), _layout("b2", "Fondo")]
+    out = with_piece_workshop_codes(
+        layouts, [_dumped(label="Puerta", grooving_code="R1")]
+    )
+    assert "grooving_code" not in layouts[0]["placed_pieces"][0]
+    assert out[0]["placed_pieces"][0]["grooving_code"] == "R1"
+    # A sheet with nothing to lay is handed back as it was.
+    assert out[1] is layouts[1]
+
+
+def test_a_plan_without_codes_is_handed_back_untouched():
+    layouts = [_layout("b1", "Puerta")]
+    assert with_piece_workshop_codes(layouts, [_dumped(label="Puerta")]) is layouts
 
 
 # --------------------------------------------------------------------------- #

@@ -24,7 +24,7 @@ class _LegacyRoleInput(CamelModel):
 
     Only while both contracts are live: the api ships first, and a web that
     still sends ``role`` must keep creating and editing users. Goes away with
-    migration 014, together with ``UserResponse.role``.
+    migration 015, together with ``UserResponse.role``.
     """
 
     @model_validator(mode="before")
@@ -84,7 +84,7 @@ class UserResponse(UserBase):
         ...,
         description=(
             "DEPRECATED: the primary role (first of ``roles``). Kept for the "
-            "previous web; removed with migration 014."
+            "previous web; removed with migration 015."
         ),
     )
     is_active: bool = Field(..., description="Active/inactive")

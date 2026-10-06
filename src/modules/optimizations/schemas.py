@@ -489,6 +489,18 @@ class Requirement(CamelModel):
             "rotation."
         ),
     )
+    # The shop rule of ``hard_edges``: each side with a hard tape is cut 1 mm
+    # short. On by default; the seller turns it off for a piece the shop cuts at
+    # its final size anyway. Left out of the hash and of the cached payload while
+    # it is on (``_requirement_dump``), so no existing quote moves.
+    hard_edge_cut: bool = Field(
+        default=True,
+        description=(
+            "If true, each side with a hard tape (CD) is cut 1 mm short so the "
+            "piece comes out at its final size. Set false to cut it at the size "
+            "typed."
+        ),
+    )
     edge_banding: Optional[EdgeBandingSpec] = Field(
         default=None, description="Optional edge banding for this piece"
     )
@@ -813,6 +825,7 @@ class Material(CamelModel):
 
 class PlacedPiece(_QuietFlags):
     quiet_flags = ("adjusted",)
+    quiet_nulls = WORKSHOP_CODE_FIELDS
 
     piece_id: str = Field(..., description="Unique identifier for the placed piece")
     x: float = Field(..., description="X position of the placed piece")
@@ -846,6 +859,13 @@ class PlacedPiece(_QuietFlags):
         default=False,
         description="Moved by hand: not where the optimizer put it",
     )
+    # The workshop codes of the piece's cut-list row, laid over the response
+    # from the request it answers (``with_piece_workshop_codes``): never in the
+    # cached payload, and left out of the JSON while ``None``.
+    hinging_code: Optional[str] = Field(default=None, description="Abisagrado")
+    grooving_code: Optional[str] = Field(default=None, description="Ranurado")
+    assembly_code: Optional[str] = Field(default=None, description="Ensamble")
+    division_code: Optional[str] = Field(default=None, description="División")
 
 
 class Remainder(_QuietFlags):

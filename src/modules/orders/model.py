@@ -574,6 +574,12 @@ class OrderPieceModel(TimestampMixin, AuditMixin, Base):
     quantity: Mapped[int] = mapped_column(Integer)
     priority: Mapped[int] = mapped_column(Integer, default=0)
     can_rotate: Mapped[bool] = mapped_column(Boolean, default=True)
+    # The hard-edge rule (``hard_edges``) as the seller left it: False = cut at
+    # the final size, whatever the tapes. The export recomputes the cut size off
+    # ``edges``, so it has to know.
+    hard_edge_cut: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=text("true"), nullable=False
+    )
     # Piece edge banding (nominal sides + product), e.g.
     # ``{"product_id": 42, "sides": ["top", "left"]}``. Null if not banded.
     edges: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)

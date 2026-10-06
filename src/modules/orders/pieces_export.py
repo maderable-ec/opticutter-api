@@ -76,7 +76,10 @@ def _material(piece: OrderPieceModel) -> str:
 
 
 def _cut_size(piece: OrderPieceModel) -> Tuple[int, int]:
-    """``(largo, ancho)`` the saw cuts: the ordered size minus its hard tapes."""
+    """``(largo, ancho)`` the saw cuts: the ordered size minus its hard tapes,
+    unless the seller turned the rule off for the piece."""
+    if piece.hard_edge_cut is False:
+        return piece.height, piece.width
     return cut_size(piece.height, piece.width, frozen_band_types(piece.edges))
 
 

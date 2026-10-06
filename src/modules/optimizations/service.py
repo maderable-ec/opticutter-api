@@ -95,6 +95,7 @@ from src.modules.optimizations.unplaced import (
     unplaced_message,
 )
 from src.modules.optimizations.whole_boards import apply_whole_boards
+from src.modules.optimizations.workshop_codes import with_piece_workshop_codes
 from src.modules.products.model import ProductModel, ProductType
 from src.modules.products.service import ProductService
 from src.modules.products.types.board import HalfBoardSplit
@@ -127,14 +128,18 @@ _SIDE_ORDER = ("top", "bottom", "left", "right")
 def _requirement_dump(requirement: Requirement) -> dict:
     """A requirement as the hash and the cached payload both see it.
 
-    The workshop codes are always left out, and ``special_edges`` whenever it is
-    empty -- the device ``skip_trim`` uses in ``_compute_hash``: a piece with no
-    canto especial dumps byte-identically to what it did before the field
-    existed, so the deploy invalidated no Redis entry.
+    The workshop codes are always left out, ``special_edges`` whenever it is
+    empty and ``hard_edge_cut`` while it is on -- the device ``skip_trim`` uses
+    in ``_compute_hash``: a piece at those defaults dumps byte-identically to
+    what it did before the fields existed, so the deploy invalidated no Redis
+    entry. An opted-out piece carries ``hard_edge_cut: false`` into the payload,
+    which is how the order freezes it.
     """
     exclude = set(WORKSHOP_CODE_FIELDS)
     if not requirement.special_edges:
         exclude.add("special_edges")
+    if requirement.hard_edge_cut:
+        exclude.add("hard_edge_cut")
     return requirement.model_dump(mode="json", exclude=exclude)
 
 
@@ -265,11 +270,30 @@ class _Prepared:
         return {key for key, rm in self.resolved.items() if rm.is_finite}
 
 
-def _payload_fields(payload: dict) -> dict:
+def _codes_source(request: OptimizeRequest) -> Tuple[List[dict], Dict[str, str]]:
+    """Where a live response reads its workshop codes from: the request's own
+    cut list, and each material's anchor (a pooled retazo cuts its anchor's
+    pieces), as ``with_piece_workshop_codes`` takes them."""
+    return (
+        [r.model_dump() for r in request.requirements],
+        {m.key: getattr(m, "pool_key", None) or m.key for m in request.materials},
+    )
+
+
+def _payload_fields(
+    payload: dict,
+    requirements: Iterable[dict],
+    anchor_of: Optional[Dict[str, str]] = None,
+) -> dict:
     """The ``OptimizeResponse`` fields read straight off a computed payload.
 
     Shared by the live response and the frozen one, so an order's snapshot is
     served with exactly the fields a fresh computation would carry.
+
+    The one thing laid on top is each placed piece's workshop codes, from the
+    ``requirements`` the response answers: they never enter the payload
+    (``WORKSHOP_CODE_FIELDS``), and the seller's diagram prints them under the
+    canto the way the workshop canvas does.
     """
     return dict(
         variant=payload.get("variant", 0),
@@ -278,7 +302,7 @@ def _payload_fields(payload: dict) -> dict:
         total_edge_banding_cost=payload.get("total_edge_banding_cost", 0.0),
         total_cut_linear_m=payload.get("total_cut_linear_m", 0.0),
         total_edge_banding_linear_m=payload.get("total_edge_banding_linear_m", 0.0),
-        layouts=payload["layouts"],
+        layouts=with_piece_workshop_codes(payload["layouts"], requirements, anchor_of),
         materials_summary=payload["materials_summary"],
         edge_bandings_summary=payload.get("edge_bandings_summary"),
         layout_groups=payload["layout_groups"],
@@ -360,7 +384,7 @@ class OptimizationService:
             id=None,
             client=client,
             optimization_hash=computed.plan_hash,
-            **_payload_fields(payload),
+            **_payload_fields(payload, *_codes_source(request)),
             pricing=PricingSummary(**pricing),
             # Explained here, per response and never in the cache: the name, the
             # useful area and the reason are derived from the same pools the
@@ -370,19 +394,26 @@ class OptimizationService:
 
     @staticmethod
     def frozen_response(
-        payload: dict, *, client: ClientModel | None, plan_hash: str | None
+        payload: dict,
+        *,
+        client: ClientModel | None,
+        plan_hash: str | None,
+        anchor_of: Optional[Dict[str, str]] = None,
     ) -> OptimizeResponse:
         """The response for a plan already frozen, such as an order's snapshot.
 
         Computes nothing and never touches the cache: the plan and the money are
         the ones stored with the payload (``pricing``). ``unplaced`` is empty
-        because an order is only minted from a plan that cuts every piece.
+        because an order is only minted from a plan that cuts every piece. The
+        workshop codes come off the snapshot's own requirements, which the order
+        froze with them; ``anchor_of`` names a pooled retazo's anchor, since the
+        payload does not keep ``pool_key``.
         """
         return OptimizeResponse(
             id=None,
             client=client,
             optimization_hash=plan_hash,
-            **_payload_fields(payload),
+            **_payload_fields(payload, payload.get("requirements") or [], anchor_of),
             pricing=PricingSummary(**payload["pricing"]),
             unplaced=[],
         )
@@ -407,6 +438,7 @@ class OptimizationService:
             list(prepared.requirements_by_key),
             prepared.pool_of,
         )
+        codes_source = _codes_source(request)
         pools = []
         for key, spec in specs.items():
             realized = computed.realized.get(key)
@@ -415,6 +447,12 @@ class OptimizationService:
             else:
                 layouts = base_by_pool.get(key, [])
                 entries = list(zip(sheets_from_layouts(layouts), layouts))
+            # The editor draws these sheets, not the response's: they carry the
+            # codes the same way, so the seller's canto and codes stay on screen
+            # while pieces move.
+            laid = with_piece_workshop_codes(
+                [layout for _, layout in entries], *codes_source
+            )
             on_sheets = {p.piece_id for sheet, _ in entries for p in sheet.pieces}
             used = Counter(sheet.material_key for sheet, _ in entries if sheet.pieces)
             pools.append(
@@ -443,7 +481,7 @@ class OptimizationService:
                     pending=[pid for pid in spec.pieces if pid not in on_sheets],
                     sheets=[
                         EditableSheet(**sheet.model_dump(), layout=layout)
-                        for sheet, layout in entries
+                        for (sheet, _), layout in zip(entries, laid, strict=True)
                     ],
                     adjusted=realized is not None,
                     finite=spec.finite,

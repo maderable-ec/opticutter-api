@@ -73,6 +73,20 @@ def test_a_tape_with_no_product_yet_is_not_hard():
     assert requirement_cut_size(_req(), {1: _tape("Hard")}) == (600, 400)
 
 
+def test_a_piece_the_seller_opted_out_is_cut_at_its_final_size():
+    req = _req(edgeBanding={"sides": ["left", "right", "top"], "productId": 1})
+    tapes = {1: _tape("Hard")}
+    assert req.hard_edge_cut is True
+    assert requirement_cut_size(req, tapes) == (599, 398)
+    off = _req(
+        edgeBanding={"sides": ["left", "right", "top"], "productId": 1},
+        hardEdgeCut=False,
+    )
+    # The tapes stay hard; only the saw's discount goes.
+    assert requirement_band_types(off, tapes)["left"] == "Hard"
+    assert requirement_cut_size(off, tapes) == (600, 400)
+
+
 def test_frozen_edges_let_a_special_edge_win_its_side():
     # An order frozen while a special edge still REPLACED the auto tape lists
     # the side in both; the special one is the tape that side got.

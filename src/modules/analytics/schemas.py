@@ -113,7 +113,7 @@ class UserProductivity(CamelModel):
     user_id: int
     full_name: str
     roles: List[str]
-    # DEPRECATED: the primary role (first of ``roles``); removed with migration 014.
+    # DEPRECATED: the primary role (first of ``roles``); removed with migration 015.
     role: str
     branch_name: Optional[str]
     # Cutting (operador).
@@ -155,7 +155,7 @@ class UserAttendance(CamelModel):
     user_id: int
     full_name: str
     roles: List[str]
-    # DEPRECATED: the primary role (first of ``roles``); removed with migration 014.
+    # DEPRECATED: the primary role (first of ``roles``); removed with migration 015.
     role: str
     branch_name: Optional[str]
     days: List[AttendanceDay]

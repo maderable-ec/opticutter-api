@@ -217,3 +217,40 @@ def test_the_order_freezes_both_sizes_and_exports_the_cut(client, db_session):
         )
     )
     assert rows[1][1:3] == ["600", "398"]
+
+
+def test_a_piece_the_seller_opted_out_is_cut_at_its_final_size(client):
+    client_id, board_id, hard, _ = _setup(client)
+    on = _request(client_id, board_id, hard, ["left", "right"])
+    off = _request(client_id, board_id, hard, ["left", "right"], hardEdgeCut=False)
+
+    on_data = _optimize(client, on)
+    off_data = _optimize(client, off)
+    [piece] = off_data["layouts"][0]["placedPieces"]
+    assert (piece["height"], piece["width"]) == (600, 400)
+    assert (piece["originalHeight"], piece["originalWidth"]) == (600, 400)
+    # The tape is still hard: it still bands two sides of 600 mm.
+    assert off_data["edgeBandingsSummary"][0]["netLinearM"] == 1.2
+    assert off_data["optimizationHash"] != on_data["optimizationHash"]
+    # On is the default, and the default is left out of the hash: saying it
+    # explicitly quotes exactly what every existing quote does.
+    explicit = _request(client_id, board_id, hard, ["left", "right"], hardEdgeCut=True)
+    assert (
+        _optimize(client, explicit)["optimizationHash"] == on_data["optimizationHash"]
+    )
+
+
+def test_the_order_freezes_the_opt_out_and_exports_the_final_size(client, db_session):
+    client_id, board_id, hard, _ = _setup(client)
+    body = _request(client_id, board_id, hard, ["left", "right"], hardEdgeCut=False)
+    order = _mint_order(client, db_session, {"branchId": 1, **body})
+
+    plan = client.get(f"/api/v1/orders/{order['id']}/cutting-plan").json()["data"]
+    [placed] = plan["boards"][0]["pieces"]
+    assert (placed["height"], placed["width"]) == (600, 400)
+    # The export recomputes the cut off the frozen tapes: it must know.
+    url = f"/api/v1/orders/{order['id']}/pieces/export"
+    row = ET.fromstring(client.get(url, params={"format": "xml"}).content).find(
+        "parts/row"
+    )
+    assert (row.find("length").text, row.find("width").text) == ("600", "400")

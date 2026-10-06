@@ -534,6 +534,12 @@ class PreOrderService(BranchScopedMixin):
                         order.optimization_snapshot,
                         client=preorder.client,
                         plan_hash=order.optimization_hash,
+                        # Read off the stored JSON, never re-validated: a
+                        # snapshot read must not raise (rule 4).
+                        anchor_of={
+                            m.get("key"): m.get("pool_key") or m.get("key")
+                            for m in preorder.materials or []
+                        },
                     ),
                     "order",
                 )

@@ -12,7 +12,7 @@ of ``UserService``, not of the table, so it can be relaxed without a migration.
 
 ADDITIVE ON PURPOSE. ``users.role`` stays, as a mirror of the primary role
 (``roles[0]``) that the model keeps in step: the previous release reads that
-column, and rolling the api back is a retag with no downgrade. Migration 014
+column, and rolling the api back is a retag with no downgrade. Migration 015
 drops it once this release has settled.
 
 The backfill lives as a module constant so the suite can replay it against real
