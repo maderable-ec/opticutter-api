@@ -191,6 +191,10 @@ def test_the_codes_survive_a_quote_confirmed_by_the_client(client, db_session):
     ).json()["data"]
     detail = client.get(f"/api/v1/preorders/{pre['id']}").json()["data"]
     assert detail["requirements"][0]["hingingCode"] == "B4"
+    # The seller's diagram prints them under the canto, live ...
+    assert detail["optimizationSource"] == "live"
+    [placed] = detail["optimization"]["layouts"][0]["placedPieces"]
+    assert placed["hingingCode"] == "B4"
 
     token = client.post(f"/api/v1/preorders/{pre['id']}/review-link").json()["data"][
         "token"
@@ -201,6 +205,79 @@ def test_the_codes_survive_a_quote_confirmed_by_the_client(client, db_session):
     order = client.get(f"/api/v1/orders/{order_id}").json()["data"]
     assert order["pieces"][0]["hingingCode"] == "B4"
     assert _activity(order, "additional") is not None
+    # ... and off the order's snapshot once confirmed.
+    detail = client.get(f"/api/v1/preorders/{pre['id']}").json()["data"]
+    assert detail["optimizationSource"] == "order"
+    [placed] = detail["optimization"]["layouts"][0]["placedPieces"]
+    assert placed["hingingCode"] == "B4"
+
+
+def test_the_optimize_response_lays_the_codes_on_every_placed_piece(client):
+    """Never in the cached payload: a cache hit answers with this request's own."""
+    c = _create_client(client, identifier="0100000470")
+    retazo = {"source": "clientOffcut", "height": 700, "width": 700, "thickness": 18}
+
+    def body(**codes):
+        return {
+            "clientId": c["id"],
+            "materials": [
+                {"key": "r1", **retazo},
+                {"key": "r2", **retazo, "poolKey": "r1"},
+            ],
+            "requirements": [
+                {
+                    "priority": 0,
+                    "height": 500,
+                    "width": 500,
+                    "quantity": 2,
+                    "materialKey": "r1",
+                    "label": "Tapa",
+                    "canRotate": True,
+                    **codes,
+                },
+                {
+                    "priority": 0,
+                    "height": 100,
+                    "width": 100,
+                    "quantity": 1,
+                    "materialKey": "r1",
+                    "label": "Taco",
+                    "canRotate": True,
+                },
+            ],
+        }
+
+    def pieces(resp):
+        assert resp.status_code == 200, resp.text
+        data = resp.json()["data"]
+        return data, [p for lay in data["layouts"] for p in lay["placedPieces"]]
+
+    first, placed = pieces(
+        client.post("/api/v1/optimize/", json=body(assemblyCode="E7"))
+    )
+    tapas = [p for p in placed if p["pieceId"].startswith("Tapa")]
+    # Two retazos of a pool: the second one's piece is named after the anchor.
+    assert len(tapas) == 2 and all(p["assemblyCode"] == "E7" for p in tapas)
+    [taco] = [p for p in placed if p["pieceId"] == "Taco"]
+    assert "assemblyCode" not in taco and "hingingCode" not in taco
+
+    # Same geometry, other codes: the cache hit carries the new ones.
+    again, placed = pieces(
+        client.post("/api/v1/optimize/", json=body(assemblyCode="E8"))
+    )
+    assert again["optimizationHash"] == first["optimizationHash"]
+    assert {p["assemblyCode"] for p in placed if p["pieceId"].startswith("Tapa")} == {
+        "E8"
+    }
+
+    # The layout editor draws its own working sheets: they carry them too.
+    resp = client.post("/api/v1/optimize/layout/evaluate", json=body(assemblyCode="E9"))
+    assert resp.status_code == 200, resp.text
+    sheets = [s for pool in resp.json()["data"]["pools"] for s in pool["sheets"]]
+    on_sheets = [p for s in sheets if s["layout"] for p in s["layout"]["placedPieces"]]
+    assert {
+        p["assemblyCode"] for p in on_sheets if p["pieceId"].startswith("Tapa")
+    } == {"E9"}
 
 
 def test_the_orden_de_pedido_prints_the_codes(client, db_session):

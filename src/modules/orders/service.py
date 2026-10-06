@@ -16,7 +16,7 @@ from src.modules.notifications.emitter import (
     notify_order_low_stock,
     notify_order_transition,
 )
-from src.modules.optimizations.patterns import base_label, piece_instance_ids
+from src.modules.optimizations.patterns import base_label
 from src.modules.optimizations.pricing import build_pricing
 from src.modules.optimizations.schemas import (
     WORKSHOP_CODE_FIELDS,
@@ -25,6 +25,7 @@ from src.modules.optimizations.schemas import (
     has_workshop_codes,
 )
 from src.modules.optimizations.service import OptimizationService
+from src.modules.optimizations.workshop_codes import workshop_codes_by_instance
 from src.modules.orders.model import (
     ACTIVITY_FINISH_NEEDS_EVERY_PIECE,
     ACTIVITY_LABELS,
@@ -415,6 +416,8 @@ class OrderService(BranchScopedMixin):
                 quantity=r["quantity"],
                 priority=r.get("priority", 0),
                 can_rotate=r.get("can_rotate", True),
+                # Dumped only when the seller turned it off (``_requirement_dump``).
+                hard_edge_cut=r.get("hard_edge_cut", True),
                 edges=_piece_edges(r),
                 **{f: r.get(f) for f in WORKSHOP_CODE_FIELDS},
             )
@@ -1413,28 +1416,6 @@ def _with_workshop_codes(
     ]
 
 
-def _workshop_codes_by_instance(
-    requirements: List[dict],
-) -> dict[Tuple[str, str], dict]:
-    """``(material_key, instance_id) -> codes`` for every piece that carries any.
-
-    Instance ids are only unique inside ONE material group (two materials can
-    both cut a "Puerta"), so the group is part of the key, and each group is
-    named exactly as the optimizer named it: same grouping (by ``material_key``,
-    request order) and the same ``piece_instance_ids``.
-    """
-    groups: dict[str, List[dict]] = {}
-    for r in requirements:
-        groups.setdefault(r.get("material_key"), []).append(r)
-    out: dict[Tuple[str, str], dict] = {}
-    for key, reqs in groups.items():
-        entries = [(r.get("label"), r.get("quantity", 1)) for r in reqs]
-        for i, uid in piece_instance_ids(entries):
-            if has_workshop_codes(reqs[i]):
-                out[(key, uid)] = {f: reqs[i].get(f) for f in WORKSHOP_CODE_FIELDS}
-    return out
-
-
 def _attach_cutting_plan(
     order: OrderModel, payload: dict, anchor_of: Optional[dict[str, str]] = None
 ) -> None:
@@ -1451,7 +1432,7 @@ def _attach_cutting_plan(
     harmless for the orders the lazy path rebuilds, none of which carry codes.
     """
     anchor_of = anchor_of or {}
-    codes_by_instance = _workshop_codes_by_instance(payload.get("requirements") or [])
+    codes_by_instance = workshop_codes_by_instance(payload.get("requirements") or [])
     materials_by_key = {m["material_key"]: m for m in payload.get("materials", [])}
     for seq, layout in enumerate(payload.get("layouts", []), start=1):
         material = layout.get("material", {})

@@ -211,7 +211,7 @@ def test_create_user_hashes_password_and_hides_it(client, auth):
     data = resp.json()["data"]
     assert data["email"] == "seller@empresa.com"
     assert data["roles"] == ["vendedor"]
-    # Deprecated single role, kept for the previous web until migration 014.
+    # Deprecated single role, kept for the previous web until migration 015.
     assert data["role"] == "vendedor"
     assert data["isActive"] is True
     assert "id" in data
@@ -357,7 +357,7 @@ def test_update_rejects_a_forbidden_combination(client, auth):
 
 
 def test_legacy_single_role_is_still_accepted(client, auth):
-    """The previous web sends ``role``; until migration 014 it becomes ``roles``."""
+    """The previous web sends ``role``; until migration 015 it becomes ``roles``."""
     admin = auth("administrador")
     payload = _user_payload(email="legado@empresa.com")
     payload.pop("roles")

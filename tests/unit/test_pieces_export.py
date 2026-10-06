@@ -51,6 +51,7 @@ def _piece(id=1, **kw):
         width=400,
         quantity=2,
         can_rotate=True,
+        hard_edge_cut=True,
         edges=None,
         hinging_code=None,
         grooving_code=None,
@@ -223,3 +224,13 @@ def test_a_soft_or_unknown_tape_exports_the_ordered_size():
         edges = {"sides": ["left", "right", "top"], "band_type": band_type}
         row = ET.fromstring(pieces_xml([_piece(edges=edges)])).find("parts/row")
         assert (row.find("length").text, row.find("width").text) == ("720", "400")
+
+
+def test_a_piece_the_seller_opted_out_exports_the_ordered_size():
+    # The tapes are still hard (the label still reads CD); the saw just cuts the
+    # piece at the size typed.
+    edges = {"sides": ["left", "right", "top"], "band_type": "Hard", "alias": "BLN"}
+    piece = _piece(edges=edges, hard_edge_cut=False)
+    row = ET.fromstring(pieces_xml([piece])).find("parts/row")
+    assert (row.find("length").text, row.find("width").text) == ("720", "400")
+    assert piece_etiqueta(piece).startswith("2L1C CD BLN")

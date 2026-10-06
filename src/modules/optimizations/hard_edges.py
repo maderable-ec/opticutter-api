@@ -93,5 +93,11 @@ def frozen_band_types(edges: Optional[Mapping]) -> Dict[str, Optional[str]]:
 def requirement_cut_size(
     req: Requirement, eb_products: Mapping[int, ProductModel]
 ) -> Tuple[int, int]:
-    """``(height, width)`` the saw cuts for a live requirement."""
+    """``(height, width)`` the saw cuts for a live requirement.
+
+    A piece the seller opted out of the rule (``hard_edge_cut=False``) is cut at
+    its final size whatever its tapes are.
+    """
+    if not req.hard_edge_cut:
+        return req.height, req.width
     return cut_size(req.height, req.width, requirement_band_types(req, eb_products))
