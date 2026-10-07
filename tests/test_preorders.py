@@ -229,30 +229,32 @@ def test_list_preorders_filter_by_client(client):
 
 
 def test_list_preorders_filter_by_created_day_range(client, db_session):
-    c, b = _setup(client)
-    p1 = _create_preorder(client, c, b, width=600).json()["data"]
-    p2 = _create_preorder(client, c, b, width=500).json()["data"]
+    """The range is in Ecuador's days (UTC-5), not UTC's.
 
-    # Backdate the first one; created_at is UTC-naive, so the range is a UTC day.
-    db_session.query(PreOrderModel).filter(PreOrderModel.id == p1["id"]).update(
-        {"created_at": datetime.utcnow() - timedelta(days=3)}
-    )
+    A quote raised at 19:30 on June 1st is stored as 00:30 UTC on the 2nd and
+    belongs to the 1st; one raised at 23:30 on May 31st is stored on June 1st
+    in UTC and must stay in May.
+    """
+    c, b = _setup(client)
+    evening = _create_preorder(client, c, b, width=600).json()["data"]
+    may = _create_preorder(client, c, b, width=500).json()["data"]
+    for preorder_id, created_at in (
+        (evening["id"], datetime(2026, 6, 2, 0, 30)),
+        (may["id"], datetime(2026, 6, 1, 4, 30)),
+    ):
+        db_session.query(PreOrderModel).filter(PreOrderModel.id == preorder_id).update(
+            {"created_at": created_at}
+        )
     db_session.commit()
 
-    today = datetime.utcnow().date()
-    old_day = today - timedelta(days=3)
+    def ids(**params):
+        data = client.get("/api/v1/preorders/", params=params).json()["data"]
+        return sorted(p["id"] for p in data)
 
-    # `createdTo` is inclusive: the backdated quote's own day must return it.
-    upto = client.get(
-        "/api/v1/preorders/", params={"createdTo": old_day.isoformat()}
-    ).json()
-    assert [p["id"] for p in upto["data"]] == [p1["id"]]
-
-    # `createdFrom` is inclusive too, and today's quote is on today's boundary.
-    since = client.get(
-        "/api/v1/preorders/", params={"createdFrom": today.isoformat()}
-    ).json()
-    assert [p["id"] for p in since["data"]] == [p2["id"]]
+    # Both ends inclusive: June 1st alone is the evening quote, never May's.
+    assert ids(createdFrom="2026-06-01", createdTo="2026-06-01") == [evening["id"]]
+    assert ids(createdTo="2026-05-31") == [may["id"]]
+    assert ids(createdFrom="2026-06-02") == []
 
 
 def test_preorder_carries_whole_board_through_the_recompute(client):

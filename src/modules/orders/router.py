@@ -14,6 +14,10 @@ from src.modules.orders.attachment_service import (
 )
 from src.modules.orders.model import ActivityStatus, ActivityType, OrderStatus
 from src.modules.orders.pieces_export import customer_name, pieces_csv, pieces_xml
+from src.modules.orders.production_service import (
+    ProductionService,
+    production_service,
+)
 from src.modules.orders.schemas import (
     ActivityResult,
     ActivityUpdate,
@@ -27,6 +31,7 @@ from src.modules.orders.schemas import (
     OrderStatusUpdate,
     PieceCutResponse,
     PieceCutUpdate,
+    ProductionStatusReport,
     WorkshopQueueItem,
 )
 from src.modules.orders.service import OrderService, order_service
@@ -87,12 +92,12 @@ def list_orders(
     created_from: Optional[date] = Query(
         default=None,
         alias="createdFrom",
-        description="Only orders created on or after this day (UTC, inclusive)",
+        description="Only orders created on or after this day (business day, America/Guayaquil, inclusive)",
     ),
     created_to: Optional[date] = Query(
         default=None,
         alias="createdTo",
-        description="Only orders created on or before this day (UTC, inclusive)",
+        description="Only orders created on or before this day (business day, America/Guayaquil, inclusive)",
     ),
     sort: Literal["oldest", "recent", "stalest"] = Query(
         default="oldest",
@@ -161,6 +166,30 @@ def get_workshop_queue(
     before ``/{order_id}`` so the parametric route doesn't capture it.
     """
     return ok(svc.list_workshop_queue(branch_scope=branch_scope))
+
+
+@router.get(
+    "/production-status",
+    response_model=DataResponse[ProductionStatusReport],
+    dependencies=[_READ],
+)
+def get_production_status(
+    branch_id: Optional[int] = Query(
+        default=None,
+        alias="branchId",
+        description="Global roles only (admin/seller): one branch (empty = all)",
+    ),
+    svc: ProductionService = Depends(production_service),
+    branch_scope: Optional[int] = Depends(get_branch_scope),
+):
+    """Live state of each branch's saw: cutting, stopped (with work) or idle.
+
+    Read off the cutting events by the same idle gap as the statistics. The
+    operator sees their branch; global roles see every active branch, or the one
+    in ``branchId``. Declared before ``/{order_id}``.
+    """
+    scope = branch_scope if branch_scope is not None else branch_id
+    return ok(svc.status(branch_ids=None if scope is None else [scope]))
 
 
 @router.get(

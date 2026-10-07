@@ -15,6 +15,7 @@ from src.modules.optimizations.schemas import (
     validate_material_graph,
 )
 from src.modules.orders.model import ActivityStatus, ActivityType, OrderStatus
+from src.modules.orders.production import LiveState
 from src.shared.schemas import CamelModel
 
 
@@ -649,3 +650,39 @@ class WorkshopQueueItem(CamelModel):
         "gates the dispatch that follows completing the order. Per item because "
         "the admin's board spans every branch",
     )
+
+
+class BranchProductionStatus(CamelModel):
+    """What one branch's saw is doing right now (only the cut is measured)."""
+
+    branch_id: int
+    branch_name: str
+    state: LiveState = Field(
+        ...,
+        description="'cutting': a cutting event (piece marked, cut taken or "
+        "closed) within the idle gap. 'stopped': nothing within the gap while "
+        "there is work (an order queued or a cut in progress). 'idle': nothing "
+        "within the gap and nothing to do",
+    )
+    since: Optional[datetime] = Field(
+        default=None,
+        description="When the current state began: the start of the continuous "
+        "run while cutting, the last event otherwise (null: never cut)",
+    )
+    last_event_at: Optional[datetime] = Field(
+        default=None, description="The branch's latest cutting event (null: never)"
+    )
+    queued_count: int = Field(..., description="Orders waiting in the queue")
+    cutting_order_codes: List[str] = Field(
+        default_factory=list,
+        description="Codes of the orders whose cut is in progress, oldest first",
+    )
+
+
+class ProductionStatusReport(CamelModel):
+    """Live state of every branch the caller can see, in branch-id order."""
+
+    idle_minutes: int = Field(
+        ..., description="Minutes without a cutting event that make a stop"
+    )
+    branches: List[BranchProductionStatus]

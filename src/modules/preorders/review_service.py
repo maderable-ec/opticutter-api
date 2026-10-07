@@ -186,6 +186,9 @@ class PreOrderReviewService:
                     source=preorder.source,
                 ),
                 actor=actor,
+                # The order belongs to whoever raised the quote: the client's
+                # click is the history's actor, not the sale's seller.
+                created_by=preorder.created_by,
             )
         except UnplacedPiecesError:
             # The staff message names boards and trims; the client only needs to

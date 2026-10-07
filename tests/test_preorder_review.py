@@ -338,6 +338,23 @@ def test_confirm_creates_immutable_order(client):
     assert info["usedAt"] is not None
 
 
+def test_the_order_belongs_to_whoever_raised_the_quote(client, db_session):
+    """The client's click mints the order, but the sale is the seller's.
+
+    The actor of that click is no user, so without passing the quote's owner
+    every order came out with ``created_by`` NULL and the sales per seller of
+    the statistics were empty.
+    """
+    pre = _setup_preorder(client)
+    link = _generate_link(client, pre["id"])
+    client.post(f"/api/v1/public/review/{link['token']}/confirm")
+
+    quote = db_session.get(PreOrderModel, pre["id"])
+    order = db_session.get(OrderModel, quote.order_id)
+    assert quote.created_by is not None
+    assert order.created_by == quote.created_by
+
+
 def test_the_order_and_its_quote_link_back_to_each_other(client):
     """The round trip, on the detail AND on the two listings.
 

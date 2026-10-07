@@ -26,6 +26,9 @@ class Config:
     HOST = env("HOST", "0.0.0.0")
     PORT = env.int("PORT", 8000)
 
+    # The business day. Timestamps are stored naive UTC; a report's "from/to"
+    # days and every per-day figure are cut on THIS zone's midnight, because a
+    # UTC day runs 19:00 to 19:00 in Ecuador.
     DEFAULT_TIMEZONE = env("DEFAULT_TIMEZONE", "America/Guayaquil")
 
     CORS_ORIGINS = env.list(
@@ -279,6 +282,14 @@ class Config:
     # production database. Cached in Redis, which degrades on its own if it is
     # down. 0 disables the cache (every call reads through).
     STOCK_CACHE_TTL_SECONDS = env.int("STOCK_CACHE_TTL_SECONDS", 300)
+
+    # The saw's idle gap (minutes): two consecutive cutting events of a branch
+    # (a piece marked, a cut started or closed) further apart than this are a
+    # STOP. One rule for the live state ("Detenida") and for the effective and
+    # paused hours of the statistics, so the board never calls a stretch stopped
+    # that the history later counts as worked. 15 because the shop's rule is to
+    # mark every piece the moment it comes off the saw.
+    PRODUCTION_IDLE_MINUTES = env.int("PRODUCTION_IDLE_MINUTES", 15)
 
     # Maderable frontend base: composes the review link URL the client opens (the
     # origin must also be in CORS_ORIGINS). The dashboard uses BrowserRouter, so

@@ -4,25 +4,32 @@
 validates the ``from``/``to`` query params. Bucketing is done in Python (not SQL)
 to keep the logic in the domain, free of dialect-specific function dependencies.
 
-All domain timestamps are naive UTC (``datetime.utcnow()``); they're treated as
-such here, with no timezone conversion.
+All domain timestamps are naive UTC (``datetime.utcnow()``), but a report's
+DAYS are the business's (``src.shared.business_time``): a UTC day runs 19:00 to
+19:00 in Ecuador, which moved a 19:30 cut to the next day and made a "this
+month" opened after 19:00 start on the 2nd. Bucket a timestamp with
+``local_date``, never with ``.date()``.
 """
 
-from datetime import date, datetime, time, timedelta
+from datetime import date, timedelta
 
 from fastapi import Query
 
 from src.modules.analytics.constants import Granularity
+from src.shared.business_time import local_midnight_utc, local_today
 from src.shared.exceptions import ValidationError
 
 _DEFAULT_WINDOW_DAYS = 30
 
 
 class DateRange:
-    """Half-open ``[start, end)`` window over ``created_at``.
+    """Half-open ``[start, end)`` window of business days, as naive UTC bounds.
 
-    Defaults: last 30 days ending today (UTC). The upper bound is exclusive
-    (``end = to + 1 day``) to avoid the ``23:59:59`` boundary bug.
+    ``from``/``to`` are days on the business's calendar; ``start``/``end`` are
+    the UTC instants of their midnights, so they compare directly against the
+    stored timestamps. Defaults: last 30 days ending today (business day). The
+    upper bound is exclusive (``end = to + 1 day``) to avoid the ``23:59:59``
+    boundary bug.
     """
 
     def __init__(
@@ -34,7 +41,7 @@ class DateRange:
             None, alias="to", description="Fin del rango (YYYY-MM-DD, inclusivo)"
         ),
     ):
-        today = datetime.utcnow().date()
+        today = local_today()
         self.date_to = date_to or today
         self.date_from = date_from or (
             self.date_to - timedelta(days=_DEFAULT_WINDOW_DAYS)
@@ -43,8 +50,8 @@ class DateRange:
             raise ValidationError(
                 "'from' debe ser menor o igual que 'to'", field="from"
             )
-        self.start = datetime.combine(self.date_from, time.min)
-        self.end = datetime.combine(self.date_to, time.min) + timedelta(days=1)
+        self.start = local_midnight_utc(self.date_from)
+        self.end = local_midnight_utc(self.date_to + timedelta(days=1))
 
 
 def bucket_key(d: date, granularity: Granularity) -> date:

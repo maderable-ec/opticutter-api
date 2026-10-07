@@ -1,7 +1,14 @@
 """Read-only analytics endpoints for the dashboard.
 
-Cohesive endpoints, one per chart family. All return aggregated,
-chart-ready payloads wrapped in ``DataResponse[T]``.
+Cohesive endpoints, one per screen block. All return aggregated, chart-ready
+payloads wrapped in ``DataResponse[T]``.
+
+The Resumen compares the branches (``/branch-comparison``), Producción reads
+``/production`` and Productividad one report per role. The first generation of
+the dashboard (``summary``, ``timeseries``, ``breakdown/*``, ``operations`` and
+the all-roles ``productivity``) filtered everything by the order's creation
+date; it answers out of the schema for the previous web build and goes in the
+release after, with the other aliases.
 """
 
 from typing import Optional
@@ -10,12 +17,18 @@ from fastapi import APIRouter, Depends, Query
 
 from src.modules.analytics.constants import Granularity
 from src.modules.analytics.dates import DateRange
+from src.modules.analytics.performance import PerformanceService, performance_service
 from src.modules.analytics.schemas import (
     AnalyticsSummary,
     AttendanceReport,
+    BanderReport,
     BottleneckReport,
+    BranchComparison,
     Breakdown,
     OperationsReport,
+    OperatorReport,
+    ProductionReport,
+    SellerReport,
     TimeSeries,
     UserProductivityReport,
 )
@@ -48,7 +61,9 @@ _GRANULARITY_QUERY = Query(
 _ROLE_QUERY = Query(default=None, description="Users holding this role (empty = all)")
 
 
-@router.get("/summary", response_model=DataResponse[AnalyticsSummary])
+@router.get(
+    "/summary", response_model=DataResponse[AnalyticsSummary], include_in_schema=False
+)
 def get_summary(
     dr: DateRange = Depends(),
     branch_id: Optional[int] = _BRANCH_QUERY,
@@ -58,7 +73,9 @@ def get_summary(
     return ok(svc.summary(dr, branch_id=branch_id))
 
 
-@router.get("/timeseries", response_model=DataResponse[TimeSeries])
+@router.get(
+    "/timeseries", response_model=DataResponse[TimeSeries], include_in_schema=False
+)
 def get_timeseries(
     dr: DateRange = Depends(),
     granularity: Granularity = _GRANULARITY_QUERY,
@@ -69,7 +86,9 @@ def get_timeseries(
     return ok(svc.timeseries(dr, granularity, branch_id=branch_id))
 
 
-@router.get("/breakdown/status", response_model=DataResponse[Breakdown])
+@router.get(
+    "/breakdown/status", response_model=DataResponse[Breakdown], include_in_schema=False
+)
 def get_breakdown_status(
     dr: DateRange = Depends(),
     branch_id: Optional[int] = _BRANCH_QUERY,
@@ -79,7 +98,9 @@ def get_breakdown_status(
     return ok(svc.breakdown_status(dr, branch_id=branch_id))
 
 
-@router.get("/breakdown/branch", response_model=DataResponse[Breakdown])
+@router.get(
+    "/breakdown/branch", response_model=DataResponse[Breakdown], include_in_schema=False
+)
 def get_breakdown_branch(
     dr: DateRange = Depends(),
     svc: AnalyticsService = Depends(analytics_service),
@@ -88,7 +109,11 @@ def get_breakdown_branch(
     return ok(svc.breakdown_branch(dr))
 
 
-@router.get("/operations", response_model=DataResponse[OperationsReport])
+@router.get(
+    "/operations",
+    response_model=DataResponse[OperationsReport],
+    include_in_schema=False,
+)
 def get_operations(
     dr: DateRange = Depends(),
     branch_id: Optional[int] = _BRANCH_QUERY,
@@ -109,7 +134,11 @@ def get_bottlenecks(
     return ok(svc.bottlenecks(dr, granularity, branch_id=branch_id))
 
 
-@router.get("/productivity", response_model=DataResponse[UserProductivityReport])
+@router.get(
+    "/productivity",
+    response_model=DataResponse[UserProductivityReport],
+    include_in_schema=False,
+)
 # Deprecated alias: the name said user admin, not productivity. Kept, out of the
 # schema, for the dashboards still open on the previous web build; drop it with
 # the other aliases in the release after.
@@ -130,6 +159,59 @@ def get_user_productivity(
             dr, branch_id=branch_id, role=role.value if role else None
         )
     )
+
+
+@router.get("/branch-comparison", response_model=DataResponse[BranchComparison])
+def get_branch_comparison(
+    dr: DateRange = Depends(),
+    svc: PerformanceService = Depends(performance_service),
+):
+    """Branch against branch: sales, orders and production, plus the total.
+
+    Every figure is placed in the period by when it happened (the payment, the
+    last piece of a sheet, the closing), on the business's days.
+    """
+    return ok(svc.branch_comparison(dr))
+
+
+@router.get("/production", response_model=DataResponse[ProductionReport])
+def get_production(
+    dr: DateRange = Depends(),
+    branch_id: Optional[int] = _BRANCH_QUERY,
+    svc: PerformanceService = Depends(performance_service),
+):
+    """The workday per branch and day, the longest stops and material use."""
+    return ok(svc.production_report(dr, branch_id=branch_id))
+
+
+@router.get("/productivity/sellers", response_model=DataResponse[SellerReport])
+def get_seller_productivity(
+    dr: DateRange = Depends(),
+    branch_id: Optional[int] = _BRANCH_QUERY,
+    svc: PerformanceService = Depends(performance_service),
+):
+    """Collected sales per seller (who raised the quote) and what is to collect."""
+    return ok(svc.sellers(dr, branch_id=branch_id))
+
+
+@router.get("/productivity/operators", response_model=DataResponse[OperatorReport])
+def get_operator_productivity(
+    dr: DateRange = Depends(),
+    branch_id: Optional[int] = _BRANCH_QUERY,
+    svc: PerformanceService = Depends(performance_service),
+):
+    """The cut per operator: pieces, sheets closed, metres and effective hours."""
+    return ok(svc.operators(dr, branch_id=branch_id))
+
+
+@router.get("/productivity/banders", response_model=DataResponse[BanderReport])
+def get_bander_productivity(
+    dr: DateRange = Depends(),
+    branch_id: Optional[int] = _BRANCH_QUERY,
+    svc: PerformanceService = Depends(performance_service),
+):
+    """Banding and additional work per bander (whoever closed it)."""
+    return ok(svc.banders(dr, branch_id=branch_id))
 
 
 @router.get("/attendance", response_model=DataResponse[AttendanceReport])

@@ -37,7 +37,7 @@ class UserModel(TimestampMixin, AuditMixin, Base):
     roles: Mapped[list[str]] = mapped_column(ARRAY(String(32)), nullable=False)
     # LEGACY mirror of the primary role, written only by ``_canonical_roles``.
     # Nothing reads it any more; it survives so the previous release -- which
-    # does -- keeps working if the api is rolled back. Dropped by migration 015.
+    # does -- keeps working if the api is rolled back. Dropped by migration 016.
     role: Mapped[str] = mapped_column(String(32), default=UserRole.OPERATOR.value)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     # Branch assigned to staff (seller/operator). NULL = global administrator,
