@@ -1,4 +1,4 @@
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, timedelta
 from typing import List, Optional, Tuple
 
 from fastapi import Depends
@@ -71,6 +71,7 @@ from src.modules.preorders.model import PreOrderModel
 from src.modules.settings.service import SettingsService
 from src.shared.audit import Actor, system_actor
 from src.shared.branch_scope import BranchScopedMixin
+from src.shared.business_time import local_midnight_utc
 from src.shared.database import get_db
 from src.shared.exceptions import (
     AuthorizationError,
@@ -223,16 +224,18 @@ class OrderService(BranchScopedMixin):
             if search.strip().isdigit():
                 term = term | (OrderModel.id == int(search.strip()))
             query = query.filter(term)
-        # ``created_at`` is UTC-naive (TimestampMixin), so the day boundaries are
-        # UTC ones. ``created_to`` is inclusive: compare against the next midnight.
+        # The days are the business's (``business_time``), not UTC's: ``created_at``
+        # is stored UTC-naive and a UTC day runs 19:00 to 19:00 in Ecuador, so an
+        # order confirmed at 20:00 used to land on the next day. ``created_to`` is
+        # inclusive: compare against the next local midnight.
         if created_from is not None:
             query = query.filter(
-                OrderModel.created_at >= datetime.combine(created_from, time.min)
+                OrderModel.created_at >= local_midnight_utc(created_from)
             )
         if created_to is not None:
             query = query.filter(
                 OrderModel.created_at
-                < datetime.combine(created_to + timedelta(days=1), time.min)
+                < local_midnight_utc(created_to + timedelta(days=1))
             )
         query = self._apply_branch_scope(query, branch_scope, branch_filter)
         total = query.count()
@@ -258,11 +261,21 @@ class OrderService(BranchScopedMixin):
         orders = query.offset(offset).limit(limit).all()
         return orders, total
 
-    def create(self, data: OrderCreate, actor: Optional[Actor] = None) -> OrderModel:
+    def create(
+        self,
+        data: OrderCreate,
+        actor: Optional[Actor] = None,
+        created_by: Optional[int] = None,
+    ) -> OrderModel:
         """Recomputes (cache-first), freezes the snapshot and creates the order.
 
         Idempotent: an identical re-POST returns the existing active order.
-        ``actor`` audits the origin (client on pre-order confirmation, or system).
+        ``actor`` audits the origin (client on pre-order confirmation, or system)
+        in the history row. ``created_by`` is the user the order belongs to: the
+        one who raised the quote, since the order is born from a client's click
+        on the review link and that actor is no user at all. Without it the
+        column falls back to the actor's user (``None`` for a client), which is
+        how every order went unattributed until the sales report needed a seller.
         """
         actor = actor or system_actor()
         # Business rule: the client must exist and have a phone number on file
@@ -368,7 +381,7 @@ class OrderService(BranchScopedMixin):
             created_at=now,
             confirmed_at=now,
             status_changed_at=now,
-            created_by=actor.user_id,
+            created_by=created_by if created_by is not None else actor.user_id,
         )
         # Billing lines = boards used + edge banding (consumed products).
         order.lines = [

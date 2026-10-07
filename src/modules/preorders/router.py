@@ -127,12 +127,12 @@ def list_preorders(
     created_from: Optional[date] = Query(
         default=None,
         alias="createdFrom",
-        description="Only pre-orders created on or after this day (UTC, inclusive)",
+        description="Only pre-orders created on or after this day (business day, America/Guayaquil, inclusive)",
     ),
     created_to: Optional[date] = Query(
         default=None,
         alias="createdTo",
-        description="Only pre-orders created on or before this day (UTC, inclusive)",
+        description="Only pre-orders created on or before this day (business day, America/Guayaquil, inclusive)",
     ),
     sort: Literal["oldest", "recent"] = Query(
         default="recent",

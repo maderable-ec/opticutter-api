@@ -6,7 +6,7 @@ when a pre-order is confirmed. Here they're minted directly via ``OrderService.c
 and read back via GET to verify the camelCase API projection.
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import pytest
 
@@ -551,38 +551,39 @@ def test_list_orders_filter_by_client(client, db_session):
 
 
 def test_list_orders_filter_by_created_day_range(client, db_session):
+    """The range is in Ecuador's days (UTC-5), not UTC's.
+
+    The evening order was confirmed at 19:30 on June 1st on the shop floor,
+    stored as 00:30 UTC on the 2nd: it belongs to the 1st. The other one, at
+    23:30 on May 31st, is stored on June 1st in UTC and must stay in May.
+    """
     c = _create_client(client)
     b = _create_board(client)
-    o1 = _create_order(client, db_session, _order_payload(c["id"], b["id"], width=600))
-    o2 = _create_order(client, db_session, _order_payload(c["id"], b["id"], width=500))
-
-    # Backdate the first one; created_at is UTC-naive, so the range is a UTC day.
-    db_session.query(OrderModel).filter(OrderModel.id == o1["id"]).update(
-        {"created_at": datetime.utcnow() - timedelta(days=3)}
+    evening = _create_order(
+        client, db_session, _order_payload(c["id"], b["id"], width=600)
     )
+    may = _create_order(client, db_session, _order_payload(c["id"], b["id"], width=500))
+    for order_id, created_at in (
+        (evening["id"], datetime(2026, 6, 2, 0, 30)),
+        (may["id"], datetime(2026, 6, 1, 4, 30)),
+    ):
+        db_session.query(OrderModel).filter(OrderModel.id == order_id).update(
+            {"created_at": created_at}
+        )
     db_session.commit()
 
-    today = datetime.utcnow().date()
-    old_day = today - timedelta(days=3)
+    def ids(**params):
+        data = client.get("/api/v1/orders/", params=params).json()["data"]
+        return [o["id"] for o in data]
 
-    # `createdTo` is inclusive: the backdated order's own day must return it.
-    upto = client.get(
-        "/api/v1/orders/", params={"createdTo": old_day.isoformat()}
-    ).json()
-    assert [o["id"] for o in upto["data"]] == [o1["id"]]
-
-    # `createdFrom` is inclusive too, and today's order is on today's boundary.
-    since = client.get(
-        "/api/v1/orders/", params={"createdFrom": today.isoformat()}
-    ).json()
-    assert [o["id"] for o in since["data"]] == [o2["id"]]
-
-    # Both ends together span everything.
-    span = client.get(
-        "/api/v1/orders/",
-        params={"createdFrom": old_day.isoformat(), "createdTo": today.isoformat()},
-    ).json()
-    assert [o["id"] for o in span["data"]] == [o1["id"], o2["id"]]
+    # Both ends inclusive: June 1st alone is the evening order, never May's.
+    assert ids(createdFrom="2026-06-01", createdTo="2026-06-01") == [evening["id"]]
+    assert ids(createdTo="2026-05-31") == [may["id"]]
+    assert ids(createdFrom="2026-06-02") == []
+    assert ids(createdFrom="2026-05-31", createdTo="2026-06-01") == [
+        evening["id"],
+        may["id"],
+    ]
 
 
 def test_get_order_404(client):

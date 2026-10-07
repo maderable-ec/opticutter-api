@@ -56,6 +56,7 @@ from src.modules.orders.model import (
 )
 from src.modules.users.login_event_model import UserLoginEventModel
 from src.modules.users.model import UserModel
+from src.shared.business_time import local_date
 from src.shared.database import get_db
 
 
@@ -126,7 +127,7 @@ class AnalyticsService:
             .all()
         )
         for created_at, total, status, tboards in rows:
-            i = index.get(bucket_key(created_at.date(), granularity))
+            i = index.get(bucket_key(local_date(created_at), granularity))
             if i is None:
                 continue
             order_count[i] += 1
@@ -145,7 +146,7 @@ class AnalyticsService:
         first_orders = first_orders_q.group_by(OrderModel.client_id).all()
         for _, first_dt in first_orders:
             if dr.start <= first_dt < dr.end:
-                i = index.get(bucket_key(first_dt.date(), granularity))
+                i = index.get(bucket_key(local_date(first_dt), granularity))
                 if i is not None:
                     new_clients[i] += 1
 
@@ -260,7 +261,7 @@ class AnalyticsService:
         def add_sample(stage: str, hours: float, closed_at) -> None:
             # Always added to the total; added to the bucket only if the close falls within the axis.
             samples[stage].append(hours)
-            i = index.get(bucket_key(closed_at.date(), granularity))
+            i = index.get(bucket_key(local_date(closed_at), granularity))
             if i is not None:
                 series_acc[stage][i].append(hours)
 
@@ -433,7 +434,7 @@ class AnalyticsService:
         )
         per_user_day: dict[int, dict] = defaultdict(lambda: defaultdict(list))
         for user_id, created_at in rows:
-            per_user_day[user_id][created_at.date()].append(created_at)
+            per_user_day[user_id][local_date(created_at)].append(created_at)
         if not per_user_day:
             return AttendanceReport(users=[])
 

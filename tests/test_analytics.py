@@ -267,12 +267,19 @@ def test_invalid_range_returns_422_with_envelope(client):
 
 
 # ------------------------------------------------------------- date filtering
-def test_date_filter_is_half_open(client, db_session):
+def test_date_filter_is_half_open_on_the_business_days(client, db_session):
+    """``from``/``to`` are Ecuador's days (UTC-5): each starts at 05:00 UTC.
+
+    A UTC day would run 19:00 to 19:00 on the shop floor, so the edges are
+    seeded one minute either side of the LOCAL midnights.
+    """
     _seed_clients(db_session)
-    _seed_order(db_session, total=100.0, created_at=datetime(2026, 6, 1, 0, 0, 0))
-    _seed_order(db_session, total=50.0, created_at=datetime(2026, 6, 10, 23, 0, 0))
-    _seed_order(db_session, total=999.0, created_at=datetime(2026, 5, 31, 23, 0, 0))
-    _seed_order(db_session, total=999.0, created_at=datetime(2026, 6, 11, 0, 0, 0))
+    # 00:00 on June 1st and 23:59 on June 10th, local: both inside.
+    _seed_order(db_session, total=100.0, created_at=datetime(2026, 6, 1, 5, 0, 0))
+    _seed_order(db_session, total=50.0, created_at=datetime(2026, 6, 11, 4, 59, 0))
+    # 23:59 on May 31st and 00:00 on June 11th, local: both outside.
+    _seed_order(db_session, total=999.0, created_at=datetime(2026, 6, 1, 4, 59, 0))
+    _seed_order(db_session, total=999.0, created_at=datetime(2026, 6, 11, 5, 0, 0))
 
     data = client.get(
         "/api/v1/analytics/summary", params={"from": "2026-06-01", "to": "2026-06-10"}
@@ -495,8 +502,9 @@ def test_bottlenecks_median_and_p90_across_orders(client, db_session):
 def test_bottlenecks_series_places_duration_in_bucket(client, db_session):
     _seed_clients(db_session)
     history = [
-        _hist("cutting", datetime(2026, 6, 2, 0, 0)),
-        _hist("cut", datetime(2026, 6, 2, 3, 0), from_status="cutting"),
+        # 07:00 to 10:00 on the shop floor (UTC-5): the bucket is the LOCAL day.
+        _hist("cutting", datetime(2026, 6, 2, 12, 0)),
+        _hist("cut", datetime(2026, 6, 2, 15, 0), from_status="cutting"),
     ]
     _seed_order(
         db_session, status="cut", created_at=datetime(2026, 6, 1, 9, 0), history=history
