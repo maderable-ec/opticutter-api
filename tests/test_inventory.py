@@ -387,19 +387,6 @@ def test_report_endpoint_is_admin_only(anon_client, db_session, stocked):
         assert c.get(_REPORT_URL).status_code == 403
 
 
-def test_the_old_report_url_keeps_its_roles_until_the_alias_goes(
-    client, anon_client, db_session, stocked, monkeypatch
-):
-    """``/analytics/low-stock`` stays for the previous web build: still admin only."""
-    monkeypatch.setattr(
-        "src.modules.inventory.service.fetch_stock", lambda: list(_STOCK)
-    )
-    assert client.get("/api/v1/analytics/low-stock").status_code == 200
-    # Last: ``_as`` swaps the token on the one TestClient both fixtures share.
-    seller = _as(anon_client, db_session, "vendedor", branch=stocked["sucua"])
-    assert seller.get("/api/v1/analytics/low-stock").status_code == 403
-
-
 def test_report_endpoint_serves_the_admin(client, db_session, stocked, monkeypatch):
     monkeypatch.setattr(
         "src.modules.inventory.service.fetch_stock", lambda: list(_STOCK)

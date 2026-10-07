@@ -143,3 +143,104 @@ def test_the_bander_cannot_read_it(client, db_session):
     _seed(db_session)
     bander = _token_for(client, db_session, "canteador")
     assert client.get(_URL, headers=bander).status_code == 403
+
+
+def _activity_order(db, branch_id, code, status="in_process", **activities):
+    """An order with one activity row per keyword (``banding={...}``)."""
+    client = db.query(ClientModel).first()
+    if client is None:
+        client = ClientModel(identifier="0100000397")
+        db.add(client)
+        db.commit()
+    order = OrderModel(
+        client_id=client.id,
+        branch_id=branch_id,
+        status=status,
+        optimization_snapshot={},
+        optimization_hash=code,
+        currency="USD",
+        subtotal=10.0,
+        total=10.0,
+        total_boards_used=1,
+        code=code,
+    )
+    db.add(order)
+    db.commit()
+    for kind, fields in activities.items():
+        db.add(OrderActivityModel(order_id=order.id, type=kind, **fields))
+    db.commit()
+    return order
+
+
+def test_banding_and_additional_read_working_waiting_or_idle(client, db_session):
+    now = datetime.utcnow()
+    macas = BranchModel(code="MACAS", name="Macas", is_active=True)
+    db_session.add(macas)
+    db_session.commit()
+
+    # Matriz: two bandings under way (oldest first), additional work ready.
+    _activity_order(
+        db_session,
+        1,
+        "ORD-000010",
+        banding={"status": "in_progress", "started_at": now - timedelta(minutes=10)},
+        additional={"status": "pending", "ready_at": now - timedelta(minutes=40)},
+    )
+    _activity_order(
+        db_session,
+        1,
+        "ORD-000011",
+        banding={"status": "in_progress", "started_at": now - timedelta(minutes=30)},
+        additional={"status": "pending", "ready_at": now - timedelta(minutes=5)},
+    )
+    # Macas: a banding still waiting for its first banded piece is not waiting
+    # yet, and yesterday's closed one dates the idle line.
+    _activity_order(db_session, macas.id, "ORD-000012", banding={"status": "pending"})
+    closed_at = now - timedelta(hours=20)
+    _activity_order(
+        db_session,
+        macas.id,
+        "ORD-000013",
+        status="finished",
+        banding={
+            "status": "done",
+            "started_at": closed_at - timedelta(hours=1),
+            "finished_at": closed_at,
+        },
+    )
+    # Neither a queued order nor a finished one has live work.
+    _activity_order(
+        db_session,
+        macas.id,
+        "ORD-000014",
+        status="queued",
+        additional={"status": "pending", "ready_at": now},
+    )
+
+    matriz, other = client.get(_URL).json()["data"]["branches"]
+
+    banding = matriz["banding"]
+    assert banding["state"] == "working"
+    assert banding["orderCodes"] == ["ORD-000011", "ORD-000010"]
+    since = datetime.fromisoformat(banding["since"].rstrip("Z"))
+    assert abs(since - (now - timedelta(minutes=30))) < timedelta(seconds=2)
+
+    additional = matriz["additional"]
+    assert additional["state"] == "waiting"
+    assert additional["waitingCount"] == 2
+    assert additional["orderCodes"] == []
+    since = datetime.fromisoformat(additional["since"].rstrip("Z"))
+    assert abs(since - (now - timedelta(minutes=40))) < timedelta(seconds=2)
+
+    assert other["banding"]["state"] == "idle"
+    assert other["banding"]["waitingCount"] == 0
+    assert other["banding"]["since"] == other["banding"]["lastFinishedAt"]
+    last = datetime.fromisoformat(other["banding"]["lastFinishedAt"].rstrip("Z"))
+    assert abs(last - closed_at) < timedelta(seconds=2)
+    assert other["additional"] == {
+        "state": "idle",
+        "since": None,
+        "orderCodes": [],
+        "waitingCount": 0,
+        "lastFinishedAt": None,
+    }

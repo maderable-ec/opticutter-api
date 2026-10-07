@@ -16,7 +16,7 @@ class UserRole(str, Enum):
 
     A user holds a LIST of roles, and the declaration order below is the
     canonical one: it orders what is stored and names the PRIMARY role (the
-    first), which is what the legacy single-``role`` fields still report.
+    first).
     """
 
     ADMIN = "administrador"

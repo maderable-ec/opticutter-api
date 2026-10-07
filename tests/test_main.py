@@ -89,66 +89,30 @@ def test_the_old_cutter_placeholders_are_gone():
     assert client.get("/api/v1/cutter/status").status_code == 404
 
 
-# The previous web build still calls these paths from any tab left open across the
-# deploy. Each one answers through the very handler of its new path, out of the
-# OpenAPI schema; this table goes, with the aliases, in the release after.
-_DEPRECATED_ALIASES = [
-    ("GET", "/api/v1/analytics/low-stock", "GET", "/api/v1/inventory/low-stock"),
-    (
-        "GET",
-        "/api/v1/orders/{order_id}/export",
-        "GET",
-        "/api/v1/orders/{order_id}/billing-export",
-    ),
-    (
-        "POST",
-        "/api/v1/orders/{order_id}/invoice",
-        "PATCH",
-        "/api/v1/orders/{order_id}/invoice",
-    ),
+# The previous web build's paths, removed one release after their replacements
+# shipped: the misplaced URLs (moved 2026-10-05) and the first generation of the
+# analytics dashboard (superseded 2026-10-06), which filtered every figure by the
+# order's creation date.
+_REMOVED_ROUTES = [
+    ("GET", "/api/v1/analytics/low-stock"),
+    ("GET", "/api/v1/orders/{order_id}/export"),
+    ("POST", "/api/v1/orders/{order_id}/invoice"),
+    ("GET", "/api/v1/analytics/summary"),
+    ("GET", "/api/v1/analytics/timeseries"),
+    ("GET", "/api/v1/analytics/breakdown/status"),
+    ("GET", "/api/v1/analytics/breakdown/branch"),
+    ("GET", "/api/v1/analytics/operations"),
+    ("GET", "/api/v1/analytics/productivity"),
+    ("GET", "/api/v1/analytics/users"),
 ]
 
 
-@pytest.mark.parametrize("old_method,old_path,new_method,new_path", _DEPRECATED_ALIASES)
-def test_a_deprecated_alias_serves_its_new_route_out_of_the_schema(
-    old_method, old_path, new_method, new_path
-):
-    def route(method, path):
-        return next(
-            r
-            for r in app.routes
-            if isinstance(r, APIRoute) and r.path == path and method in r.methods
-        )
-
-    old, new = route(old_method, old_path), route(new_method, new_path)
-    assert old.endpoint is new.endpoint
-    assert old.include_in_schema is False
-    assert new.include_in_schema is True
-
-
-# The first generation of the analytics dashboard: superseded by the branch
-# comparison, the production tab and productivity by role, which date every
-# figure by when it happened. Still answering, out of the schema, for the
-# previous web build; they go with the aliases above in the release after.
-_DEPRECATED_ENDPOINTS = [
-    "/api/v1/analytics/summary",
-    "/api/v1/analytics/timeseries",
-    "/api/v1/analytics/breakdown/status",
-    "/api/v1/analytics/breakdown/branch",
-    "/api/v1/analytics/operations",
-    "/api/v1/analytics/productivity",
-    "/api/v1/analytics/users",
-]
-
-
-@pytest.mark.parametrize("path", _DEPRECATED_ENDPOINTS)
-def test_a_deprecated_endpoint_answers_out_of_the_schema(path):
-    route = next(
-        r
+@pytest.mark.parametrize("method,path", _REMOVED_ROUTES)
+def test_a_removed_route_is_gone(method, path):
+    assert not any(
+        isinstance(r, APIRoute) and r.path == path and method in r.methods
         for r in app.routes
-        if isinstance(r, APIRoute) and r.path == path and "GET" in r.methods
     )
-    assert route.include_in_schema is False
 
 
 def test_success_response_has_meta_and_request_id_header(client):

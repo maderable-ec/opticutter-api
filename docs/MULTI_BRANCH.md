@@ -50,8 +50,9 @@ orders/pre-orders/drafts; its "Create" column follows the generic rule.)
 
 ### Per-branch analytics (admin only)
 
-- `GET /api/v1/analytics/breakdown/branch` — comparison (count + revenue) per branch.
-- Every analytics endpoint accepts `?branchId=` to scope a single branch.
+- `GET /api/v1/analytics/branch-comparison` — every active branch side by side
+  (sales, orders, production) plus the total.
+- The other analytics endpoints accept `?branchId=` to scope a single branch.
 
 ### Per-branch stock (admin only)
 

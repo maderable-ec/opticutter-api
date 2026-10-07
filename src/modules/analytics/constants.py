@@ -1,48 +1,12 @@
-"""Shared analytics semantics: revenue states, granularity and utilities.
+"""Shared analytics semantics: process stages, granularity and utilities.
 
-This is the module's backbone: every endpoint agrees on which states count as
-realized/booked/lost revenue. Reuses ``OrderStatus`` and the sets already
-defined in the orders module instead of repeating strings.
+Reuses ``OrderStatus`` and ``ActivityType`` from the orders module instead of
+repeating strings.
 """
 
 from enum import Enum
-from typing import Iterable
 
-from src.modules.orders.model import LIVE_STATUSES, ActivityType, OrderStatus
-
-# Realized revenue: the order reached its productive end (finished or already dispatched).
-REALIZED_STATUSES = {OrderStatus.finished, OrderStatus.dispatched}
-
-# Lost revenue: will never be charged.
-LOST_STATUSES = {OrderStatus.cancelled}
-
-# Booked pipeline: committed but not yet finished.
-BOOKED_STATUSES = {
-    OrderStatus.confirmed,
-    OrderStatus.queued,
-    OrderStatus.in_process,
-}
-
-# Pending (open, pre-production): committed but not yet in the workshop.
-PENDING_STATUSES = {OrderStatus.confirmed}
-
-# Readable label per status for breakdowns (funnel axis). User-facing copy.
-# The two legacy statuses are here because the ORDER HISTORY of anything cut
-# before the activities still says them; they never appear in the breakdown.
-STATUS_LABELS = {
-    OrderStatus.confirmed: "Confirmada",
-    OrderStatus.queued: "En cola",
-    OrderStatus.in_process: "En proceso",
-    OrderStatus.finished: "Terminada",
-    OrderStatus.dispatched: "Despachada",
-    OrderStatus.cancelled: "Cancelada",
-    OrderStatus.cutting: "En corte",
-    OrderStatus.cut: "Cortada",
-}
-
-# The funnel axis: the statuses an order can actually be in today. Densifying
-# over the whole enum instead would add two legacy rows that are always zero.
-STATUS_BREAKDOWN_ORDER = LIVE_STATUSES
+from src.modules.orders.model import ActivityType, OrderStatus
 
 # --- Process stages (bottlenecks) ----------------------------------------------
 # Four stages come from consecutive pairs in the status history; the three work
@@ -90,11 +54,6 @@ class Granularity(str, Enum):
     day = "day"
     week = "week"
     month = "month"
-
-
-def status_values(statuses: Iterable[OrderStatus]) -> list[str]:
-    """Projects a set of statuses to their string values (for ``.in_(...)``)."""
-    return [s.value for s in statuses]
 
 
 def safe_div(num: float, denom: float) -> float:

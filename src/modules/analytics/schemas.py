@@ -5,9 +5,9 @@ time series are parallel arrays over the same ``buckets`` axis.
 """
 
 from datetime import date, datetime
-from typing import List, Optional
+from typing import List, Literal, Optional
 
-from src.modules.analytics.constants import Granularity
+from src.modules.orders.production import SheetCredit, SheetKind
 from src.shared.schemas import CamelModel
 
 
@@ -16,66 +16,6 @@ class RangeInfo(CamelModel):
 
     date_from: date
     date_to: date
-
-
-class AnalyticsSummary(CamelModel):
-    """KPI cards: operations, pipeline and base trend for the period."""
-
-    range: RangeInfo
-    # Operations (over completed orders).
-    total_boards_consumed: int
-    average_efficiency: float  # area-weighted, 0..100
-    total_area_cut_m2: float
-    waste_estimate_m2: float
-    # Status / pipeline.
-    pending_orders_count: int
-    cancellation_rate: float  # 0..1
-    # Base trend.
-    order_count: int
-    realized_revenue: float
-    average_ticket: float
-    active_clients_count: int
-
-
-class TimeSeriesData(CamelModel):
-    """Parallel series aligned to ``TimeSeries``'s ``buckets`` axis."""
-
-    revenue: List[float]  # realized revenue per bucket
-    order_count: List[int]
-    boards_consumed: List[int]
-    new_clients: List[int]
-
-
-class TimeSeries(CamelModel):
-    """Time trends with a dense axis (gaps filled with zero)."""
-
-    granularity: Granularity
-    buckets: List[str]  # ISO bucket dates (x axis)
-    series: TimeSeriesData
-
-
-class BreakdownItem(CamelModel):
-    """One breakdown category with its metrics."""
-
-    key: str
-    label: str
-    revenue: float
-    order_count: int
-
-
-class Breakdown(CamelModel):
-    """Categorical breakdown (e.g. status funnel)."""
-
-    dimension: str
-    items: List[BreakdownItem]
-
-
-class OperationsReport(CamelModel):
-    """Material efficiency of the orders (the lifecycle lives in ``/bottlenecks``)."""
-
-    average_efficiency: float
-    total_area_cut_m2: float
-    waste_estimate_m2: float
 
 
 # ------------------------------------------------------------------ bottlenecks
@@ -106,40 +46,6 @@ class BottleneckReport(CamelModel):
     series: List[StageSeries]
 
 
-# ----------------------------------------------------------- user productivity
-class UserProductivity(CamelModel):
-    """Work and speed of a user in the period (not applicable → 0, never null)."""
-
-    user_id: int
-    full_name: str
-    roles: List[str]
-    # DEPRECATED: the primary role (first of ``roles``); removed with migration 016.
-    role: str
-    branch_name: Optional[str]
-    # Cutting (operador).
-    pieces_cut: int
-    area_cut_m2: float
-    orders_cut: int
-    cutting_hours: float
-    pieces_per_hour: float  # throughput
-    boards_cut: int
-    # Banding (canteador).
-    orders_banded: int
-    banding_hours: float
-    # Additional work -- perforación, armado, bisagras (canteador too).
-    orders_additional: int = 0
-    additional_hours: float = 0.0
-    # Sales (vendedor).
-    orders_created: int
-    revenue_generated: float
-
-
-class UserProductivityReport(CamelModel):
-    """Productivity per user (workshop + sales)."""
-
-    users: List[UserProductivity]
-
-
 # --------------------------------------------------------------------- attendance
 class AttendanceDay(CamelModel):
     """A user's attendance on one day: first login (clock-in time) and count."""
@@ -155,8 +61,6 @@ class UserAttendance(CamelModel):
     user_id: int
     full_name: str
     roles: List[str]
-    # DEPRECATED: the primary role (first of ``roles``); removed with migration 016.
-    role: str
     branch_name: Optional[str]
     days: List[AttendanceDay]
 
@@ -193,7 +97,9 @@ class ProductionFigures(CamelModel):
 
     ``boards`` weighs a whole board 1, a half 0.5 and a retazo 0; the cut metres
     are the saw travel of every sheet finished, and the banded metres the net
-    tape of every banding closed (no waste factor). Hours split each business day's span
+    tape of every banding closed (no waste factor). ``orders_banded`` and
+    ``orders_additional`` count the bandings and additional works closed in
+    range, dated by the close. Hours split each business day's span
     into effective and paused by the idle gap. ``days_worked`` and the average
     start/end (minutes after the business's midnight) count only days with some
     effective time: a lone event is not a workday. Rates are 0 without hours.
@@ -202,6 +108,8 @@ class ProductionFigures(CamelModel):
     boards: float
     cut_linear_m: float
     banded_linear_m: float
+    orders_banded: int
+    orders_additional: int
     effective_hours: float
     paused_hours: float
     boards_per_hour: float
@@ -248,6 +156,8 @@ class ProductionDay(CamelModel):
     boards: float
     cut_linear_m: float
     banded_linear_m: float  # bandings closed that day
+    orders_banded: int  # bandings closed that day
+    orders_additional: int  # additional works closed that day
     orders_finished: int
     boards_per_hour: float
     meters_per_hour: float
@@ -312,6 +222,51 @@ class SellerReport(CamelModel):
     total: SellerFigures
 
 
+class SellerOrder(CamelModel):
+    """One sale of the seller in range: an order whose payment landed in it.
+
+    ``paid_at`` (entering the queue) dates the sale, not ``created_at``: an
+    order confirmed in September and paid in October is an October sale.
+    ``invoice`` is the accounting system's number, to check the figure there.
+    """
+
+    order_id: int
+    order_code: Optional[str]
+    client_name: str
+    branch_name: str
+    created_at: datetime
+    paid_at: datetime
+    day: date  # the business day of the payment
+    cash: float
+    transfer: float
+    credit: float
+    total: float  # cash + transfer + credit
+    invoice: Optional[str]
+
+
+class SellerPendingOrder(CamelModel):
+    """An order of the seller confirmed by the client and not yet paid, today."""
+
+    order_id: int
+    order_code: Optional[str]
+    client_name: str
+    branch_name: str
+    confirmed_at: Optional[datetime]
+    total: float
+
+
+class SellerOrdersReport(CamelModel):
+    """The orders behind one seller's row. ``figures`` IS the row: it adds up
+    from ``paid`` (the sales) and ``pending`` (what is still to collect)."""
+
+    range: RangeInfo
+    user_id: int
+    full_name: str
+    figures: SellerFigures
+    paid: List[SellerOrder]
+    pending: List[SellerPendingOrder]
+
+
 class OperatorFigures(CamelModel):
     """An operator's cut in range, by the same rules as the production tab.
 
@@ -329,7 +284,9 @@ class OperatorFigures(CamelModel):
 
 
 class OperatorRow(OperatorFigures):
-    user_id: int
+    # null: the sheets and pieces of users deleted since (``cut_by`` went NULL),
+    # one "Sin usuario" row so the total still matches the branch comparison.
+    user_id: Optional[int]
     full_name: str
     branch_name: Optional[str]
 
@@ -341,26 +298,85 @@ class OperatorReport(CamelModel):
     total: OperatorFigures
 
 
+class OperatorBoard(CamelModel):
+    """One sheet the operator marked a piece on in range, and whether it counts.
+
+    ``status``: ``credited`` (they marked its last piece, inside the range: it
+    is in their ``boards``), ``credited_to_other`` (somebody else did, see
+    ``closedBy``), ``incomplete`` (a piece is still unmarked: it counts for
+    nobody yet) or ``outside_range`` (they closed it after ``to``).
+    """
+
+    board_id: int
+    order_id: int
+    order_code: Optional[str]
+    client_name: str
+    branch_name: str
+    sheet_number: int
+    material_name: Optional[str]  # null: a retazo or a hand-measured sheet
+    width: float
+    height: float
+    kind: SheetKind
+    weight: float  # what it adds to ``boards`` when credited: 1, 0.5 or 0
+    # The business day it belongs to: of its last mark, or of the operator's
+    # last mark while it is incomplete.
+    day: date
+    pieces_total: int
+    pieces_mine: int  # marked by this operator, whenever
+    pieces_mine_in_range: int  # ...inside the range: they add up to ``piecesCut``
+    pieces_by_others: int
+    pieces_pending: int
+    other_cutters: List[str]  # who else marked pieces on it (frozen labels)
+    my_last_cut_at: datetime
+    done_at: Optional[datetime]  # the last mark; null while incomplete
+    closed_by: Optional[str]  # who made the last mark (frozen label)
+    status: SheetCredit
+
+
+class OperatorBoardsReport(CamelModel):
+    """The ledger behind one operator's row: every sheet they touched in range.
+
+    ``boards`` and ``pieces_cut`` are the row's own figures, and add up from
+    ``sheets``: the weights of the credited ones, the in-range marks of all.
+    """
+
+    range: RangeInfo
+    user_id: int
+    full_name: str
+    boards: float
+    credited_count: int
+    pieces_cut: int
+    sheets: List[OperatorBoard]
+
+
 class BanderFigures(CamelModel):
     """Banding and additional work closed in range, credited to who closed it.
 
     Hours run from the activity's start to its close: the banding marks no
     pieces, so its stops cannot be told apart the way the cut's can. The metres
     are the order's NET tape (no waste factor), special edges included.
+
+    Every closed activity counts as work done (orders, metres), but only the
+    CLOCKED ones carry time: a start and a close under a minute apart were
+    registered together after the work (``*_unclocked``), and their seconds
+    would read as a job done in no time. Hours, averages and the metres per
+    hour are over the clocked ones only.
     """
 
     orders_banded: int
+    orders_banded_unclocked: int
     banding_hours: float
     banded_linear_m: float
     banding_meters_per_hour: float
     average_banding_hours: float
     orders_additional: int
+    orders_additional_unclocked: int
     additional_hours: float
     average_additional_hours: float
 
 
 class BanderRow(BanderFigures):
-    user_id: int
+    user_id: Optional[int]  # null: closed by a user deleted since ("Sin usuario")
     full_name: str
     branch_name: Optional[str]
 
@@ -369,3 +385,33 @@ class BanderReport(CamelModel):
     range: RangeInfo
     banders: List[BanderRow]
     total: BanderFigures
+
+
+class BanderOrder(CamelModel):
+    """One banding or additional work the bander closed in range.
+
+    ``hours`` is null when it was not clocked: started and closed under a
+    minute apart, registered after the work. It still counts as work done.
+    """
+
+    order_id: int
+    order_code: Optional[str]
+    client_name: str
+    branch_name: str
+    kind: Literal["banding", "additional"]
+    started_at: Optional[datetime]
+    finished_at: datetime
+    day: date  # the business day of the close
+    hours: Optional[float]
+    banded_linear_m: float  # the order's net tape; 0 for the additional work
+
+
+class BanderOrdersReport(CamelModel):
+    """The work behind one bander's row. ``figures`` IS the row: it adds up
+    from ``orders``."""
+
+    range: RangeInfo
+    user_id: int
+    full_name: str
+    figures: BanderFigures
+    orders: List[BanderOrder]
