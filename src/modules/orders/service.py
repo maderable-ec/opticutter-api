@@ -49,6 +49,7 @@ from src.modules.orders.model import (
     OrderStatus,
     OrderStatusHistoryModel,
 )
+from src.modules.orders.order_events import OrderEvent, order_event_filter
 from src.modules.orders.schemas import (
     ActivityResult,
     CuttingPlanResponse,
@@ -69,6 +70,7 @@ from src.modules.orders.schemas import (
 # what keeps this from being a cycle.
 from src.modules.preorders.model import PreOrderModel
 from src.modules.settings.service import SettingsService
+from src.modules.users.model import UserModel
 from src.shared.audit import Actor, system_actor
 from src.shared.branch_scope import BranchScopedMixin
 from src.shared.business_time import local_midnight_utc
@@ -140,6 +142,10 @@ class OrderService(BranchScopedMixin):
         offset: int = 0,
         search: Optional[str] = None,
         client_filter: Optional[int] = None,
+        date_field: OrderEvent = OrderEvent.created,
+        date_from: Optional[date] = None,
+        date_to: Optional[date] = None,
+        actor_id: Optional[int] = None,
         created_from: Optional[date] = None,
         created_to: Optional[date] = None,
         sort: str = "oldest",
@@ -171,6 +177,12 @@ class OrderService(BranchScopedMixin):
         ``activity``/``activity_status`` narrow to one stage of one parallel
         activity ("show me everything still to band"). Either alone works: the
         type alone means "orders that carry this activity at all".
+
+        ``date_field`` picks the moment ``date_from``/``date_to`` and ``actor_id``
+        read: when the order was created, paid, finished... and who did it
+        (``order_events``). The event alone filters nothing. ``created_from`` and
+        ``created_to`` are the old spelling of a ``created`` range, kept for one
+        release.
         """
         # ``OrderResponse`` embeds client, branch, lines, pieces and history, so
         # without this every row of the page fires five lazy loads -- and the page
@@ -188,6 +200,9 @@ class OrderService(BranchScopedMixin):
             # one code.
             selectinload(OrderModel.preorders).load_only(
                 PreOrderModel.id, PreOrderModel.code
+            ),
+            joinedload(OrderModel.creator).load_only(
+                UserModel.full_name, UserModel.email
             ),
         )
         if status:
@@ -224,19 +239,24 @@ class OrderService(BranchScopedMixin):
             if search.strip().isdigit():
                 term = term | (OrderModel.id == int(search.strip()))
             query = query.filter(term)
-        # The days are the business's (``business_time``), not UTC's: ``created_at``
-        # is stored UTC-naive and a UTC day runs 19:00 to 19:00 in Ecuador, so an
-        # order confirmed at 20:00 used to land on the next day. ``created_to`` is
-        # inclusive: compare against the next local midnight.
-        if created_from is not None:
-            query = query.filter(
-                OrderModel.created_at >= local_midnight_utc(created_from)
+        # The days are the business's (``business_time``), not UTC's: every
+        # timestamp is stored UTC-naive and a UTC day runs 19:00 to 19:00 in
+        # Ecuador, so an order confirmed at 20:00 used to land on the next day.
+        # The upper day is inclusive: compare against the next local midnight.
+        for event, day_from, day_to, actor in (
+            (date_field, date_from, date_to, actor_id),
+            (OrderEvent.created, created_from, created_to, None),
+        ):
+            condition = order_event_filter(
+                event,
+                local_midnight_utc(day_from) if day_from is not None else None,
+                local_midnight_utc(day_to + timedelta(days=1))
+                if day_to is not None
+                else None,
+                actor,
             )
-        if created_to is not None:
-            query = query.filter(
-                OrderModel.created_at
-                < local_midnight_utc(created_to + timedelta(days=1))
-            )
+            if condition is not None:
+                query = query.filter(condition)
         query = self._apply_branch_scope(query, branch_scope, branch_filter)
         total = query.count()
         if sort == "stalest":

@@ -349,6 +349,15 @@ class OrderModel(TimestampMixin, AuditMixin, Base):
 
     client: Mapped["ClientModel"] = relationship("ClientModel")  # noqa: F821
     branch: Mapped["BranchModel"] = relationship("BranchModel")  # noqa: F821
+    # Who the order belongs to: the seller who raised the quote (``created_by``,
+    # see ``OrderService.create``). The order carries four FKs to ``users``,
+    # hence ``foreign_keys``; ``viewonly`` because the column is written by the
+    # audit mixin, never through this.
+    creator: Mapped[Optional["UserModel"]] = relationship(  # noqa: F821
+        "UserModel",
+        foreign_keys="OrderModel.created_by",
+        viewonly=True,
+    )
     lines: Mapped[list["OrderLineModel"]] = relationship(
         "OrderLineModel", back_populates="order", cascade="all, delete-orphan"
     )
@@ -415,6 +424,12 @@ class OrderModel(TimestampMixin, AuditMixin, Base):
     def preorder_code(self) -> Optional[str]:
         preorder = self.preorder
         return preorder.code if preorder is not None else None
+
+    @property
+    def created_by_name(self) -> Optional[str]:
+        """The seller's name, or ``None`` when the user is gone (or never was)."""
+        user = self.creator
+        return (user.full_name or user.email) if user is not None else None
 
     @property
     def additional_services(self) -> list:

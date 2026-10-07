@@ -13,6 +13,7 @@ from src.modules.orders.attachment_service import (
     attachment_service,
 )
 from src.modules.orders.model import ActivityStatus, ActivityType, OrderStatus
+from src.modules.orders.order_events import OrderEvent
 from src.modules.orders.pieces_export import customer_name, pieces_csv, pieces_xml
 from src.modules.orders.production_service import (
     ProductionService,
@@ -39,6 +40,7 @@ from src.modules.settings.service import SettingsService, settings_service
 from src.modules.users.dependencies import get_branch_scope, require_permission
 from src.modules.users.model import UserModel
 from src.shared.audit import staff_actor
+from src.shared.exceptions import ValidationError
 from src.shared.pagination import PageParams
 from src.shared.responses import (
     ERROR_RESPONSES,
@@ -89,15 +91,41 @@ def list_orders(
         default=None,
         description="Search by order code or id, or by client identifier/name",
     ),
-    created_from: Optional[date] = Query(
+    date_field: OrderEvent = Query(
+        default=OrderEvent.created,
+        alias="dateField",
+        description="The moment `dateFrom`/`dateTo` and `actorId` read: created, "
+        "paid (entered the queue), in_process (entered the shop), cut_done, "
+        "banding_done, additional_done (each activity closed), finished, "
+        "dispatched or cancelled. Alone it filters nothing",
+    ),
+    date_from: Optional[date] = Query(
         default=None,
-        alias="createdFrom",
-        description="Only orders created on or after this day (business day, America/Guayaquil, inclusive)",
+        alias="dateFrom",
+        description="Only orders whose `dateField` happened on or after this day "
+        "(business day, America/Guayaquil, inclusive)",
+    ),
+    date_to: Optional[date] = Query(
+        default=None,
+        alias="dateTo",
+        description="Only orders whose `dateField` happened on or before this day "
+        "(business day, America/Guayaquil, inclusive)",
+    ),
+    actor_id: Optional[int] = Query(
+        default=None,
+        alias="actorId",
+        description="Only orders whose `dateField` was done by this user: the "
+        "seller for `created`, who registered the payment for `paid`, who closed "
+        "the activity for the `*_done` ones, and the history row's actor for the "
+        "rest. Works without dates",
+    ),
+    # The old spelling of a `created` range, out of the schema: kept for one
+    # release so a web still on it keeps working, then deleted.
+    created_from: Optional[date] = Query(
+        default=None, alias="createdFrom", include_in_schema=False
     ),
     created_to: Optional[date] = Query(
-        default=None,
-        alias="createdTo",
-        description="Only orders created on or before this day (business day, America/Guayaquil, inclusive)",
+        default=None, alias="createdTo", include_in_schema=False
     ),
     sort: Literal["oldest", "recent", "stalest"] = Query(
         default="oldest",
@@ -133,6 +161,10 @@ def list_orders(
     The operator only sees their branch's orders; global roles (admin/seller)
     see all of them (or filter with ``branchId``).
     """
+    if date_from is not None and date_to is not None and date_from > date_to:
+        raise ValidationError(
+            "'dateFrom' debe ser menor o igual que 'dateTo'", field="dateFrom"
+        )
     items, total = svc.list_orders(
         status=status,
         branch_scope=branch_scope,
@@ -141,6 +173,10 @@ def list_orders(
         offset=paging.offset,
         search=search,
         client_filter=client_id,
+        date_field=date_field,
+        date_from=date_from,
+        date_to=date_to,
+        actor_id=actor_id,
         created_from=created_from,
         created_to=created_to,
         sort=sort,

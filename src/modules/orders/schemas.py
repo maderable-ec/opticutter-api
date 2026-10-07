@@ -351,6 +351,14 @@ class OrderResponse(CamelModel):
         description="Priority attention: the workshop board lists it first",
     )
     created_at: datetime
+    created_by: Optional[int] = Field(
+        default=None,
+        description="The seller the order belongs to: who raised the quote",
+    )
+    created_by_name: Optional[str] = Field(
+        default=None,
+        description="That seller's name; null when the user is gone",
+    )
     confirmed_at: Optional[datetime] = None
     status_changed_at: Optional[datetime] = Field(
         default=None,
