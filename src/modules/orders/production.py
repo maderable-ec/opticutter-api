@@ -12,6 +12,11 @@ Pure on purpose, and the single home of these rules: the live state
 (``GET /orders/production-status``) and the statistics (``/analytics``) both
 read them, so the board never calls a stretch "Detenida" that the history later
 counts as effective time.
+
+The banding and the additional work mark no pieces: all they leave is their
+activity's start and close. Those are read as registered -- an activity in
+progress IS being worked -- with one guard, ``clocked_seconds``: a start and a
+close a few seconds apart are a registration after the fact, not a duration.
 """
 
 from collections import defaultdict
@@ -38,6 +43,56 @@ def board_weight(half_board: bool, source: Optional[str]) -> float:
     if source in OFFCUT_SOURCES:
         return 0.0
     return 0.5 if half_board else 1.0
+
+
+class SheetKind(str, Enum):
+    """What a sheet is, as the board count weighs it (``board_weight``)."""
+
+    whole = "whole"
+    half = "half"
+    offcut = "offcut"
+
+
+def sheet_kind(half_board: bool, source: Optional[str]) -> SheetKind:
+    if source in OFFCUT_SOURCES:
+        return SheetKind.offcut
+    return SheetKind.half if half_board else SheetKind.whole
+
+
+class SheetCredit(str, Enum):
+    """Whether a sheet an operator worked on counts for them in a range, and why not.
+
+    The rule of the board count, sheet by sheet: a sheet counts once every piece
+    is marked, on the day of its last mark, for whoever made that mark.
+    """
+
+    credited = "credited"  # they closed it, inside the range
+    credited_to_other = "credited_to_other"  # somebody else marked the last piece
+    incomplete = "incomplete"  # a piece is still unmarked: it counts for nobody
+    outside_range = "outside_range"  # they closed it, but outside the range
+
+
+def sheet_credit(
+    user_id: int,
+    closed_by: Optional[int],
+    done_at: Optional[datetime],
+    start: datetime,
+    end: datetime,
+) -> SheetCredit:
+    """Where one sheet stands for ``user_id`` in ``[start, end)``.
+
+    ``done_at``/``closed_by``: the last mark and its author, ``done_at`` null
+    while some piece is unmarked. The same criteria as
+    ``ProductionService.processed_boards``, so the credited sheets ARE the ones
+    the operator's row counts.
+    """
+    if done_at is None:
+        return SheetCredit.incomplete
+    if closed_by != user_id:
+        return SheetCredit.credited_to_other
+    if not (start <= done_at < end):
+        return SheetCredit.outside_range
+    return SheetCredit.credited
 
 
 def cut_length_m(cuts) -> float:
@@ -112,7 +167,7 @@ def workdays(times: Iterable[datetime], idle_gap: timedelta) -> list[Workday]:
 
 
 class LiveState(str, Enum):
-    """What a branch's saw is doing right now (only the cut is measured, for now)."""
+    """What a branch's saw is doing right now, read off its cutting events."""
 
     cutting = "cutting"  # an event within the idle gap
     stopped = "stopped"  # nothing within the gap, with work waiting
@@ -150,3 +205,50 @@ def run_start(times: Sequence[datetime], idle_gap: timedelta) -> Optional[dateti
             break
         start = prev
     return start
+
+
+class ActivityLiveState(str, Enum):
+    """What a branch's banding (or additional work) is doing right now.
+
+    Read off the activity rows, not off events: the bander marks no pieces, so
+    the only signal is the start and the close they register.
+    """
+
+    working = "working"  # an activity in progress
+    waiting = "waiting"  # none in progress, some ready (a piece of its set cut)
+    idle = "idle"  # nothing in progress and nothing ready
+
+
+def activity_live_state(in_progress: int, waiting: int) -> ActivityLiveState:
+    """``in_progress``/``waiting``: how many of the branch's activities are in each.
+
+    ``waiting`` counts only the activities that are READY (``ready_at``): one
+    whose first piece is still on the saw has nothing to work on yet.
+    """
+    if in_progress:
+        return ActivityLiveState.working
+    return ActivityLiveState.waiting if waiting else ActivityLiveState.idle
+
+
+# A start and a close closer than this were registered together, after the
+# work: 102 of 152 bandings and 18 of 21 additional works closed in under a
+# minute (cutter_db, 2026-09-07 to 2026-10-05). Their duration measures the
+# tap, not the job, so it stays out of every hour and every rate.
+MIN_CLOCKED = timedelta(minutes=1)
+
+
+def clocked_seconds(
+    started_at: Optional[datetime], finished_at: Optional[datetime]
+) -> Optional[float]:
+    """The activity's duration, or ``None`` when it was not clocked.
+
+    Not clocked: no start (closed without one), no close yet, or a span under
+    ``MIN_CLOCKED``. The activity still happened and still counts as work done;
+    only its time is unknown.
+    """
+    if started_at is None or finished_at is None:
+        return None
+    span = finished_at - started_at
+    if span < MIN_CLOCKED:
+        return None
+    return span.total_seconds()

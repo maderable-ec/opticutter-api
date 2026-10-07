@@ -14,6 +14,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from src.modules.branches.model import BranchModel
+from src.modules.clients.model import ClientModel
 from src.modules.orders.model import (
     ActivityStatus,
     ActivityType,
@@ -23,20 +24,29 @@ from src.modules.orders.model import (
     OrderPlacedPieceModel,
     OrderStatus,
 )
+from src.modules.orders.pieces_export import customer_name
 from src.modules.orders.production import (
     LiveState,
+    activity_live_state,
     board_weight,
     cut_length_m,
     live_state,
     run_start,
 )
-from src.modules.orders.schemas import BranchProductionStatus, ProductionStatusReport
+from src.modules.orders.schemas import (
+    ActivityLiveStatus,
+    BranchProductionStatus,
+    ProductionStatusReport,
+)
 from src.shared.config import config
 from src.shared.database import get_db
 
 # How far back the live state looks for the run in progress. A run longer than
 # a day is not a run; the latest event itself is read without a window.
 _LIVE_WINDOW = timedelta(days=1)
+
+# The work that marks no pieces: its live state is read off its activity rows.
+_ACTIVITY_TRACKS = (ActivityType.banding, ActivityType.additional)
 
 
 def idle_gap() -> timedelta:
@@ -69,6 +79,37 @@ class ProcessedBoard:
     cut_linear_m: float
     # Who marked the last piece: the operator the sheet is credited to.
     cut_by: Optional[int]
+
+
+@dataclass(frozen=True)
+class OperatorSheet:
+    """A sheet one operator marked pieces on, with everything the count reads.
+
+    ``done_at`` (the last mark) and ``closed_by`` (its author) are null while
+    some piece is unmarked.
+    """
+
+    board_id: int
+    order_id: int
+    order_code: Optional[str]
+    client_name: str
+    branch_id: int
+    sheet_number: int
+    material_name: Optional[str]
+    width: float
+    height: float
+    half_board: bool
+    source: Optional[str]
+    weight: float
+    pieces_total: int
+    pieces_mine: int
+    pieces_mine_in_range: int
+    pieces_pending: int
+    other_cutters: tuple[str, ...]
+    my_last_cut_at: Optional[datetime]
+    done_at: Optional[datetime]
+    closed_by: Optional[int]
+    closed_by_label: Optional[str]
 
 
 class ProductionService:
@@ -201,6 +242,113 @@ class ProductionService:
             for b in boards
         ]
 
+    def operator_sheets(
+        self,
+        user_id: int,
+        start: datetime,
+        end: datetime,
+        branch_id: Optional[int] = None,
+    ) -> list[OperatorSheet]:
+        """Every sheet ``user_id`` marked a piece on in ``[start, end)``.
+
+        The ledger behind an operator's board count: the sheets they closed in
+        range are exactly the ones ``processed_boards`` credits them (same
+        completion, same last mark, same weight), and the rest say why not --
+        closed by somebody else, still missing a piece, or closed outside the
+        range.
+        """
+        touched = self.db.query(OrderPlacedPieceModel.board_id).filter(
+            OrderPlacedPieceModel.cut_by == user_id,
+            OrderPlacedPieceModel.cut_at >= start,
+            OrderPlacedPieceModel.cut_at < end,
+        )
+        if branch_id is not None:
+            touched = touched.join(
+                OrderModel, OrderPlacedPieceModel.order_id == OrderModel.id
+            ).filter(OrderModel.branch_id == branch_id)
+        board_ids = {board_id for (board_id,) in touched.distinct().all()}
+        if not board_ids:
+            return []
+
+        pieces: dict[int, list] = defaultdict(list)
+        for row in self.db.query(
+            OrderPlacedPieceModel.board_id,
+            OrderPlacedPieceModel.cut_at,
+            OrderPlacedPieceModel.cut_by,
+            OrderPlacedPieceModel.cut_by_label,
+        ).filter(OrderPlacedPieceModel.board_id.in_(list(board_ids))):
+            pieces[row.board_id].append(row)
+        done_at = {
+            board_id: max(p.cut_at for p in rows)
+            for board_id, rows in pieces.items()
+            if all(p.cut_at is not None for p in rows)
+        }
+        closers = self._last_cutters(done_at) if done_at else {}
+        labels = {
+            (p.board_id, p.cut_at): p.cut_by_label
+            for rows in pieces.values()
+            for p in rows
+            if p.cut_at is not None
+        }
+
+        boards = (
+            self.db.query(OrderBoardModel, OrderModel.code, OrderModel.branch_id)
+            .join(OrderModel, OrderBoardModel.order_id == OrderModel.id)
+            .filter(OrderBoardModel.id.in_(list(board_ids)))
+            .all()
+        )
+        order_ids = {board.order_id for board, _, _ in boards}
+        sources = self._material_sources(order_ids)
+        clients = {
+            order_id: customer_name(client)
+            for order_id, client in self.db.query(OrderModel.id, ClientModel)
+            .join(ClientModel, OrderModel.client_id == ClientModel.id)
+            .filter(OrderModel.id.in_(list(order_ids)))
+        }
+
+        sheets = []
+        for board, code, board_branch in boards:
+            rows = pieces[board.id]
+            mine = [p for p in rows if p.cut_by == user_id and p.cut_at is not None]
+            source = sources.get((board.order_id, board.material_key))
+            last = done_at.get(board.id)
+            sheets.append(
+                OperatorSheet(
+                    board_id=board.id,
+                    order_id=board.order_id,
+                    order_code=code,
+                    client_name=clients.get(board.order_id, ""),
+                    branch_id=board_branch,
+                    sheet_number=board.sheet_number,
+                    material_name=board.product_name,
+                    width=board.width,
+                    height=board.height,
+                    half_board=board.half_board,
+                    source=source,
+                    weight=board_weight(board.half_board, source),
+                    pieces_total=len(rows),
+                    pieces_mine=len(mine),
+                    pieces_mine_in_range=sum(
+                        1 for p in mine if start <= p.cut_at < end
+                    ),
+                    pieces_pending=sum(1 for p in rows if p.cut_at is None),
+                    other_cutters=tuple(
+                        sorted(
+                            {
+                                p.cut_by_label or ""
+                                for p in rows
+                                if p.cut_at is not None and p.cut_by != user_id
+                            }
+                        )
+                    ),
+                    my_last_cut_at=max(p.cut_at for p in mine),
+                    done_at=last,
+                    closed_by=closers.get(board.id) if last else None,
+                    closed_by_label=labels.get((board.id, last)) if last else None,
+                )
+            )
+        return sheets
+
     def _material_sources(self, order_ids: set[int]) -> dict[tuple[int, str], str]:
         """``(order_id, material_key) -> source`` off the frozen snapshots.
 
@@ -276,6 +424,8 @@ class ProductionService:
         ):
             cutting_codes[branch_id].append(code or f"#{order_id}")
 
+        tracks = self._activity_tracks([b.id for b in branches])
+
         items = []
         for branch in branches:
             last = last_ever.get(branch.id)
@@ -295,11 +445,96 @@ class ProductionService:
                     last_event_at=last,
                     queued_count=queued.get(branch.id, 0),
                     cutting_order_codes=cutting_codes[branch.id],
+                    banding=tracks[(branch.id, ActivityType.banding)],
+                    additional=tracks[(branch.id, ActivityType.additional)],
                 )
             )
         return ProductionStatusReport(
             idle_minutes=config.PRODUCTION_IDLE_MINUTES, branches=items
         )
+
+    def _activity_tracks(
+        self, branch_ids: list[int]
+    ) -> dict[tuple[int, ActivityType], ActivityLiveStatus]:
+        """``(branch_id, type) -> live status`` of the banding and additional work.
+
+        Only orders in process carry live activities: the queue has not reached
+        the shop and a finished order closed all of them. A pending activity is
+        "waiting" once READY (``ready_at``: a piece of its set came off the
+        saw); before that there is nothing to work on.
+        """
+        working: dict[tuple, list] = defaultdict(list)
+        ready: dict[tuple, list[datetime]] = defaultdict(list)
+        for branch_id, code, order_id, kind, status, started_at, ready_at in (
+            self.db.query(
+                OrderModel.branch_id,
+                OrderModel.code,
+                OrderModel.id,
+                OrderActivityModel.type,
+                OrderActivityModel.status,
+                OrderActivityModel.started_at,
+                OrderActivityModel.ready_at,
+            )
+            .join(OrderModel, OrderActivityModel.order_id == OrderModel.id)
+            .filter(
+                OrderModel.status == OrderStatus.in_process.value,
+                OrderActivityModel.type.in_([t.value for t in _ACTIVITY_TRACKS]),
+                OrderActivityModel.status.in_(
+                    [ActivityStatus.pending.value, ActivityStatus.in_progress.value]
+                ),
+            )
+            .all()
+        ):
+            key = (branch_id, ActivityType(kind))
+            if status == ActivityStatus.in_progress.value:
+                working[key].append((started_at, order_id, code or f"#{order_id}"))
+            elif ready_at is not None:
+                ready[key].append(ready_at)
+
+        last_closed = {
+            (branch_id, ActivityType(kind)): at
+            for branch_id, kind, at in (
+                self.db.query(
+                    OrderModel.branch_id,
+                    OrderActivityModel.type,
+                    func.max(OrderActivityModel.finished_at),
+                )
+                .join(OrderModel, OrderActivityModel.order_id == OrderModel.id)
+                .filter(
+                    OrderActivityModel.type.in_([t.value for t in _ACTIVITY_TRACKS])
+                )
+                .group_by(OrderModel.branch_id, OrderActivityModel.type)
+                .all()
+            )
+        }
+
+        def track(key) -> ActivityLiveStatus:
+            # A start can be missing on rows written before the activities had
+            # clocks; it sorts last instead of breaking the order.
+            runs = sorted(
+                working[key], key=lambda r: (r[0] is None, r[0] or datetime.min, r[1])
+            )
+            waits = ready[key]
+            state = activity_live_state(len(runs), len(waits))
+            if runs:
+                since = runs[0][0]
+            elif waits:
+                since = min(waits)
+            else:
+                since = last_closed.get(key)
+            return ActivityLiveStatus(
+                state=state,
+                since=since,
+                order_codes=[code for _, _, code in runs],
+                waiting_count=len(waits),
+                last_finished_at=last_closed.get(key),
+            )
+
+        return {
+            (branch_id, kind): track((branch_id, kind))
+            for branch_id in branch_ids
+            for kind in _ACTIVITY_TRACKS
+        }
 
     def _last_event_per_branch(self) -> dict[int, datetime]:
         """The latest cutting event of each branch, however old."""

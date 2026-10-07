@@ -33,10 +33,10 @@ the cutting, banding and additional work.
 - `roles` comes back in **canonical order** (`administrador`, `vendedor`,
   `operador`, `canteador`), whatever order it was sent in.
 - `?role=` filters (users listing, analytics) match a user **holding** that role.
-- **Deprecated, until migration 016:** every response that carried the single
-  `role` still carries it, as the *primary* role (the first of `roles`), and
-  `POST/PUT /users` still accept `role` in place of `roles`. Read and send
-  `roles`.
+- `roles` is **required** on `POST /users`. The single `role` of the first
+  contract is gone (migration 016): no response carries it, and a body sending
+  it is ignored like any unknown field — so a creation without `roles` is a
+  `422`, never a silent default.
 
 Login is by `email` (unique). Passwords are stored only as a bcrypt hash.
 

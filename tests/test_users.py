@@ -181,11 +181,10 @@ def test_require_role_grants_the_union_of_the_roles():
         require_permission("orders:write")(current_user=apprentice)
 
 
-def test_model_stores_roles_canonically_and_mirrors_the_primary():
-    """``roles[0]`` is the primary role, and the legacy ``role`` column follows it."""
+def test_model_stores_roles_canonically():
+    """``roles[0]`` is the primary role, duplicates collapse."""
     user = _fake_user("canteador", "operador", "canteador")
     assert user.roles == ["operador", "canteador"]
-    assert user.role == "operador"
     assert user.is_global is False
     assert _fake_user("vendedor").is_global is True
 
@@ -211,8 +210,8 @@ def test_create_user_hashes_password_and_hides_it(client, auth):
     data = resp.json()["data"]
     assert data["email"] == "seller@empresa.com"
     assert data["roles"] == ["vendedor"]
-    # Deprecated single role, kept for the previous web until migration 016.
-    assert data["role"] == "vendedor"
+    # The single ``role`` of the first contract is gone (migration 016).
+    assert "role" not in data
     assert data["isActive"] is True
     assert "id" in data
     assert "password" not in data
@@ -321,7 +320,6 @@ def test_create_user_with_both_workshop_roles(client, auth):
     assert resp.status_code == 201
     data = resp.json()["data"]
     assert data["roles"] == ["operador", "canteador"]
-    assert data["role"] == "operador"
     assert data["branchId"] == _BRANCH
 
 
@@ -356,39 +354,30 @@ def test_update_rejects_a_forbidden_combination(client, auth):
     assert resp.json()["errors"][0]["field"] == "roles"
 
 
-def test_legacy_single_role_is_still_accepted(client, auth):
-    """The previous web sends ``role``; until migration 016 it becomes ``roles``."""
+def test_the_single_role_of_the_first_contract_is_no_longer_read(client, auth):
+    """Without ``roles`` a creation is a 422, never a silent default role.
+
+    The first contract sent ``role``; migration 016 dropped it. ``CamelModel``
+    ignores unknown fields, so an old client sending only ``role`` would have
+    created an operador had ``roles`` kept a default.
+    """
     admin = auth("administrador")
     payload = _user_payload(email="legado@empresa.com")
     payload.pop("roles")
     created = client.post(
         "/api/v1/users/", json={**payload, "role": "canteador"}, headers=admin
     )
-    assert created.status_code == 201
-    assert created.json()["data"]["roles"] == ["canteador"]
+    assert created.status_code == 422
+    assert created.json()["errors"][0]["field"] == "body.roles"
 
+    user = _create_user(client, admin, email="vigente@empresa.com", role="operador")
     updated = client.put(
-        f"/api/v1/users/{created.json()['data']['id']}",
-        json={"role": "operador"},
+        f"/api/v1/users/{user.json()['data']['id']}",
+        json={"role": "vendedor", "fullName": "Vigente"},
         headers=admin,
     )
     assert updated.status_code == 200
     assert updated.json()["data"]["roles"] == ["operador"]
-
-    # A null ``role`` was ignored before and still is; ``roles`` wins over it.
-    same = client.put(
-        f"/api/v1/users/{created.json()['data']['id']}",
-        json={"role": None, "fullName": "Legado"},
-        headers=admin,
-    )
-    assert same.status_code == 200
-    assert same.json()["data"]["roles"] == ["operador"]
-    both = client.put(
-        f"/api/v1/users/{created.json()['data']['id']}",
-        json={"role": "vendedor", "roles": ["canteador", "operador"]},
-        headers=admin,
-    )
-    assert both.json()["data"]["roles"] == ["operador", "canteador"]
 
 
 def test_promoting_to_admin_clears_the_branch(client, auth):
@@ -565,7 +554,6 @@ def test_update_me_changes_full_name_only(client, auth):
         json={
             "fullName": "Operario Renombrado",
             "roles": ["administrador"],
-            "role": "administrador",
         },
         headers=headers,
     )
@@ -651,16 +639,9 @@ def test_products_write_requires_admin(client, auth):
 
 
 def test_analytics_is_admin_only(client, auth):
-    assert (
-        client.get("/api/v1/analytics/summary", headers=auth("vendedor")).status_code
-        == 403
-    )
-    assert (
-        client.get(
-            "/api/v1/analytics/summary", headers=auth("administrador")
-        ).status_code
-        == 200
-    )
+    url = "/api/v1/analytics/branch-comparison"
+    assert client.get(url, headers=auth("vendedor")).status_code == 403
+    assert client.get(url, headers=auth("administrador")).status_code == 200
 
 
 def test_settings_is_admin_only(client, auth):

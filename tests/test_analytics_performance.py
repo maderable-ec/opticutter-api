@@ -8,6 +8,7 @@ Every instant is written as Ecuador's wall clock (``_at``) and stored as the
 naive UTC the app writes: the report days are the business's, UTC-5.
 """
 
+from collections import defaultdict
 from datetime import datetime, timedelta
 
 from src.modules.branches.model import BranchModel
@@ -543,3 +544,319 @@ def test_banded_metres_count_for_the_branch_on_the_day_the_banding_closed(
     days = {(d["date"], d["branchName"]): d for d in _get(client, "production")["days"]}
     assert days[("2026-06-10", "Casa Matriz")]["bandedLinearM"] == 27.23
     assert days[("2026-06-11", "Macas")]["bandedLinearM"] == 12.5
+
+
+def test_banders_time_only_the_clocked_work(client, db_session):
+    """A start and a close registered together count as work, not as time.
+
+    The 2-h banding is clocked; the one closed 10 s after its start was tapped
+    in after the work: its order and its metres count, its seconds do not, and
+    its metres stay out of the metres per hour.
+    """
+    c = _client(db_session)
+    bander = _user(db_session, "Can Uno", ["canteador"])
+    clocked = _order(db_session, c.id, status="finished", banding_m=27.23)
+    _activity(
+        db_session,
+        clocked.id,
+        "banding",
+        started_at=_at(10, 9),
+        finished_at=_at(10, 11),
+        finished_by=bander.id,
+    )
+    tapped = _order(db_session, c.id, status="finished", banding_m=15.0)
+    _activity(
+        db_session,
+        tapped.id,
+        "banding",
+        started_at=_at(11, 16, 0),
+        finished_at=_at(11, 16, 0) + timedelta(seconds=10),
+        finished_by=bander.id,
+    )
+    _activity(
+        db_session,
+        tapped.id,
+        "additional",
+        started_at=_at(11, 16, 1),
+        finished_at=_at(11, 16, 1) + timedelta(seconds=5),
+        finished_by=bander.id,
+    )
+
+    data = _get(client, "productivity/banders")
+    [row] = data["banders"]
+    assert row["ordersBanded"] == 2
+    assert row["ordersBandedUnclocked"] == 1
+    assert row["bandedLinearM"] == 42.23  # every metre laid counts
+    assert row["bandingHours"] == 2.0
+    assert row["averageBandingHours"] == 2.0  # over the one clocked
+    assert row["bandingMetersPerHour"] == 13.62  # 27.23 m over 2 h, not 42.23
+    assert row["ordersAdditional"] == 1
+    assert row["ordersAdditionalUnclocked"] == 1
+    assert row["additionalHours"] == 0
+    assert row["averageAdditionalHours"] == 0
+    assert data["total"]["ordersBandedUnclocked"] == 1
+
+
+def test_bandings_and_additional_works_are_counted_by_branch_and_day(
+    client, db_session
+):
+    macas = _branch(db_session)
+    c = _client(db_session)
+    june = _order(db_session, c.id, status="finished", banding_m=10.0)
+    _activity(db_session, june.id, "banding", finished_at=_at(10, 11))
+    _activity(db_session, june.id, "additional", finished_at=_at(10, 12))
+    other = _order(db_session, c.id, branch_id=macas.id, status="finished")
+    _activity(db_session, other.id, "additional", finished_at=_at(11, 15))
+    # Still open: no close, nothing counted.
+    _activity(
+        db_session,
+        _order(db_session, c.id, status="in_process").id,
+        "banding",
+        status="in_progress",
+        started_at=_at(11, 9),
+    )
+
+    data = _get(client, "branch-comparison")
+    matriz, norte = data["branches"]
+    assert (
+        matriz["production"]["ordersBanded"],
+        norte["production"]["ordersBanded"],
+    ) == (1, 0)
+    assert (
+        matriz["production"]["ordersAdditional"],
+        norte["production"]["ordersAdditional"],
+    ) == (1, 1)
+    assert data["total"]["production"]["ordersAdditional"] == 2
+
+    days = {(d["date"], d["branchName"]): d for d in _get(client, "production")["days"]}
+    assert days[("2026-06-10", "Casa Matriz")]["ordersBanded"] == 1
+    assert days[("2026-06-10", "Casa Matriz")]["ordersAdditional"] == 1
+    assert days[("2026-06-11", "Macas")]["ordersAdditional"] == 1
+    assert days[("2026-06-11", "Macas")]["ordersBanded"] == 0
+
+
+# ------------------------------------------------------------ the board ledger
+def test_a_deleted_users_sheets_stay_in_a_row_of_their_own(client, db_session):
+    """``cut_by`` goes NULL when the user is deleted; the sheet still counts.
+
+    Without the row the operators' total would fall short of the comparison's.
+    """
+    c = _client(db_session)
+    op = _user(db_session, "Op Uno", ["operador"])
+    _seed_cut_day(db_session, c.id, op)
+    order = _order(db_session, c.id, status="in_process")
+    board = _board(db_session, order.id)
+    _piece(db_session, order.id, board.id, _at(12, 9, 0), None, n=1)
+    _piece(db_session, order.id, board.id, _at(12, 9, 5), None, n=2)
+
+    data = _get(client, "productivity/operators")
+
+    *named, gone = data["operators"]
+    assert [r["fullName"] for r in named] == ["Op Uno"]
+    assert gone["userId"] is None and gone["fullName"] == "Sin usuario"
+    assert (gone["boards"], gone["piecesCut"]) == (1.0, 2)
+    comparison = _get(client, "branch-comparison")["total"]["production"]
+    assert data["total"]["boards"] == comparison["boards"] == 2.5
+
+
+def test_the_ledger_adds_up_to_the_operators_row(client, db_session):
+    c = _client(db_session)
+    op = _user(db_session, "Op Uno", ["operador"])
+    other = _user(db_session, "Op Dos", ["operador"])
+    order = _seed_cut_day(db_session, c.id, op, closer=other)
+    order.code = "ORD-000042"
+    # A sheet they started on June 30th and closed on July 1st (local).
+    late = _board(db_session, order.id)
+    _piece(db_session, order.id, late.id, _at(30, 16), op.id, n=1)
+    _piece(db_session, order.id, late.id, _at(1, 8, month=7), op.id, n=2)
+    for user in (op, other):
+        db_session.query(OrderPlacedPieceModel).filter(
+            OrderPlacedPieceModel.cut_by == user.id
+        ).update({"cut_by_label": user.full_name})
+    db_session.commit()
+
+    [row] = [
+        r
+        for r in _get(client, "productivity/operators")["operators"]
+        if r["userId"] == op.id
+    ]
+    ledger = _get(client, f"productivity/operators/{op.id}/boards")
+
+    assert ledger["fullName"] == "Op Uno"
+    assert ledger["boards"] == row["boards"] == 1.0
+    assert ledger["piecesCut"] == row["piecesCut"] == 6
+    assert ledger["creditedCount"] == 2  # the whole board and the retazo
+    by_status = defaultdict(list)
+    for sheet in ledger["sheets"]:
+        by_status[sheet["status"]].append(sheet)
+
+    whole, retazo = sorted(by_status["credited"], key=lambda s: s["weight"])[::-1]
+    assert (whole["kind"], whole["weight"]) == ("whole", 1.0)
+    assert (retazo["kind"], retazo["weight"]) == ("offcut", 0.0)
+    assert whole["orderCode"] == "ORD-000042"
+    assert whole["clientName"] == "0100000397"
+    assert whole["day"] == "2026-06-10"
+    assert whole["piecesMine"] == whole["piecesTotal"] == 2
+
+    [half] = by_status["credited_to_other"]
+    assert (half["kind"], half["weight"]) == ("half", 0.5)
+    assert half["closedBy"] == "Op Dos"
+    assert half["otherCutters"] == ["Op Dos"]
+    assert (half["piecesMine"], half["piecesByOthers"]) == (1, 1)
+
+    [pending] = by_status["incomplete"]
+    assert (pending["piecesPending"], pending["doneAt"]) == (1, None)
+
+    [straddling] = by_status["outside_range"]
+    assert straddling["doneAt"] == "2026-07-01T13:00:00Z"
+    assert (straddling["piecesMine"], straddling["piecesMineInRange"]) == (2, 1)
+    # Newest first.
+    assert ledger["sheets"][0]["boardId"] == straddling["boardId"]
+
+
+def test_the_ledger_of_an_unknown_user_is_a_404(client):
+    resp = client.get("/api/v1/analytics/productivity/operators/9999/boards")
+    assert resp.status_code == 404
+
+
+def test_the_ledger_is_admin_only(client, db_session):
+    from tests.order_helpers import _token_for
+
+    op = _user(db_session, "Op Uno", ["operador"])
+    seller = _token_for(client, db_session, "vendedor")
+    resp = client.get(
+        f"/api/v1/analytics/productivity/operators/{op.id}/boards", headers=seller
+    )
+    assert resp.status_code == 403
+
+
+# ------------------------------------------------- the sellers' and banders' detail
+def test_a_sellers_orders_add_up_to_their_row(client, db_session):
+    c = _client(db_session)
+    ana = _user(db_session, "Ana", ["vendedor"])
+    luis = _user(db_session, "Luis", ["vendedor"])
+    # Confirmed in May, paid in June: a June sale, and the detail says both dates.
+    may = _order(
+        db_session,
+        c.id,
+        created_at=_at(28, 10, month=5),
+        queued_at=_at(5, 10),
+        cash=50.0,
+        transfer=10.0,
+        credit=40.0,
+        created_by=ana.id,
+        code="ORD-000050",
+    )
+    may.external_invoice_id = "001-002-000123"
+    _order(
+        db_session, c.id, queued_at=_at(6, 10), cash=20.0, created_by=ana.id, code="B"
+    )
+    # Not hers, cancelled, or paid in July: not in her detail.
+    _order(db_session, c.id, queued_at=_at(6, 11), cash=99.0, created_by=luis.id)
+    _order(
+        db_session,
+        c.id,
+        status="cancelled",
+        queued_at=_at(7, 10),
+        cash=99.0,
+        created_by=ana.id,
+    )
+    _order(
+        db_session, c.id, queued_at=_at(1, 10, month=7), cash=99.0, created_by=ana.id
+    )
+    # Still to collect today.
+    _order(
+        db_session, c.id, status="confirmed", total=75.0, created_by=ana.id, code="P"
+    )
+    db_session.commit()
+
+    [row] = [
+        r
+        for r in _get(client, "productivity/sellers")["sellers"]
+        if r["userId"] == ana.id
+    ]
+    detail = _get(client, f"productivity/sellers/{ana.id}/orders")
+
+    figures = {k: row[k] for k in detail["figures"]}
+    assert detail["figures"] == figures
+    assert (figures["total"], figures["paidOrders"], figures["pendingAmount"]) == (
+        120.0,
+        2,
+        75.0,
+    )
+    first, second = detail["paid"]  # newest payment first
+    assert second["orderCode"] == "ORD-000050"
+    assert second["createdAt"].startswith("2026-05-28")
+    assert second["day"] == "2026-06-05"
+    assert (second["cash"], second["transfer"], second["credit"]) == (50.0, 10.0, 40.0)
+    assert second["total"] == 100.0
+    assert second["invoice"] == "001-002-000123"
+    assert second["clientName"] == "0100000397"
+    assert first["invoice"] is None
+    [pending] = detail["pending"]
+    assert (pending["orderCode"], pending["total"]) == ("P", 75.0)
+
+
+def test_a_banders_orders_add_up_to_their_row(client, db_session):
+    c = _client(db_session)
+    bander = _user(db_session, "Can Uno", ["canteador"])
+    other = _user(db_session, "Can Dos", ["canteador"])
+    clocked = _order(
+        db_session, c.id, status="finished", banding_m=27.23, code="ORD-000070"
+    )
+    _activity(
+        db_session,
+        clocked.id,
+        "banding",
+        started_at=_at(10, 9),
+        finished_at=_at(10, 11),
+        finished_by=bander.id,
+    )
+    tapped = _order(db_session, c.id, status="finished", banding_m=15.0, code="T")
+    _activity(
+        db_session,
+        tapped.id,
+        "banding",
+        started_at=_at(11, 16),
+        finished_at=_at(11, 16) + timedelta(seconds=8),
+        finished_by=bander.id,
+    )
+    _activity(
+        db_session,
+        tapped.id,
+        "additional",
+        started_at=_at(11, 17),
+        finished_at=_at(11, 17, 30),
+        finished_by=bander.id,
+    )
+    # Somebody else's.
+    _activity(
+        db_session,
+        _order(db_session, c.id, status="finished", banding_m=5.0).id,
+        "banding",
+        started_at=_at(12, 9),
+        finished_at=_at(12, 10),
+        finished_by=other.id,
+    )
+
+    [row] = [
+        r
+        for r in _get(client, "productivity/banders")["banders"]
+        if r["userId"] == bander.id
+    ]
+    detail = _get(client, f"productivity/banders/{bander.id}/orders")
+
+    assert detail["figures"] == {k: row[k] for k in detail["figures"]}
+    assert detail["fullName"] == "Can Uno"
+    additional, tapped_banding, clocked_banding = detail["orders"]  # newest close first
+    assert (additional["kind"], additional["hours"]) == ("additional", 0.5)
+    assert additional["bandedLinearM"] == 0
+    assert (tapped_banding["hours"], tapped_banding["bandedLinearM"]) == (None, 15.0)
+    assert clocked_banding["orderCode"] == "ORD-000070"
+    assert (clocked_banding["hours"], clocked_banding["day"]) == (2.0, "2026-06-10")
+
+
+def test_the_detail_of_an_unknown_user_is_a_404(client):
+    for team in ("sellers", "banders"):
+        resp = client.get(f"/api/v1/analytics/productivity/{team}/9999/orders")
+        assert resp.status_code == 404, team

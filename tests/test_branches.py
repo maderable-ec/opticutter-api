@@ -235,7 +235,7 @@ def test_operator_without_branch_is_forbidden(client, db_session):
 
 
 # ------------------------------------------------------------------- analytics
-def test_analytics_breakdown_by_branch(client, db_session):
+def test_analytics_compares_every_branch(client, db_session):
     norte = _make_branch(client)
     c = _create_client(client)
     board = _create_board(client)
@@ -243,19 +243,12 @@ def test_analytics_breakdown_by_branch(client, db_session):
     _mint_order(db_session, c["id"], board["id"], norte["id"], width=500)
 
     rng = {"from": "2020-01-01", "to": "2999-12-31"}
-    items = client.get("/api/v1/analytics/breakdown/branch", params=rng).json()["data"][
-        "items"
-    ]
-    by_label = {i["label"]: i for i in items}
-    # Densifies all branches; each with its order count.
-    assert by_label["Casa Matriz"]["orderCount"] == 1
-    assert by_label["Sucursal Norte"]["orderCount"] == 1
-
-    # The branchId filter narrows the summary to a single branch.
-    only_norte = client.get(
-        "/api/v1/analytics/summary", params={**rng, "branchId": norte["id"]}
-    ).json()["data"]
-    assert only_norte["orderCount"] == 1
+    data = client.get("/api/v1/analytics/branch-comparison", params=rng).json()["data"]
+    by_name = {b["branchName"]: b for b in data["branches"]}
+    # One column per active branch, each with its own orders, and the total.
+    assert by_name["Casa Matriz"]["orders"]["entered"] == 1
+    assert by_name["Sucursal Norte"]["orders"]["entered"] == 1
+    assert data["total"]["orders"]["entered"] == 2
 
 
 def test_list_branches_filter_by_active_and_order(client):

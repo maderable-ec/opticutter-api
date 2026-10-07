@@ -35,10 +35,6 @@ class UserModel(TimestampMixin, AuditMixin, Base):
     # Canonical order (``canonical_roles``), so ``roles[0]`` is the primary role.
     # An ARRAY does not track in-place mutation: always assign a new list.
     roles: Mapped[list[str]] = mapped_column(ARRAY(String(32)), nullable=False)
-    # LEGACY mirror of the primary role, written only by ``_canonical_roles``.
-    # Nothing reads it any more; it survives so the previous release -- which
-    # does -- keeps working if the api is rolled back. Dropped by migration 016.
-    role: Mapped[str] = mapped_column(String(32), default=UserRole.OPERATOR.value)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     # Branch assigned to staff (seller/operator). NULL = global administrator,
     # who sees and operates all branches. Editable by the admin (moves the branch);
@@ -49,11 +45,8 @@ class UserModel(TimestampMixin, AuditMixin, Base):
 
     @validates("roles")
     def _canonical_roles(self, _key, values):
-        """Stores the roles in canonical order and keeps the legacy mirror in step."""
-        ordered = canonical_roles(values)
-        if ordered:
-            self.role = ordered[0]
-        return ordered
+        """Stores the roles in canonical order, so ``roles[0]`` is the primary one."""
+        return canonical_roles(values)
 
     def has_any_role(self, *roles: UserRole) -> bool:
         """Does the user hold at least one of ``roles``? (permissions are a union)."""

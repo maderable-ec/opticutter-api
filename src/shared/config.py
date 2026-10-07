@@ -124,8 +124,8 @@ class Config:
 
     # First admin seed, applied by the idempotent script ``scripts/seed_admin.py``
     # (run via ``make seed-admin``), NOT by a migration. If both are set and no
-    # user exists with that email, the script creates it with role
-    # "administrador". Empty = nothing is seeded.
+    # user exists with that email, the script creates it with the
+    # "administrador" role. Empty = nothing is seeded.
     ADMIN_EMAIL = env("ADMIN_EMAIL", "")
     ADMIN_PASSWORD = env("ADMIN_PASSWORD", "")
 

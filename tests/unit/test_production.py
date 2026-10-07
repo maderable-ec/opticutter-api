@@ -8,11 +8,18 @@ still the previous evening.
 from datetime import date, datetime, timedelta
 
 from src.modules.orders.production import (
+    ActivityLiveState,
     LiveState,
+    SheetCredit,
+    SheetKind,
+    activity_live_state,
     board_weight,
+    clocked_seconds,
     cut_length_m,
     live_state,
     run_start,
+    sheet_credit,
+    sheet_kind,
     workdays,
 )
 from src.shared.business_time import (
@@ -44,6 +51,36 @@ def test_a_manual_sheet_is_bought_and_counts_like_the_catalog():
     assert board_weight(False, "manual") == 1.0
     # An order whose snapshot lost the material: counted as a board, never dropped.
     assert board_weight(False, None) == 1.0
+
+
+def test_the_kind_says_what_the_weight_weighs():
+    assert sheet_kind(False, "catalog") is SheetKind.whole
+    assert sheet_kind(True, "manual") is SheetKind.half
+    assert sheet_kind(True, "companyOffcut") is SheetKind.offcut
+
+
+# ----------------------------------------------------------------- the ledger
+_START, _END = _utc(1, 5), _utc(31, 5)
+
+
+def test_a_sheet_counts_for_who_closed_it_inside_the_range():
+    assert sheet_credit(7, 7, _utc(10, 13), _START, _END) is SheetCredit.credited
+
+
+def test_a_sheet_closed_by_somebody_else_is_theirs():
+    closed = sheet_credit(7, 8, _utc(10, 13), _START, _END)
+    assert closed is SheetCredit.credited_to_other
+    # A deleted user's mark is somebody else's too.
+    assert sheet_credit(7, None, _utc(10, 13), _START, _END) is closed
+
+
+def test_a_sheet_with_a_piece_unmarked_counts_for_nobody():
+    assert sheet_credit(7, None, None, _START, _END) is SheetCredit.incomplete
+
+
+def test_a_sheet_closed_after_the_range_is_out_of_it():
+    assert sheet_credit(7, 7, _END, _START, _END) is SheetCredit.outside_range
+    assert sheet_credit(7, 7, _START, _START, _END) is SheetCredit.credited
 
 
 # ------------------------------------------------------------------ cut metres
@@ -141,6 +178,37 @@ def test_the_run_starts_after_the_last_stop():
     times = [_utc(6, 12, 0), _utc(6, 13, 0), _utc(6, 13, 10), _utc(6, 13, 20)]
     assert run_start(times, _GAP) == _utc(6, 13, 0)
     assert run_start([], _GAP) is None
+
+
+# ------------------------------------------------- banding and additional work
+def test_an_activity_in_progress_is_being_worked():
+    assert activity_live_state(in_progress=1, waiting=3) is ActivityLiveState.working
+
+
+def test_ready_work_with_nobody_on_it_is_waiting():
+    assert activity_live_state(in_progress=0, waiting=2) is ActivityLiveState.waiting
+
+
+def test_nothing_in_progress_nor_ready_is_idle():
+    assert activity_live_state(in_progress=0, waiting=0) is ActivityLiveState.idle
+
+
+def test_a_start_and_close_a_minute_apart_or_more_is_clocked():
+    start = _utc(6, 15, 0)
+    assert clocked_seconds(start, start + timedelta(minutes=1)) == 60.0
+    assert clocked_seconds(start, start + timedelta(hours=1, minutes=14)) == 4440.0
+
+
+def test_a_start_and_close_registered_together_is_not_clocked():
+    """The bander taps Iniciar and Terminar after the work: 67 % of the bandings."""
+    start = _utc(6, 15, 0)
+    assert clocked_seconds(start, start + timedelta(seconds=4)) is None
+    assert clocked_seconds(start, start + timedelta(seconds=59)) is None
+
+
+def test_an_activity_without_start_or_close_is_not_clocked():
+    assert clocked_seconds(None, _utc(6, 15, 0)) is None
+    assert clocked_seconds(_utc(6, 15, 0), None) is None
 
 
 # ------------------------------------------------------------- business time

@@ -21,11 +21,15 @@ from src.modules.analytics.constants import safe_div
 from src.modules.analytics.dates import DateRange
 from src.modules.analytics.schemas import (
     BanderFigures,
+    BanderOrder,
+    BanderOrdersReport,
     BanderReport,
     BanderRow,
     BranchComparison,
     BranchFigures,
     BranchMaterial,
+    OperatorBoard,
+    OperatorBoardsReport,
     OperatorFigures,
     OperatorReport,
     OperatorRow,
@@ -37,10 +41,14 @@ from src.modules.analytics.schemas import (
     RangeInfo,
     SalesFigures,
     SellerFigures,
+    SellerOrder,
+    SellerOrdersReport,
+    SellerPendingOrder,
     SellerReport,
     SellerRow,
 )
 from src.modules.branches.model import BranchModel
+from src.modules.clients.model import ClientModel
 from src.modules.orders.model import (
     ActivityType,
     OrderActivityModel,
@@ -49,7 +57,15 @@ from src.modules.orders.model import (
     OrderStatus,
     OrderStatusHistoryModel,
 )
-from src.modules.orders.production import Workday, workdays
+from src.modules.orders.pieces_export import customer_name
+from src.modules.orders.production import (
+    SheetCredit,
+    Workday,
+    clocked_seconds,
+    sheet_credit,
+    sheet_kind,
+    workdays,
+)
 from src.modules.orders.production_service import (
     ProcessedBoard,
     ProductionService,
@@ -59,9 +75,15 @@ from src.modules.users.model import UserModel
 from src.shared.business_time import local_date, minute_of_day
 from src.shared.config import config
 from src.shared.database import get_db
+from src.shared.exceptions import EntityNotFoundError
 
 # How many stops the production tab lists, longest first.
 _STOPS_LIMIT = 20
+
+# The row of the work whose user is gone: ``cut_by``/``finished_by`` went NULL
+# when the user was deleted. Listed, so the role's total still matches the
+# branch comparison, which counts that work too.
+_NO_USER = "Sin usuario"
 
 
 @dataclass
@@ -87,10 +109,27 @@ class _Production:
     boards: float = 0.0
     cut_linear_m: float = 0.0
     banded_linear_m: float = 0.0
+    orders_banded: int = 0
+    orders_additional: int = 0
 
     def add_board(self, board: ProcessedBoard) -> None:
         self.boards += board.weight
         self.cut_linear_m += board.cut_linear_m
+
+    def add_closed(self, activity: "_ClosedActivity") -> None:
+        if activity.kind == ActivityType.banding.value:
+            self.orders_banded += 1
+            self.banded_linear_m += activity.banded_m
+        else:
+            self.orders_additional += 1
+
+    def merge(self, other: "_Production") -> None:
+        self.days += other.days
+        self.boards += other.boards
+        self.cut_linear_m += other.cut_linear_m
+        self.banded_linear_m += other.banded_linear_m
+        self.orders_banded += other.orders_banded
+        self.orders_additional += other.orders_additional
 
 
 def _hours(seconds: float) -> float:
@@ -114,6 +153,8 @@ def _production_figures(acc: _Production) -> ProductionFigures:
         boards=round(acc.boards, 2),
         cut_linear_m=round(acc.cut_linear_m, 2),
         banded_linear_m=round(acc.banded_linear_m, 2),
+        orders_banded=acc.orders_banded,
+        orders_additional=acc.orders_additional,
         effective_hours=_hours(effective),
         paused_hours=_hours(paused),
         boards_per_hour=boards_per_hour,
@@ -141,6 +182,69 @@ class _ClosedActivity:
     finished_by: Optional[int]
     # The order's net tape for a banding; 0 for the additional work.
     banded_m: float
+
+    @property
+    def clocked_seconds(self) -> Optional[float]:
+        """Its duration, or ``None`` when registered after the work."""
+        return clocked_seconds(self.started_at, self.finished_at)
+
+
+@dataclass
+class _BanderAcc:
+    """Banding and additional work closed, with the time of the CLOCKED ones only.
+
+    A start and a close registered together carry no duration
+    (``clocked_seconds``): the work counts, its seconds do not, and neither do
+    its metres in the metres per hour -- they would read as tape laid in no time.
+    """
+
+    banded: int = 0
+    banded_unclocked: int = 0
+    banded_m: float = 0.0
+    banding_s: float = 0.0
+    banding_clocked_m: float = 0.0
+    additional: int = 0
+    additional_unclocked: int = 0
+    additional_s: float = 0.0
+
+    def add(self, activity: "_ClosedActivity") -> None:
+        seconds = activity.clocked_seconds
+        if activity.kind == ActivityType.banding.value:
+            self.banded += 1
+            self.banded_m += activity.banded_m
+            if seconds is None:
+                self.banded_unclocked += 1
+            else:
+                self.banding_s += seconds
+                self.banding_clocked_m += activity.banded_m
+        else:
+            self.additional += 1
+            if seconds is None:
+                self.additional_unclocked += 1
+            else:
+                self.additional_s += seconds
+
+    def figures(self) -> BanderFigures:
+        banded_clocked = self.banded - self.banded_unclocked
+        additional_clocked = self.additional - self.additional_unclocked
+        return BanderFigures(
+            orders_banded=self.banded,
+            orders_banded_unclocked=self.banded_unclocked,
+            banding_hours=_hours(self.banding_s),
+            banded_linear_m=round(self.banded_m, 2),
+            # Over the activity's start-to-close hours, stops included: the
+            # banding marks no pieces, so this rate reads lower than the cut's.
+            banding_meters_per_hour=round(
+                safe_div(self.banding_clocked_m, self.banding_s / 3600.0), 2
+            ),
+            average_banding_hours=_hours(safe_div(self.banding_s, banded_clocked)),
+            orders_additional=self.additional,
+            orders_additional_unclocked=self.additional_unclocked,
+            additional_hours=_hours(self.additional_s),
+            average_additional_hours=_hours(
+                safe_div(self.additional_s, additional_clocked)
+            ),
+        )
 
 
 def _sales_figures(acc: _Sales) -> SalesFigures:
@@ -199,10 +303,7 @@ class PerformanceService:
             total_sales.credit += acc.credit
             total_sales.paid_orders += acc.paid_orders
         for acc in production.values():
-            total_production.days += acc.days
-            total_production.boards += acc.boards
-            total_production.cut_linear_m += acc.cut_linear_m
-            total_production.banded_linear_m += acc.banded_linear_m
+            total_production.merge(acc)
         total = BranchFigures(
             branch_id=None,
             branch_name="Total",
@@ -234,6 +335,8 @@ class PerformanceService:
                 "boards": 0.0,
                 "meters": 0.0,
                 "banded": 0.0,
+                "orders_banded": 0,
+                "orders_additional": 0,
                 "finished": 0,
             }
         )
@@ -246,11 +349,13 @@ class PerformanceService:
             row = day_rows[(board.branch_id, local_date(board.done_at))]
             row["boards"] += board.weight
             row["meters"] += board.cut_linear_m
-        for banding in self._closed_activities(
-            dr, branch_id, kinds=(ActivityType.banding,)
-        ):
-            row = day_rows[(banding.branch_id, local_date(banding.finished_at))]
-            row["banded"] += banding.banded_m
+        for activity in self._closed_activities(dr, branch_id):
+            row = day_rows[(activity.branch_id, local_date(activity.finished_at))]
+            if activity.kind == ActivityType.banding.value:
+                row["banded"] += activity.banded_m
+                row["orders_banded"] += 1
+            else:
+                row["orders_additional"] += 1
         finished_by_branch: dict[int, list[int]] = defaultdict(list)
         for bid, order_id, at in self._finished_orders(dr, branch_id):
             day_rows[(bid, local_date(at))]["finished"] += 1
@@ -283,6 +388,8 @@ class PerformanceService:
                     boards=round(row["boards"], 2),
                     cut_linear_m=round(row["meters"], 2),
                     banded_linear_m=round(row["banded"], 2),
+                    orders_banded=row["orders_banded"],
+                    orders_additional=row["orders_additional"],
                     orders_finished=row["finished"],
                     boards_per_hour=boards_per_hour,
                     meters_per_hour=meters_per_hour,
@@ -336,9 +443,7 @@ class PerformanceService:
             OrderModel.created_by,
             func.count(OrderModel.id),
             func.coalesce(func.sum(OrderModel.total), 0.0),
-        ).filter(OrderModel.status == OrderStatus.confirmed.value)
-        if branch_id is not None:
-            pending_q = pending_q.filter(OrderModel.branch_id == branch_id)
+        ).filter(*self._pending_filters(branch_id))
         pending = {
             uid: (count, amount)
             for uid, count, amount in pending_q.group_by(OrderModel.created_by).all()
@@ -372,6 +477,90 @@ class PerformanceService:
             ),
         )
 
+    def seller_orders(
+        self, user_id: int, dr: DateRange, branch_id: Optional[int] = None
+    ) -> SellerOrdersReport:
+        """The orders behind one seller's row: what they collected, what is owed.
+
+        Same filters as ``sellers`` (``_sale_filters``, ``_pending_filters``),
+        so the figures add up to the row by construction. Each sale carries its
+        invoice number, to be checked against the accounting system.
+        """
+        user = self._user_or_404(user_id)
+        paid = (
+            self.db.query(
+                OrderModel.id,
+                OrderModel.created_at,
+                OrderModel.queued_at,
+                OrderModel.payment_cash_amount,
+                OrderModel.payment_transfer_amount,
+                OrderModel.payment_credit_amount,
+                OrderModel.external_invoice_id,
+            )
+            .filter(*self._sale_filters(dr, branch_id))
+            .filter(OrderModel.created_by == user_id)
+            .order_by(OrderModel.queued_at.desc(), OrderModel.id.desc())
+            .all()
+        )
+        pending = (
+            self.db.query(OrderModel.id, OrderModel.confirmed_at, OrderModel.total)
+            .filter(*self._pending_filters(branch_id))
+            .filter(OrderModel.created_by == user_id)
+            .order_by(OrderModel.confirmed_at, OrderModel.id)
+            .all()
+        )
+        refs = self._order_refs([r.id for r in paid] + [r.id for r in pending])
+        _, branch_names = self._users([])
+
+        def ref(order_id):
+            code, client, bid = refs[order_id]
+            return {
+                "order_id": order_id,
+                "order_code": code,
+                "client_name": client,
+                "branch_name": branch_names.get(bid, ""),
+            }
+
+        acc = _Sales()
+        paid_rows = []
+        for r in paid:
+            cash, transfer, credit = (
+                r.payment_cash_amount or 0.0,
+                r.payment_transfer_amount or 0.0,
+                r.payment_credit_amount or 0.0,
+            )
+            acc.add(cash, transfer, credit)
+            paid_rows.append(
+                SellerOrder(
+                    **ref(r.id),
+                    created_at=r.created_at,
+                    paid_at=r.queued_at,
+                    day=local_date(r.queued_at),
+                    cash=round(cash, 2),
+                    transfer=round(transfer, 2),
+                    credit=round(credit, 2),
+                    total=round(cash + transfer + credit, 2),
+                    invoice=r.external_invoice_id,
+                )
+            )
+        return SellerOrdersReport(
+            range=RangeInfo(date_from=dr.date_from, date_to=dr.date_to),
+            user_id=user.id,
+            full_name=user.full_name or user.email,
+            figures=self._seller_figures(
+                acc, len(pending), sum(r.total or 0.0 for r in pending)
+            ),
+            paid=paid_rows,
+            pending=[
+                SellerPendingOrder(
+                    **ref(r.id),
+                    confirmed_at=r.confirmed_at,
+                    total=round(r.total or 0.0, 2),
+                )
+                for r in pending
+            ],
+        )
+
     @staticmethod
     def _seller_figures(acc: _Sales, pending_count, pending_amount) -> SellerFigures:
         return SellerFigures(
@@ -388,28 +577,29 @@ class PerformanceService:
     def operators(
         self, dr: DateRange, branch_id: Optional[int] = None
     ) -> OperatorReport:
-        """The cut per operator: pieces they marked, sheets they closed, hours."""
+        """The cut per operator: pieces they marked, sheets they closed, hours.
+
+        The work of a user deleted since (``cut_by`` NULL) stays, in one
+        ``Sin usuario`` row: the total must match the branch comparison.
+        """
         gap = idle_gap()
-        times: dict[int, list[datetime]] = defaultdict(list)
-        pieces: dict[int, int] = defaultdict(int)
-        orders: dict[int, set] = defaultdict(set)
+        times: dict[Optional[int], list[datetime]] = defaultdict(list)
+        pieces: dict[Optional[int], int] = defaultdict(int)
+        orders: dict[Optional[int], set] = defaultdict(set)
         for event in self.production.cut_events(dr.start, dr.end, branch_id):
-            if event.user_id is None:
-                continue
             times[event.user_id].append(event.at)
             if event.kind == "piece":
                 pieces[event.user_id] += 1
                 orders[event.user_id].add(event.order_id)
-        boards: dict[int, _Production] = defaultdict(_Production)
+        boards: dict[Optional[int], _Production] = defaultdict(_Production)
         for board in self.production.processed_boards(dr.start, dr.end, branch_id):
-            if board.cut_by is not None:
-                boards[board.cut_by].add_board(board)
+            boards[board.cut_by].add_board(board)
 
         users, branch_names = self._users(set(pieces) | set(boards))
         rows, total_seconds = [], 0.0
         for uid in set(pieces) | set(boards):
             user = users.get(uid)
-            if user is None:
+            if uid is not None and user is None:
                 continue
             effective = sum(d.effective_seconds for d in workdays(times[uid], gap))
             total_seconds += effective
@@ -420,8 +610,8 @@ class PerformanceService:
             rows.append(
                 OperatorRow(
                     user_id=uid,
-                    full_name=user.full_name or user.email,
-                    branch_name=branch_names.get(user.branch_id),
+                    full_name=(user.full_name or user.email) if user else _NO_USER,
+                    branch_name=branch_names.get(user.branch_id) if user else None,
                     pieces_cut=pieces[uid],
                     boards=round(acc.boards, 2),
                     cut_linear_m=round(acc.cut_linear_m, 2),
@@ -431,7 +621,9 @@ class PerformanceService:
                     orders_cut=len(orders[uid]),
                 )
             )
-        rows.sort(key=lambda r: (-r.boards, -r.pieces_cut, r.full_name))
+        rows.sort(
+            key=lambda r: (r.user_id is None, -r.boards, -r.pieces_cut, r.full_name)
+        )
 
         total_boards = sum(b.boards for b in boards.values())
         total_meters = sum(b.cut_linear_m for b in boards.values())
@@ -454,77 +646,158 @@ class PerformanceService:
             ),
         )
 
+    def operator_boards(
+        self, user_id: int, dr: DateRange, branch_id: Optional[int] = None
+    ) -> OperatorBoardsReport:
+        """Every sheet the operator touched in range, and why it counts or not.
+
+        The validation of their row: the credited sheets add up to its
+        ``boards`` and the in-range marks to its ``piecesCut``, by construction
+        (``ProductionService.operator_sheets``).
+        """
+        user = self._user_or_404(user_id)
+        _, branch_names = self._users([])
+        rows = []
+        for sheet in self.production.operator_sheets(
+            user_id, dr.start, dr.end, branch_id
+        ):
+            status = sheet_credit(
+                user_id, sheet.closed_by, sheet.done_at, dr.start, dr.end
+            )
+            rows.append(
+                OperatorBoard(
+                    board_id=sheet.board_id,
+                    order_id=sheet.order_id,
+                    order_code=sheet.order_code,
+                    client_name=sheet.client_name,
+                    branch_name=branch_names.get(sheet.branch_id, ""),
+                    sheet_number=sheet.sheet_number,
+                    material_name=sheet.material_name,
+                    width=sheet.width,
+                    height=sheet.height,
+                    kind=sheet_kind(sheet.half_board, sheet.source),
+                    weight=sheet.weight,
+                    day=local_date(sheet.done_at or sheet.my_last_cut_at),
+                    pieces_total=sheet.pieces_total,
+                    pieces_mine=sheet.pieces_mine,
+                    pieces_mine_in_range=sheet.pieces_mine_in_range,
+                    pieces_by_others=sheet.pieces_total
+                    - sheet.pieces_mine
+                    - sheet.pieces_pending,
+                    pieces_pending=sheet.pieces_pending,
+                    other_cutters=list(sheet.other_cutters),
+                    my_last_cut_at=sheet.my_last_cut_at,
+                    done_at=sheet.done_at,
+                    closed_by=sheet.closed_by_label,
+                    status=status,
+                )
+            )
+        # Newest first, like the production tab.
+        rows.sort(
+            key=lambda r: (r.day, r.done_at or r.my_last_cut_at, r.board_id),
+            reverse=True,
+        )
+        credited = [r for r in rows if r.status is SheetCredit.credited]
+        return OperatorBoardsReport(
+            range=RangeInfo(date_from=dr.date_from, date_to=dr.date_to),
+            user_id=user.id,
+            full_name=user.full_name or user.email,
+            boards=round(sum(r.weight for r in credited), 2),
+            credited_count=len(credited),
+            pieces_cut=sum(r.pieces_mine_in_range for r in rows),
+            sheets=rows,
+        )
+
     # ------------------------------------------------------------------ banders
     def banders(self, dr: DateRange, branch_id: Optional[int] = None) -> BanderReport:
         """Banding and additional work closed in range, per who closed it.
 
         Metres are the net tape of each banded order (``_closed_activities``).
+        Time is only the clocked activities' (``_BanderAcc``).
         """
-        acc: dict[int, dict] = defaultdict(
-            lambda: {
-                "banded": 0,
-                "banding_s": 0.0,
-                "banding_m": 0.0,
-                "additional": 0,
-                "additional_s": 0.0,
-            }
-        )
+        acc: dict[Optional[int], _BanderAcc] = defaultdict(_BanderAcc)
+        total = _BanderAcc()
         for activity in self._closed_activities(dr, branch_id):
-            if activity.finished_by is None:
-                continue
-            seconds = (
-                (activity.finished_at - activity.started_at).total_seconds()
-                if activity.started_at
-                else 0.0
-            )
-            a = acc[activity.finished_by]
-            if activity.kind == ActivityType.banding.value:
-                a["banded"] += 1
-                a["banding_s"] += seconds
-                a["banding_m"] += activity.banded_m
-            else:
-                a["additional"] += 1
-                a["additional_s"] += seconds
+            acc[activity.finished_by].add(activity)
+            total.add(activity)
 
         users, branch_names = self._users(acc.keys())
         rows = []
         for uid, a in acc.items():
             user = users.get(uid)
-            if user is None:
+            if uid is not None and user is None:
                 continue
             rows.append(
                 BanderRow(
                     user_id=uid,
-                    full_name=user.full_name or user.email,
-                    branch_name=branch_names.get(user.branch_id),
-                    **self._bander_figures(a).model_dump(),
+                    full_name=(user.full_name or user.email) if user else _NO_USER,
+                    branch_name=branch_names.get(user.branch_id) if user else None,
+                    **a.figures().model_dump(),
                 )
             )
-        rows.sort(key=lambda r: (-(r.orders_banded + r.orders_additional), r.full_name))
-        total = {
-            key: sum(a[key] for a in acc.values())
-            for key in (
-                "banded",
-                "banding_s",
-                "banding_m",
-                "additional",
-                "additional_s",
+        rows.sort(
+            key=lambda r: (
+                r.user_id is None,
+                -(r.orders_banded + r.orders_additional),
+                r.full_name,
             )
-        }
+        )
         return BanderReport(
             range=RangeInfo(date_from=dr.date_from, date_to=dr.date_to),
             banders=rows,
-            total=self._bander_figures(total),
+            total=total.figures(),
+        )
+
+    def bander_orders(
+        self, user_id: int, dr: DateRange, branch_id: Optional[int] = None
+    ) -> BanderOrdersReport:
+        """The work behind one bander's row: each banding and additional work
+        they closed in range, with its time -- or why it has none.
+
+        The same closed activities as ``banders``, so the figures add up to the
+        row by construction.
+        """
+        user = self._user_or_404(user_id)
+        closed = [
+            a
+            for a in self._closed_activities(dr, branch_id)
+            if a.finished_by == user_id
+        ]
+        acc = _BanderAcc()
+        for activity in closed:
+            acc.add(activity)
+        refs = self._order_refs({a.order_id for a in closed})
+        _, branch_names = self._users([])
+        rows = []
+        for a in sorted(
+            closed, key=lambda a: (a.finished_at, a.order_id), reverse=True
+        ):
+            code, client, bid = refs[a.order_id]
+            seconds = a.clocked_seconds
+            rows.append(
+                BanderOrder(
+                    order_id=a.order_id,
+                    order_code=code,
+                    client_name=client,
+                    branch_name=branch_names.get(bid, ""),
+                    kind=a.kind,
+                    started_at=a.started_at,
+                    finished_at=a.finished_at,
+                    day=local_date(a.finished_at),
+                    hours=None if seconds is None else _hours(seconds),
+                    banded_linear_m=round(a.banded_m, 2),
+                )
+            )
+        return BanderOrdersReport(
+            range=RangeInfo(date_from=dr.date_from, date_to=dr.date_to),
+            user_id=user.id,
+            full_name=user.full_name or user.email,
+            figures=acc.figures(),
+            orders=rows,
         )
 
     def _closed_activities(
-        self,
-        dr: DateRange,
-        branch_id: Optional[int] = None,
-        kinds: tuple[ActivityType, ...] = (
-            ActivityType.banding,
-            ActivityType.additional,
-        ),
+        self, dr: DateRange, branch_id: Optional[int] = None
     ) -> list[_ClosedActivity]:
         """Banding and additional work closed in range, dated by the closing.
 
@@ -545,7 +818,9 @@ class PerformanceService:
             )
             .join(OrderModel, OrderActivityModel.order_id == OrderModel.id)
             .filter(
-                OrderActivityModel.type.in_([k.value for k in kinds]),
+                OrderActivityModel.type.in_(
+                    [ActivityType.banding.value, ActivityType.additional.value]
+                ),
                 OrderActivityModel.finished_at >= dr.start,
                 OrderActivityModel.finished_at < dr.end,
             )
@@ -583,48 +858,66 @@ class PerformanceService:
             for r in rows
         ]
 
-    @staticmethod
-    def _bander_figures(a: dict) -> BanderFigures:
-        return BanderFigures(
-            orders_banded=a["banded"],
-            banding_hours=_hours(a["banding_s"]),
-            banded_linear_m=round(a["banding_m"], 2),
-            # Over the activity's start-to-close hours, stops included: the
-            # banding marks no pieces, so this rate reads lower than the cut's.
-            banding_meters_per_hour=round(
-                safe_div(a["banding_m"], a["banding_s"] / 3600.0), 2
-            ),
-            average_banding_hours=_hours(safe_div(a["banding_s"], a["banded"])),
-            orders_additional=a["additional"],
-            additional_hours=_hours(a["additional_s"]),
-            average_additional_hours=_hours(
-                safe_div(a["additional_s"], a["additional"])
-            ),
-        )
-
     # ------------------------------------------------------------------ helpers
-    def _paid_orders(self, dr: DateRange, branch_id: Optional[int] = None) -> list:
-        """``(branch_id, created_by, cash, transfer, credit, queued_at)`` of the sales.
+    @staticmethod
+    def _sale_filters(dr: DateRange, branch_id: Optional[int] = None) -> list:
+        """The sales of the range, for the rows and their detail alike.
 
         A sale is placed by its payment: the amounts are frozen on entering the
         queue, which is gated on registering them. Cancelled orders are out --
         their amounts survive as a record, but nobody keeps that money.
         """
-        query = self.db.query(
-            OrderModel.branch_id,
-            OrderModel.created_by,
-            OrderModel.payment_cash_amount,
-            OrderModel.payment_transfer_amount,
-            OrderModel.payment_credit_amount,
-            OrderModel.queued_at,
-        ).filter(
+        filters = [
             OrderModel.queued_at >= dr.start,
             OrderModel.queued_at < dr.end,
             OrderModel.status != OrderStatus.cancelled.value,
-        )
+        ]
         if branch_id is not None:
-            query = query.filter(OrderModel.branch_id == branch_id)
-        return query.all()
+            filters.append(OrderModel.branch_id == branch_id)
+        return filters
+
+    @staticmethod
+    def _pending_filters(branch_id: Optional[int] = None) -> list:
+        """What is still to collect TODAY: confirmed by the client, not yet paid."""
+        filters = [OrderModel.status == OrderStatus.confirmed.value]
+        if branch_id is not None:
+            filters.append(OrderModel.branch_id == branch_id)
+        return filters
+
+    def _paid_orders(self, dr: DateRange, branch_id: Optional[int] = None) -> list:
+        """``(branch_id, created_by, cash, transfer, credit, queued_at)`` of the sales."""
+        return (
+            self.db.query(
+                OrderModel.branch_id,
+                OrderModel.created_by,
+                OrderModel.payment_cash_amount,
+                OrderModel.payment_transfer_amount,
+                OrderModel.payment_credit_amount,
+                OrderModel.queued_at,
+            )
+            .filter(*self._sale_filters(dr, branch_id))
+            .all()
+        )
+
+    def _order_refs(self, order_ids: Iterable[int]) -> dict[int, tuple]:
+        """``order_id -> (code, client name, branch_id)``, for a detail's rows."""
+        ids = list(order_ids)
+        if not ids:
+            return {}
+        return {
+            order_id: (code, customer_name(client), branch_id)
+            for order_id, code, branch_id, client in self.db.query(
+                OrderModel.id, OrderModel.code, OrderModel.branch_id, ClientModel
+            )
+            .join(ClientModel, OrderModel.client_id == ClientModel.id)
+            .filter(OrderModel.id.in_(ids))
+        }
+
+    def _user_or_404(self, user_id: int) -> UserModel:
+        user = self.db.get(UserModel, user_id)
+        if user is None:
+            raise EntityNotFoundError("User", user_id)
+        return user
 
     def _finished_orders(
         self, dr: DateRange, branch_id: Optional[int] = None
@@ -663,15 +956,15 @@ class PerformanceService:
             acc[bid].days = workdays(branch_times, gap)
         for board in self.production.processed_boards(dr.start, dr.end):
             acc[board.branch_id].add_board(board)
-        for banding in self._closed_activities(dr, kinds=(ActivityType.banding,)):
-            acc[banding.branch_id].banded_linear_m += banding.banded_m
+        for activity in self._closed_activities(dr):
+            acc[activity.branch_id].add_closed(activity)
         return acc
 
     def _efficiency_and_area(self, order_ids: list[int]) -> tuple[float, float]:
         """Area-weighted efficiency (0..100) and area (m²) of the board lines.
 
-        Same weighting as ``AnalyticsService._efficiency_and_area``; edge-banding
-        lines carry no area and stay out.
+        Weighted by area, so a 1-board order does not weigh what a 50-board one
+        does; edge-banding lines carry no area and stay out.
         """
         rows = (
             self.db.query(OrderLineModel.avg_efficiency, OrderLineModel.total_area_m2)

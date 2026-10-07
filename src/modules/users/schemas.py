@@ -1,7 +1,7 @@
 from datetime import datetime
-from typing import Any, List, Optional
+from typing import List, Optional
 
-from pydantic import EmailStr, Field, model_validator
+from pydantic import EmailStr, Field
 
 from src.modules.users.enums import UserRole
 from src.shared.schemas import CamelModel
@@ -19,31 +19,11 @@ class UserBase(CamelModel):
     )
 
 
-class _LegacyRoleInput(CamelModel):
-    """Accepts the single ``role`` of the previous web as ``roles=[role]``.
-
-    Only while both contracts are live: the api ships first, and a web that
-    still sends ``role`` must keep creating and editing users. Goes away with
-    migration 016, together with ``UserResponse.role``.
-    """
-
-    @model_validator(mode="before")
-    @classmethod
-    def _role_to_roles(cls, data: Any) -> Any:
-        # ``roles`` wins when both come; a null ``role`` was ignored and still is.
-        if isinstance(data, dict) and "role" in data:
-            data = dict(data)
-            role = data.pop("role")
-            if "roles" not in data and role is not None:
-                data["roles"] = [role]
-        return data
-
-
-class UserCreate(_LegacyRoleInput, UserBase):
+class UserCreate(UserBase):
     """User creation. The password travels in plain text only here; it's hashed on persist."""
 
     roles: List[UserRole] = Field(
-        default_factory=lambda: [UserRole.OPERATOR],
+        ...,
         min_length=1,
         description=(
             "Roles (the permissions are their union). Only operador and "
@@ -53,7 +33,7 @@ class UserCreate(_LegacyRoleInput, UserBase):
     password: str = Field(..., min_length=8, max_length=128, description="Password")
 
 
-class UserUpdate(_LegacyRoleInput):
+class UserUpdate(CamelModel):
     """Partial update. Sending ``password`` rehashes it; ``isActive`` deactivates."""
 
     email: Optional[EmailStr] = Field(None, description="Login email (unique)")
@@ -80,13 +60,6 @@ class UserResponse(UserBase):
 
     id: int = Field(..., description="User ID")
     roles: List[UserRole] = Field(..., description="Roles, in canonical order")
-    role: UserRole = Field(
-        ...,
-        description=(
-            "DEPRECATED: the primary role (first of ``roles``). Kept for the "
-            "previous web; removed with migration 016."
-        ),
-    )
     is_active: bool = Field(..., description="Active/inactive")
     created_at: datetime = Field(..., description="Creation date")
 

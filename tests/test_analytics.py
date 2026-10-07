@@ -1,4 +1,5 @@
-"""Tests for the analytics module: summary, timeseries, status breakdown, and operations.
+"""Tests for the analytics reports outside ``performance.py``: the date range,
+bottlenecks and attendance.
 
 Seeding goes straight through ``db_session`` to pin statuses, ``created_at``, and history
 precisely (the state machine doesn't let every case be reached cleanly).
@@ -10,10 +11,7 @@ from src.modules.clients.model import ClientModel
 from src.modules.orders.model import (
     ActivityType,
     OrderActivityModel,
-    OrderBoardModel,
-    OrderLineModel,
     OrderModel,
-    OrderPlacedPieceModel,
     OrderStatusHistoryModel,
 )
 from src.modules.users.login_event_model import UserLoginEventModel
@@ -21,29 +19,6 @@ from src.modules.users.model import UserModel
 
 _BASE = datetime(2026, 6, 15, 12, 0, 0)
 _RANGE = {"from": "2026-06-01", "to": "2026-06-30"}
-_CUT_AT = datetime(2026, 6, 15, 10, 0, 0)
-
-
-def _board_line(efficiency, area, *, qty=2, price=45.5):
-    return OrderLineModel(
-        product_id=None,
-        quantity=qty,
-        unit_price_snapshot=price,
-        line_total=qty * price,
-        avg_efficiency=efficiency,
-        total_area_m2=area,
-    )
-
-
-def _edge_line(linear_m, *, price=1.5):
-    """Edge-banding line: no area/efficiency (must not contaminate the weighting)."""
-    return OrderLineModel(
-        product_id=None,
-        quantity=int(linear_m),
-        unit_price_snapshot=price,
-        line_total=linear_m * price,
-        linear_m=linear_m,
-    )
 
 
 def _seed_activity(
@@ -79,7 +54,6 @@ def _seed_order(
     total=100.0,
     boards=2,
     created_at=_BASE,
-    lines=None,
     history=None,
     optimization_hash="h",
     branch_id=1,
@@ -97,8 +71,6 @@ def _seed_order(
         created_at=created_at,
         confirmed_at=created_at,
     )
-    if lines is not None:
-        order.lines = lines
     if history is not None:
         order.history = history
     db.add(order)
@@ -140,133 +112,26 @@ def _seed_user(db, *, role="operador", full_name="User", branch_id=1, email=None
     return user
 
 
-def _seed_board(db, order_id):
-    board = OrderBoardModel(
-        order_id=order_id,
-        sheet_number=1,
-        material_key="m",
-        width=2440,
-        height=1220,
-        thickness=15,
-    )
-    db.add(board)
-    db.commit()
-    db.refresh(board)
-    return board
-
-
-def _seed_placed_piece(
-    db,
-    *,
-    order_id,
-    board_id,
-    cut_by,
-    cut_at=_CUT_AT,
-    width=600,
-    height=400,
-    piece_id="p#1",
-):
-    db.add(
-        OrderPlacedPieceModel(
-            order_id=order_id,
-            board_id=board_id,
-            piece_id=piece_id,
-            label="p",
-            x=0,
-            y=0,
-            width=width,
-            height=height,
-            original_width=width,
-            original_height=height,
-            rotated=False,
-            cut_at=cut_at,
-            cut_by=cut_by,
-            cut_by_label="Op",
-        )
-    )
-    db.commit()
-
-
 def _seed_login(db, user_id, created_at):
     db.add(UserLoginEventModel(user_id=user_id, created_at=created_at))
     db.commit()
 
 
-# --------------------------------------------------------------------- summary
-def test_summary_empty_range_returns_zeros_not_nulls(client):
-    data = client.get("/api/v1/analytics/summary", params=_RANGE).json()["data"]
-
-    for key in (
-        "totalBoardsConsumed",
-        "averageEfficiency",
-        "totalAreaCutM2",
-        "wasteEstimateM2",
-        "pendingOrdersCount",
-        "cancellationRate",
-        "orderCount",
-        "realizedRevenue",
-        "averageTicket",
-        "activeClientsCount",
-    ):
-        assert data[key] == 0, key
-        assert data[key] is not None
-    assert data["range"]["dateFrom"] == "2026-06-01"
-    assert data["range"]["dateTo"] == "2026-06-30"
-
-
-def test_summary_revenue_and_rates_isolated_by_status(client, db_session):
-    _seed_clients(db_session, 2)
-    _seed_order(db_session, client_id=1, status="finished", total=100.0)
-    _seed_order(db_session, client_id=2, status="confirmed", total=200.0)
-    _seed_order(db_session, client_id=1, status="cancelled", total=50.0)
-
-    data = client.get("/api/v1/analytics/summary", params=_RANGE).json()["data"]
-
-    assert data["orderCount"] == 3
-    assert data["realizedRevenue"] == 100.0  # finished only
-    assert data["averageTicket"] == 100.0  # 100 / 1 finished order
-    assert data["pendingOrdersCount"] == 1  # confirmed
-    assert data["cancellationRate"] == round(1 / 3, 4)  # 1 / 3
-    assert data["activeClientsCount"] == 2  # clients 1 and 2 are distinct
-
-
-def test_summary_efficiency_is_area_weighted_and_ignores_edge_banding(
-    client, db_session
-):
-    _seed_clients(db_session)
-    _seed_order(
-        db_session,
-        status="finished",
-        boards=2,
-        lines=[_board_line(90.0, 10.0), _edge_line(5.0)],
-    )
-    _seed_order(
-        db_session, status="finished", boards=5, lines=[_board_line(70.0, 30.0)]
-    )
-
-    data = client.get("/api/v1/analytics/summary", params=_RANGE).json()["data"]
-
-    # Weighted: (90*10 + 70*30) / (10+30) = 3000/40 = 75.0
-    assert data["averageEfficiency"] == 75.0
-    assert data["totalAreaCutM2"] == 40.0
-    assert data["wasteEstimateM2"] == 10.0  # 40 * (1 - 0.75)
-    assert data["totalBoardsConsumed"] == 7  # 2 + 5
-
-
-def test_summary_uses_default_range_when_omitted(client):
-    data = client.get("/api/v1/analytics/summary").json()["data"]
+# ------------------------------------------------------------------ date range
+def test_default_range_when_omitted(client):
+    data = client.get("/api/v1/analytics/branch-comparison").json()["data"]
     assert data["range"]["dateFrom"] < data["range"]["dateTo"]
 
 
 def test_invalid_range_returns_422_with_envelope(client):
     resp = client.get(
-        "/api/v1/analytics/summary", params={"from": "2026-06-30", "to": "2026-06-01"}
+        "/api/v1/analytics/branch-comparison",
+        params={"from": "2026-06-30", "to": "2026-06-01"},
     )
     assert resp.status_code == 422
     assert resp.json()["errors"][0]["field"] == "from"
 
 
-# ------------------------------------------------------------- date filtering
 def test_date_filter_is_half_open_on_the_business_days(client, db_session):
     """``from``/``to`` are Ecuador's days (UTC-5): each starts at 05:00 UTC.
 
@@ -282,140 +147,10 @@ def test_date_filter_is_half_open_on_the_business_days(client, db_session):
     _seed_order(db_session, total=999.0, created_at=datetime(2026, 6, 11, 5, 0, 0))
 
     data = client.get(
-        "/api/v1/analytics/summary", params={"from": "2026-06-01", "to": "2026-06-10"}
+        "/api/v1/analytics/branch-comparison",
+        params={"from": "2026-06-01", "to": "2026-06-10"},
     ).json()["data"]
-    assert data["orderCount"] == 2
-    assert data["realizedRevenue"] == 150.0
-
-
-# ------------------------------------------------------------------ timeseries
-def test_timeseries_daily_dense_axis_with_zero_gaps(client, db_session):
-    _seed_clients(db_session)
-    _seed_order(
-        db_session, total=100.0, boards=2, created_at=datetime(2026, 6, 1, 9, 0)
-    )
-    _seed_order(db_session, total=50.0, boards=1, created_at=datetime(2026, 6, 3, 9, 0))
-
-    data = client.get(
-        "/api/v1/analytics/timeseries",
-        params={"from": "2026-06-01", "to": "2026-06-03", "granularity": "day"},
-    ).json()["data"]
-
-    assert data["granularity"] == "day"
-    assert data["buckets"] == ["2026-06-01", "2026-06-02", "2026-06-03"]
-    assert data["series"]["revenue"] == [100.0, 0.0, 50.0]
-    assert data["series"]["orderCount"] == [1, 0, 1]
-    assert data["series"]["boardsConsumed"] == [2, 0, 1]
-
-
-def test_timeseries_monthly_buckets(client, db_session):
-    _seed_clients(db_session)
-    _seed_order(db_session, total=100.0, created_at=datetime(2026, 6, 20, 9, 0))
-
-    data = client.get(
-        "/api/v1/analytics/timeseries",
-        params={"from": "2026-05-15", "to": "2026-07-10", "granularity": "month"},
-    ).json()["data"]
-
-    assert data["buckets"] == ["2026-05-01", "2026-06-01", "2026-07-01"]
-    assert data["series"]["revenue"] == [0.0, 100.0, 0.0]
-
-
-def test_timeseries_monthly_crosses_year_boundary(client, db_session):
-    _seed_clients(db_session)
-    _seed_order(db_session, total=100.0, created_at=datetime(2026, 1, 10, 9, 0))
-
-    data = client.get(
-        "/api/v1/analytics/timeseries",
-        params={"from": "2025-12-01", "to": "2026-01-31", "granularity": "month"},
-    ).json()["data"]
-
-    assert data["buckets"] == ["2025-12-01", "2026-01-01"]
-    assert data["series"]["revenue"] == [0.0, 100.0]
-
-
-def test_timeseries_weekly_buckets(client, db_session):
-    _seed_clients(db_session)
-    # 2026-06-01 is a Monday; ISO weeks start on 06-01 and 06-08.
-    _seed_order(db_session, total=100.0, created_at=datetime(2026, 6, 3, 9, 0))
-    _seed_order(db_session, total=50.0, created_at=datetime(2026, 6, 10, 9, 0))
-
-    data = client.get(
-        "/api/v1/analytics/timeseries",
-        params={"from": "2026-06-01", "to": "2026-06-14", "granularity": "week"},
-    ).json()["data"]
-
-    assert data["buckets"] == ["2026-06-01", "2026-06-08"]
-    assert data["series"]["revenue"] == [100.0, 50.0]
-
-
-def test_timeseries_new_clients_counts_first_order_only(client, db_session):
-    _seed_clients(db_session, 3)
-    # Client 1: first order on 06-01, second on 06-02 (doesn't recount).
-    _seed_order(db_session, client_id=1, created_at=datetime(2026, 6, 1, 9, 0))
-    _seed_order(db_session, client_id=1, created_at=datetime(2026, 6, 2, 9, 0))
-    # Client 2: new on 06-02.
-    _seed_order(db_session, client_id=2, created_at=datetime(2026, 6, 2, 9, 0))
-    # Client 3: their first order was before the range, so not "new" here.
-    _seed_order(db_session, client_id=3, created_at=datetime(2026, 5, 1, 9, 0))
-    _seed_order(db_session, client_id=3, created_at=datetime(2026, 6, 2, 9, 0))
-
-    data = client.get(
-        "/api/v1/analytics/timeseries",
-        params={"from": "2026-06-01", "to": "2026-06-03", "granularity": "day"},
-    ).json()["data"]
-
-    assert data["series"]["newClients"] == [1, 1, 0]
-
-
-# ------------------------------------------------------------- breakdown/status
-def test_breakdown_status_densifies_all_states(client, db_session):
-    _seed_clients(db_session)
-    _seed_order(db_session, status="finished", total=100.0)
-    _seed_order(db_session, status="finished", total=200.0)
-    _seed_order(db_session, status="cancelled", total=50.0)
-
-    data = client.get("/api/v1/analytics/breakdown/status", params=_RANGE).json()[
-        "data"
-    ]
-
-    assert data["dimension"] == "status"
-    assert len(data["items"]) == 6  # every LIVE status (the two legacy ones are out)
-    by_key = {it["key"]: it for it in data["items"]}
-    assert by_key["finished"]["orderCount"] == 2
-    assert by_key["finished"]["revenue"] == 300.0
-    assert by_key["finished"]["label"] == "Terminada"
-    assert by_key["cancelled"]["orderCount"] == 1
-    assert by_key["cancelled"]["revenue"] == 50.0
-    assert by_key["confirmed"]["orderCount"] == 0  # densified to zero
-
-
-def test_breakdown_status_empty_range(client):
-    data = client.get("/api/v1/analytics/breakdown/status", params=_RANGE).json()[
-        "data"
-    ]
-    assert len(data["items"]) == 6
-    assert all(it["orderCount"] == 0 and it["revenue"] == 0 for it in data["items"])
-
-
-# ------------------------------------------------------------------ operations
-def test_operations_efficiency_mirrors_summary(client, db_session):
-    _seed_clients(db_session)
-    _seed_order(db_session, status="finished", lines=[_board_line(90.0, 10.0)])
-    _seed_order(db_session, status="finished", lines=[_board_line(70.0, 30.0)])
-
-    data = client.get("/api/v1/analytics/operations", params=_RANGE).json()["data"]
-    assert data["averageEfficiency"] == 75.0
-    assert data["totalAreaCutM2"] == 40.0
-    assert data["wasteEstimateM2"] == 10.0
-
-
-def test_operations_empty_range(client):
-    data = client.get("/api/v1/analytics/operations", params=_RANGE).json()["data"]
-    assert data["averageEfficiency"] == 0
-    assert data["totalAreaCutM2"] == 0
-    assert data["wasteEstimateM2"] == 0
-    assert "lifecycle" not in data  # lifecycle lives in /bottlenecks
+    assert data["total"]["orders"]["entered"] == 2
 
 
 # ------------------------------------------------------------------ bottlenecks
@@ -520,99 +255,6 @@ def test_bottlenecks_series_places_duration_in_bucket(client, db_session):
     assert cutting["avgHours"] == [0.0, 3.0, 0.0]
 
 
-# ----------------------------------------------------------- user productivity
-def test_user_productivity_operator_cutting(client, db_session):
-    _seed_clients(db_session)
-    op = _seed_user(db_session, role="operador", full_name="Op Uno")
-    order = _seed_order(db_session, status="in_process")
-    order.assigned_to_id = op.id
-    # The cut's hours and its boards are credited to whoever FINISHED it.
-    db_session.add(
-        _seed_activity(
-            order.id,
-            ActivityType.cutting,
-            started_at=datetime(2026, 6, 15, 8, 0),
-            finished_at=datetime(2026, 6, 15, 10, 0),
-            finished_by=op.id,
-        )
-    )
-    db_session.commit()
-    board = _seed_board(db_session, order.id)
-    _seed_placed_piece(db_session, order_id=order.id, board_id=board.id, cut_by=op.id)
-    _seed_placed_piece(
-        db_session,
-        order_id=order.id,
-        board_id=board.id,
-        cut_by=op.id,
-        piece_id="p#2",
-    )
-
-    data = client.get("/api/v1/analytics/productivity", params=_RANGE).json()["data"]
-    row = next(u for u in data["users"] if u["userId"] == op.id)
-    assert row["role"] == "operador"
-    assert row["piecesCut"] == 2
-    assert row["areaCutM2"] == 0.48  # 2 pieces of 600x400mm = 0.24 m² each
-    assert row["ordersCut"] == 1
-    assert row["cuttingHours"] == 2.0
-    assert row["piecesPerHour"] == 1.0  # 2 pieces / 2h
-    assert row["boardsCut"] == 2  # total_boards_used from _seed_order default
-
-
-def test_user_productivity_seller_and_bander(client, db_session):
-    _seed_clients(db_session)
-    seller = _seed_user(db_session, role="vendedor", full_name="Vende")
-    bander = _seed_user(db_session, role="canteador", full_name="Canta")
-    order = _seed_order(db_session, status="finished", total=250.0)
-    order.created_by = seller.id
-    db_session.add(
-        _seed_activity(
-            order.id,
-            ActivityType.banding,
-            started_at=datetime(2026, 6, 15, 9, 0),
-            finished_at=datetime(2026, 6, 15, 10, 0),  # 1h
-            finished_by=bander.id,
-        )
-    )
-    db_session.add(
-        _seed_activity(
-            order.id,
-            ActivityType.additional,
-            started_at=datetime(2026, 6, 15, 10, 0),
-            finished_at=datetime(2026, 6, 15, 10, 30),  # 30 min
-            finished_by=bander.id,
-        )
-    )
-    db_session.commit()
-
-    data = client.get("/api/v1/analytics/productivity", params=_RANGE).json()["data"]
-    by_id = {u["userId"]: u for u in data["users"]}
-    assert by_id[seller.id]["ordersCreated"] == 1
-    assert by_id[seller.id]["revenueGenerated"] == 250.0
-    assert by_id[bander.id]["ordersBanded"] == 1
-    assert by_id[bander.id]["bandingHours"] == 1.0
-    # The additional work is the canteador's too, and counted apart.
-    assert by_id[bander.id]["ordersAdditional"] == 1
-    assert by_id[bander.id]["additionalHours"] == 0.5
-
-
-def test_user_productivity_filters_by_role(client, db_session):
-    _seed_clients(db_session)
-    op = _seed_user(db_session, role="operador", full_name="Op")
-    seller = _seed_user(db_session, role="vendedor", full_name="Vende")
-    o1 = _seed_order(db_session, status="finished")
-    o1.created_by = seller.id
-    o2 = _seed_order(db_session, status="cut")
-    o2.assigned_to_id = op.id
-    db_session.commit()
-    board = _seed_board(db_session, o2.id)
-    _seed_placed_piece(db_session, order_id=o2.id, board_id=board.id, cut_by=op.id)
-
-    data = client.get(
-        "/api/v1/analytics/productivity", params={**_RANGE, "role": "operador"}
-    ).json()["data"]
-    assert [u["userId"] for u in data["users"]] == [op.id]
-
-
 # --------------------------------------------------------------------- attendance
 def test_attendance_first_login_per_day(client, db_session):
     op = _seed_user(db_session, role="operador", full_name="Op Uno")
@@ -663,7 +305,6 @@ def test_role_filter_matches_a_user_holding_that_role(client, db_session):
     rows = client.get("/api/v1/analytics/attendance", params=_RANGE).json()["data"]
     row = next(u for u in rows["users"] if u["userId"] == apprentice.id)
     assert row["roles"] == ["operador", "canteador"]
-    assert row["role"] == "operador"
 
 
 def test_attendance_empty_range(client):
@@ -673,3 +314,32 @@ def test_attendance_empty_range(client):
         params={"from": "2020-01-01", "to": "2020-01-31"},
     ).json()["data"]
     assert data["users"] == []
+
+
+def test_bottlenecks_skip_an_activity_registered_after_the_work(client, db_session):
+    """Started and closed seconds apart: the tap, not the job, so no sample."""
+    _seed_clients(db_session)
+    order = _seed_order(db_session, status="in_process")
+    db_session.add(
+        _seed_activity(
+            order.id,
+            ActivityType.banding,
+            started_at=datetime(2026, 6, 15, 10, 0, 0),
+            finished_at=datetime(2026, 6, 15, 10, 0, 8),
+        )
+    )
+    other = _seed_order(db_session, status="in_process", optimization_hash="h2")
+    db_session.add(
+        _seed_activity(
+            other.id,
+            ActivityType.banding,
+            started_at=datetime(2026, 6, 15, 10, 0),
+            finished_at=datetime(2026, 6, 15, 12, 0),
+        )
+    )
+    db_session.commit()
+
+    data = client.get("/api/v1/analytics/bottlenecks", params=_RANGE).json()["data"]
+    banding = next(s for s in data["stages"] if s["key"] == "banding")
+    assert banding["sampleCount"] == 1
+    assert banding["medianHours"] == 2.0

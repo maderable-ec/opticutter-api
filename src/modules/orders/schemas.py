@@ -15,7 +15,7 @@ from src.modules.optimizations.schemas import (
     validate_material_graph,
 )
 from src.modules.orders.model import ActivityStatus, ActivityType, OrderStatus
-from src.modules.orders.production import LiveState
+from src.modules.orders.production import ActivityLiveState, LiveState
 from src.shared.schemas import CamelModel
 
 
@@ -652,8 +652,40 @@ class WorkshopQueueItem(CamelModel):
     )
 
 
+class ActivityLiveStatus(CamelModel):
+    """What one branch's banding (or additional work) is doing right now.
+
+    Read off the activities as registered: the bander marks no pieces, so an
+    activity started and not closed IS being worked, and nothing tells a
+    forgotten one apart -- ``since`` says how long it has been.
+    """
+
+    state: ActivityLiveState = Field(
+        ...,
+        description="'working': an activity in progress. 'waiting': none in "
+        "progress, some ready (a piece of its set already cut). 'idle': neither",
+    )
+    since: Optional[datetime] = Field(
+        default=None,
+        description="Working: the start of the oldest in progress. Waiting: "
+        "when the oldest ready one became ready. Idle: the last close "
+        "(null: never closed)",
+    )
+    order_codes: List[str] = Field(
+        default_factory=list,
+        description="Codes of the orders being worked, oldest start first",
+    )
+    waiting_count: int = Field(
+        0, description="Activities ready and not started (orders waiting for it)"
+    )
+    last_finished_at: Optional[datetime] = Field(
+        default=None, description="The branch's latest close of this activity"
+    )
+
+
 class BranchProductionStatus(CamelModel):
-    """What one branch's saw is doing right now (only the cut is measured)."""
+    """What one branch's shop floor is doing right now: the saw, the banding
+    and the additional work."""
 
     branch_id: int
     branch_name: str
@@ -676,6 +708,10 @@ class BranchProductionStatus(CamelModel):
     cutting_order_codes: List[str] = Field(
         default_factory=list,
         description="Codes of the orders whose cut is in progress, oldest first",
+    )
+    banding: ActivityLiveStatus = Field(..., description="The banding line")
+    additional: ActivityLiveStatus = Field(
+        ..., description="The additional work (abisagrado, ranurado, ...)"
     )
 
 
