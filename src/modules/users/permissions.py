@@ -18,6 +18,7 @@ route is protected with ``require_role(*RESOURCE_ROLES[key])`` (see ``dependenci
 | optimizer (optimizations/drafts) | yes        | yes      | no       | no        |
 | preorders                     | yes           | yes      | no       | no        |
 | orders:write (create/quote)   | yes           | yes      | no       | no        |
+| orders:payments-void          | yes           | no       | no       | no        |
 | orders:read                   | yes           | yes      | yes      | no        |
 | orders:transition (status change) | yes       | yes      | yes*     | yes*      |
 | orders:workshop (shop board)  | yes           | no       | yes      | yes       |
@@ -76,6 +77,9 @@ RESOURCE_ROLES: dict[str, tuple[UserRole, ...]] = {
     "optimizer": (_ADMIN, _SELLER),
     "preorders": (_ADMIN, _SELLER),
     "orders:write": (_ADMIN, _SELLER),
+    # Registering a payment on an order is ``orders:write`` (the seller collects).
+    # Voiding one takes money back off the books, so it is the admin's alone.
+    "orders:payments-void": (_ADMIN,),
     "orders:read": (_ADMIN, _SELLER, _OPERATOR),
     "orders:transition": (_ADMIN, _SELLER, _OPERATOR, _BANDER),
     # Shared shop-floor board (self-sufficient card list). The bander reaches it

@@ -10,10 +10,12 @@ from src.modules.settings.schemas import (
     PreOrderSettingsUpdate,
     StockSettingsUpdate,
     TaxSettingsUpdate,
+    WorkScheduleSettings,
 )
 from src.shared.config import config
 from src.shared.context import get_current_user_id
 from src.shared.database import get_db
+from src.shared.work_schedule import WorkSchedule
 
 # Company data is exposed in the API as ``name/tagline/...`` but stored with a
 # ``company_`` prefix on the singleton row (which also carries the cutting
@@ -168,6 +170,24 @@ class SettingsService:
         self.db.commit()
         self.db.refresh(settings)
         return settings
+
+    def get_work_schedule(self) -> WorkSchedule:
+        """The shop's working hours, the runtime source of truth.
+
+        Read by every hour the statistics report (``orders/production.py``). A
+        row written before the column existed, or holding something unreadable,
+        comes back as the default schedule: this runs on every report and must
+        coerce, never raise.
+        """
+        return WorkSchedule.from_dict(self.get_or_init().work_schedule)
+
+    def update_work_schedule(self, data: WorkScheduleSettings) -> WorkSchedule:
+        """Replaces the working hours whole (validated by the schema)."""
+        settings = self.get_or_init()
+        settings.work_schedule = data.to_stored()
+        self._stamp_updated_by(settings)
+        self.db.commit()
+        return self.get_work_schedule()
 
     def update_company(self, data: CompanySettingsUpdate) -> SettingsModel:
         """Applies a partial PATCH to the company data."""

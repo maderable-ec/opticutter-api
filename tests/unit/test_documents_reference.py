@@ -31,6 +31,7 @@ def _fake_order(notes):
         payment_cash_amount=None,
         payment_transfer_amount=None,
         payment_credit_amount=None,
+        credit_collected=0.0,
         notes=notes,
     )
 

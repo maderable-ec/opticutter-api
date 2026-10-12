@@ -113,11 +113,12 @@ when **any** of the user's roles is in the row.
 | `optimizer`          | ✅ | ✅ | ❌ | ❌ | `/optimize/*`, `/optimization-drafts/*` |
 | `preorders`          | ✅ | ✅ | ❌ | ❌ | `/preorders/*` (internal; the client-facing flow is public, see below) |
 | `orders:read`        | ✅ | ✅ | ✅ | ❌ | `GET /orders`, `GET /orders/{id}`, `GET /orders/{id}/document` (the order's ONLY pdf: document + diagram + annexes) |
-| `orders:write`       | ✅ | ✅ | ❌ | ❌ | `PATCH /orders/{id}/invoice`, `GET /orders/{id}/billing-export`, `PATCH /orders/{id}/branch`, `PATCH /orders/{id}/priority`, `POST/DELETE /orders/{id}/attachments[/{aid}]` |
+| `orders:write`       | ✅ | ✅ | ❌ | ❌ | `PATCH /orders/{id}/invoice`, `GET /orders/{id}/billing-export`, `PATCH /orders/{id}/branch`, `PATCH /orders/{id}/priority`, `POST/DELETE /orders/{id}/attachments[/{aid}]`, `POST /orders/{id}/payments` (a payment against the order's credit) |
+| `orders:payments-void` | ✅ | ❌ | ❌ | ❌ | `POST /orders/{id}/payments/{pid}/void` (takes a payment back off the books; the row stays) |
 | `orders:transition`  | ✅ | ✅ | ✅* | ✅* | `PATCH /orders/{id}/status` (narrowed per-transition by `TRANSITION_ROLES`) |
 | `cutting_plan`       | ✅ | ✅ | ✅ | ❌ | `GET /orders/{id}/cutting-plan` |
 | `orders:cut`         | ✅ | ❌ | ✅ | ❌ | `PATCH /orders/{id}/cutting-plan/pieces/{id}` |
-| `orders:activities`  | ✅ | ❌ | ✅* | ✅* | `PATCH /orders/{id}/activities/{type}` (narrowed per-activity by `ACTIVITY_ROLES`) |
+| `orders:activities`  | ✅ | ❌ | ✅* | ✅* | `PATCH /orders/{id}/activities/{type}`, `POST /orders/{id}/activities/{type}/pause` and `/resume` (narrowed per-activity by `ACTIVITY_ROLES`) |
 | `orders:workshop`    | ✅ | ❌ | ✅ | ✅ | `GET /orders/workshop-queue` (shared shop-floor board) |
 
 \* Both starred rows are coarse gates, narrowed by a table in

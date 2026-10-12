@@ -15,9 +15,11 @@ from src.modules.branches.model import BranchModel
 from src.modules.clients.model import ClientModel
 from src.modules.orders.model import (
     OrderActivityModel,
+    OrderActivityPauseModel,
     OrderBoardModel,
     OrderLineModel,
     OrderModel,
+    OrderPaymentModel,
     OrderPlacedPieceModel,
     OrderStatusHistoryModel,
 )
@@ -162,6 +164,45 @@ def _activity(db, order_id, kind, status="done", **clocks):
     db.commit()
 
 
+def _pause(db, order_id, kind, reason, started_at, ended_at=None, by=None):
+    """A registered pause on the order's ``kind`` activity (mirror included)."""
+    activity = (
+        db.query(OrderActivityModel).filter_by(order_id=order_id, type=kind).one()
+    )
+    db.add(
+        OrderActivityPauseModel(
+            activity_id=activity.id,
+            order_id=order_id,
+            reason=reason,
+            started_at=started_at,
+            started_by=by.id if by else None,
+            started_by_label=by.full_name if by else None,
+            ended_at=ended_at,
+        )
+    )
+    if ended_at is None:
+        activity.paused_at, activity.pause_reason = started_at, reason
+    db.commit()
+
+
+def _payment(db, order_id, amount, paid_at, method="cash", voided=False):
+    db.add(
+        OrderPaymentModel(
+            order_id=order_id,
+            method=method,
+            amount=amount,
+            paid_at=paid_at,
+            voided_at=paid_at if voided else None,
+        )
+    )
+    db.commit()
+
+
+def _sale(figures):
+    """The four figures of the sale itself, as it was sold."""
+    return {k: figures[k] for k in ("cash", "credit", "total", "paidOrders")}
+
+
 def _finished(at):
     return OrderStatusHistoryModel(
         from_status="in_process", to_status="finished", actor="staff", created_at=at
@@ -178,7 +219,9 @@ def _seed_cut_day(db, client_id, operator, closer=None):
     """One morning on branch 1 (June 10th, local), the worked example.
 
     Events: 07:55 take the cut, pieces at 08:00, 08:06, 08:10, 08:40, 08:45 and
-    08:50. Gaps 5, 6, 4, 30, 5 and 5 minutes: 25 min of work and one 30-min stop.
+    08:50. Five minutes of loading (take to first piece) and 50 of sawing (first
+    piece to last): 55 minutes of cut. The 30 quiet minutes before 08:40 are
+    work -- nobody registered a pause.
     Sheets: a whole board (3.66 m) closed at 08:06, a half (1.22 m) closed at
     08:40 -- by ``closer`` if given --, a client retazo (0.50 m) at 08:45, and a
     board left half cut (one piece pending) that is not processed.
@@ -218,7 +261,15 @@ def test_every_active_branch_is_a_column_even_at_zero(client, db_session):
     assert data["idleMinutes"] == 15
     total = data["total"]
     assert total["branchId"] is None
-    assert total["sales"] == {"cash": 0, "credit": 0, "total": 0, "paidOrders": 0}
+    assert total["sales"] == {
+        "cash": 0,
+        "credit": 0,
+        "total": 0,
+        "paidOrders": 0,
+        "creditCollected": 0,
+        "creditOutstanding": 0,
+        "creditOutstandingOrders": 0,
+    }
     assert total["orders"] == {"entered": 0, "finished": 0}
     assert total["production"]["boards"] == 0
     assert total["production"]["boardsPerHour"] == 0
@@ -257,14 +308,19 @@ def test_a_sale_is_placed_by_its_payment_and_transfer_counts_as_cash(
     data = _get(client, "branch-comparison")
     matriz, other = data["branches"]
 
-    assert matriz["sales"] == {
+    assert _sale(matriz["sales"]) == {
         "cash": 80.0,
         "credit": 20.0,
         "total": 100.0,
         "paidOrders": 1,
     }
-    assert other["sales"] == {"cash": 0, "credit": 40.0, "total": 40.0, "paidOrders": 1}
-    assert data["total"]["sales"] == {
+    assert _sale(other["sales"]) == {
+        "cash": 0,
+        "credit": 40.0,
+        "total": 40.0,
+        "paidOrders": 1,
+    }
+    assert _sale(data["total"]["sales"]) == {
         "cash": 80.0,
         "credit": 60.0,
         "total": 140.0,
@@ -299,7 +355,7 @@ def test_an_order_is_finished_when_its_history_says_so(client, db_session):
     assert data["branches"][0]["orders"] == {"entered": 1, "finished": 1}
 
 
-def test_production_weighs_the_sheets_and_splits_the_workday(client, db_session):
+def test_production_weighs_the_sheets_and_splits_the_cut_time(client, db_session):
     c = _client(db_session)
     op = _user(db_session, "Op Uno", ["operador"])
     _seed_cut_day(db_session, c.id, op)
@@ -308,10 +364,13 @@ def test_production_weighs_the_sheets_and_splits_the_workday(client, db_session)
 
     assert production["boards"] == 1.5  # whole 1 + half 0.5 + retazo 0
     assert production["cutLinearM"] == 5.38  # 3.66 + 1.22 + 0.50
-    assert production["effectiveHours"] == 0.42  # 25 min
-    assert production["pausedHours"] == 0.5  # the 30-min stop
-    assert production["boardsPerHour"] == 3.6  # 1.5 / (25/60)
-    assert production["metersPerHour"] == 12.91
+    assert production["loadingHours"] == 0.08  # 07:55 take to the 08:00 piece
+    assert production["sawingHours"] == 0.83  # 08:00 to 08:50
+    assert production["workHours"] == 0.92  # 55 min: the two together
+    assert production["effectiveHours"] == 0.92  # its old name, one release
+    assert production["pausedHours"] == 0  # nobody registered a pause
+    assert production["boardsPerHour"] == 1.64  # 1.5 / (55/60)
+    assert production["metersPerHour"] == 5.87
     assert production["daysWorked"] == 1
     assert production["averageStartMinute"] == 7 * 60 + 55
     assert production["averageEndMinute"] == 8 * 60 + 50
@@ -350,14 +409,14 @@ def test_the_total_recomputes_its_rates_from_its_sums(client, db_session):
     total = data["total"]["production"]
 
     assert total["boards"] == 2.5
-    assert total["effectiveHours"] == 0.5  # 25 + 5 minutes
-    assert total["boardsPerHour"] == 5.0  # 2.5 / 0.5, not the mean of the two
+    assert total["workHours"] == 1.0  # 55 + 5 minutes
+    assert total["boardsPerHour"] == 2.5  # 2.5 / 1.0, not the mean of the two
     # Both branches cut on the 10th: one calendar day.
     assert total["daysWorked"] == 1
 
 
 # ------------------------------------------------------------- production tab
-def test_production_report_lists_days_stops_and_material(client, db_session):
+def test_production_report_lists_days_and_material(client, db_session):
     c = _client(db_session)
     op = _user(db_session, "Op Uno", ["operador"])
     _seed_cut_day(db_session, c.id, op)
@@ -384,14 +443,16 @@ def test_production_report_lists_days_stops_and_material(client, db_session):
     assert day["branchName"] == "Casa Matriz"
     assert day["firstEventAt"] == "2026-06-10T12:55:00Z"  # 07:55 local
     assert day["lastEventAt"] == "2026-06-10T13:50:00Z"
-    assert day["effectiveHours"] == 0.42
-    assert day["pausedHours"] == 0.5
+    assert (day["loadingHours"], day["sawingHours"]) == (0.08, 0.83)
+    assert day["workHours"] == day["effectiveHours"] == 0.92
+    assert day["pausedHours"] == 0
     assert day["boards"] == 1.5
+    assert day["boardsPerHour"] == 1.64
     assert day["ordersFinished"] == 1
-    [stop] = data["stops"]
-    assert stop["startedAt"] == "2026-06-10T13:10:00Z"  # 08:10 local
-    assert stop["endedAt"] == "2026-06-10T13:40:00Z"
-    assert stop["minutes"] == 30
+    # Stops used to be derived from the gaps between marks; a quiet stretch is
+    # work now, and what stops the saw is a registered pause.
+    assert data["stops"] == []
+    assert data["pauses"] == [] and data["pauseTotals"] == []
     [material] = data["material"]
     assert material["averageEfficiency"] == 80.0
     assert material["areaCutM2"] == 10.0
@@ -448,8 +509,17 @@ def test_a_sheet_is_credited_to_who_cut_its_last_piece(client, db_session):
     assert rows["Op Uno"]["piecesCut"] == 5
     assert rows["Op Dos"]["boards"] == 0.5  # closed the half
     assert rows["Op Dos"]["piecesCut"] == 1
-    assert rows["Op Dos"]["effectiveHours"] == 0  # a lone mark is no workday
+    # A stretch belongs to who closes it: the 30 minutes up to the 08:40 piece
+    # are Op Dos's, the other 25 (the load included) are Op Uno's.
+    assert rows["Op Dos"]["workHours"] == 0.5
+    assert (rows["Op Dos"]["loadingHours"], rows["Op Dos"]["sawingHours"]) == (0, 0.5)
+    assert rows["Op Uno"]["workHours"] == 0.42
+    assert (rows["Op Uno"]["loadingHours"], rows["Op Uno"]["sawingHours"]) == (
+        0.08,
+        0.33,
+    )
     assert data["total"]["boards"] == 1.5
+    assert data["total"]["workHours"] == 0.92  # the branch's own 55 minutes
     assert data["total"]["ordersCut"] == 1
 
 
@@ -860,3 +930,292 @@ def test_the_detail_of_an_unknown_user_is_a_404(client):
     for team in ("sellers", "banders"):
         resp = client.get(f"/api/v1/analytics/productivity/{team}/9999/orders")
         assert resp.status_code == 404, team
+
+
+# --------------------------------------------- the cut's time, pauses and hours
+def _cut_order(db, client_id, operator, take, marks, code=None):
+    """An order whose cut was taken at ``take`` and marked at ``marks``."""
+    order = _order(db, client_id, status="in_process", code=code)
+    _activity(
+        db,
+        order.id,
+        "cutting",
+        status="in_progress",
+        started_at=take,
+        started_by=operator.id,
+    )
+    board = _board(db, order.id)
+    for n, at in enumerate(marks, start=1):
+        _piece(db, order.id, board.id, at, operator.id, n=n)
+    return order
+
+
+def test_a_long_load_is_cut_time_not_a_stop(client, db_session):
+    """Forty minutes from taking the order to its first piece: the load."""
+    c = _client(db_session)
+    op = _user(db_session, "Op Uno", ["operador"])
+    _cut_order(db_session, c.id, op, _at(10, 8), [_at(10, 8, 40), _at(10, 9, 10)])
+
+    production = _get(client, "branch-comparison")["total"]["production"]
+
+    assert production["loadingHours"] == 0.67
+    assert production["sawingHours"] == 0.5
+    assert production["workHours"] == 1.17
+
+
+def test_the_lunch_hour_and_the_night_are_not_cut_time(client, db_session):
+    c = _client(db_session)
+    op = _user(db_session, "Op Uno", ["operador"])
+    _cut_order(
+        db_session,
+        c.id,
+        op,
+        _at(10, 12, 40),
+        [
+            _at(10, 12, 58),  # 18 min of load
+            _at(10, 14, 10),  # across lunch: 2 + 10
+            _at(10, 17, 55),  # 3 h 45
+            _at(11, 8, 20),  # across the night: 5 + 20
+        ],
+    )
+
+    days = {d["date"]: d for d in _get(client, "production")["days"]}
+
+    assert days["2026-06-10"]["loadingHours"] == 0.3
+    assert days["2026-06-10"]["sawingHours"] == 4.03  # 12 + 225 + 5 minutes
+    assert days["2026-06-11"]["workHours"] == 0.33  # 08:00 to 08:20
+
+
+def test_a_registered_pause_is_out_of_the_cut_and_listed(client, db_session):
+    c = _client(db_session)
+    op = _user(db_session, "Op Uno", ["operador"])
+    order = _cut_order(
+        db_session,
+        c.id,
+        op,
+        _at(10, 8),
+        [_at(10, 8, 20), _at(10, 10, 20)],
+        code="ORD-000090",
+    )
+    # Sin tableros from 08:30 to 10:00: an hour and a half nobody was slow for.
+    _pause(
+        db_session, order.id, "cutting", "no_boards", _at(10, 8, 30), _at(10, 10), op
+    )
+
+    production = _get(client, "branch-comparison")["total"]["production"]
+    assert production["loadingHours"] == 0.33  # 08:00 to the 08:20 piece
+    assert production["sawingHours"] == 0.5  # 10 min before the pause, 20 after
+    assert production["pausedHours"] == 1.5
+
+    report = _get(client, "production")
+    [pause] = report["pauses"]
+    assert (pause["orderCode"], pause["activity"]) == ("ORD-000090", "cutting")
+    assert (pause["reason"], pause["hours"]) == ("no_boards", 1.5)
+    assert pause["startedBy"] == "Op Uno"
+    assert pause["endedAt"] == "2026-06-10T15:00:00Z"
+    assert report["pauseTotals"] == [{"reason": "no_boards", "count": 1, "hours": 1.5}]
+    [day] = report["days"]
+    assert (day["workHours"], day["pausedHours"]) == (0.83, 1.5)
+
+    [row] = _get(client, "productivity/operators")["operators"]
+    assert (row["workHours"], row["pausedHours"], row["pauses"]) == (0.83, 1.5, 1)
+
+
+def test_a_pause_overnight_counts_its_working_hours_only(client, db_session):
+    """Daño de máquina from 16:00 to 10:00 the next day: four hours, not eighteen."""
+    c = _client(db_session)
+    op = _user(db_session, "Op Uno", ["operador"])
+    order = _cut_order(db_session, c.id, op, _at(10, 15), [_at(10, 15, 30)])
+    _pause(
+        db_session,
+        order.id,
+        "cutting",
+        "machine_failure",
+        _at(10, 16),
+        _at(11, 10),
+        op,
+    )
+
+    report = _get(client, "production")
+
+    assert report["pauses"][0]["hours"] == 4.0
+    days = {d["date"]: d["pausedHours"] for d in report["days"]}
+    assert days == {"2026-06-10": 2.0, "2026-06-11": 2.0}
+
+
+def test_the_working_hours_come_from_the_settings(client, db_session):
+    """A shop that closes at 16:00 does not count the stretch after it."""
+    c = _client(db_session)
+    op = _user(db_session, "Op Uno", ["operador"])
+    _cut_order(db_session, c.id, op, _at(10, 14), [_at(10, 14, 10), _at(10, 17, 30)])
+    before = _get(client, "branch-comparison")["total"]["production"]["sawingHours"]
+
+    day = [{"start": "08:00", "end": "13:00"}, {"start": "14:00", "end": "16:00"}]
+    resp = client.patch(
+        "/api/v1/settings/work-schedule",
+        json={key: day for key in ("mon", "tue", "wed", "thu", "fri")},
+    )
+    assert resp.status_code == 200, resp.text
+    after = _get(client, "branch-comparison")["total"]["production"]["sawingHours"]
+
+    assert before == 3.33  # 14:10 to 17:30
+    assert after == 1.83  # 14:10 to 16:00: the piece at 17:30 is a late mark
+
+
+def test_the_ledger_lists_the_time_order_by_order(client, db_session):
+    c = _client(db_session)
+    op = _user(db_session, "Op Uno", ["operador"])
+    first = _cut_order(
+        db_session, c.id, op, _at(10, 8), [_at(10, 8, 20), _at(10, 9)], code="A"
+    )
+    _pause(
+        db_session, first.id, "cutting", "no_boards", _at(10, 8, 30), _at(10, 8, 45), op
+    )
+    _cut_order(db_session, c.id, op, _at(10, 10), [_at(10, 10, 15)], code="B")
+
+    [row] = _get(client, "productivity/operators")["operators"]
+    ledger = _get(client, f"productivity/operators/{op.id}/boards")
+
+    second, opened = ledger["orders"]  # newest last piece first
+    assert (second["orderCode"], second["loadingHours"]) == ("B", 0.25)
+    assert second["sawingHours"] == 0 and second["pauseReasons"] == []
+    assert opened["orderCode"] == "A"
+    assert opened["takenAt"] == "2026-06-10T13:00:00Z"
+    assert (opened["loadingHours"], opened["sawingHours"]) == (0.33, 0.42)
+    assert (opened["pausedHours"], opened["pauseReasons"]) == (0.25, ["no_boards"])
+    # No two orders were open at once, so the ledger adds up to the row.
+    total = round(sum(o["workHours"] for o in ledger["orders"]), 2)
+    assert total == row["workHours"] == 1.0
+
+
+def test_a_banding_left_open_overnight_counts_its_working_hours(client, db_session):
+    """Started at 17:00, closed at 09:00: two hours. And its pause is out."""
+    c = _client(db_session)
+    bander = _user(db_session, "Can Uno", ["canteador"])
+    overnight = _order(db_session, c.id, status="finished", banding_m=20.0)
+    _activity(
+        db_session,
+        overnight.id,
+        "banding",
+        started_at=_at(10, 17),
+        finished_at=_at(11, 9),
+        finished_by=bander.id,
+    )
+    paused = _order(db_session, c.id, status="finished", banding_m=10.0)
+    _activity(
+        db_session,
+        paused.id,
+        "banding",
+        started_at=_at(11, 9),
+        finished_at=_at(11, 12),
+        finished_by=bander.id,
+    )
+    _pause(
+        db_session, paused.id, "banding", "no_edge_banding", _at(11, 10), _at(11, 11)
+    )
+
+    [row] = _get(client, "productivity/banders")["banders"]
+    detail = _get(client, f"productivity/banders/{bander.id}/orders")
+
+    assert row["bandingHours"] == 4.0  # 2 h overnight + 3 h less the pause
+    assert row["pausedHours"] == 1.0
+    assert row["bandingMetersPerHour"] == 7.5  # 30 m over 4 h
+    with_pause, across_night = detail["orders"]
+    assert (with_pause["hours"], with_pause["pausedHours"]) == (2.0, 1.0)
+    assert (across_night["hours"], across_night["pausedHours"]) == (2.0, 0)
+
+
+# ------------------------------------------------- the credit and its payments
+def test_credit_paid_back_counts_the_day_the_money_came_in(client, db_session):
+    """Sold on credit in May, collected in June: June's money, not a June sale."""
+    macas = _branch(db_session)
+    c = _client(db_session)
+    may = _order(
+        db_session,
+        c.id,
+        created_at=_at(20, 10, month=5),
+        queued_at=_at(20, 11, month=5),
+        credit=100.0,
+    )
+    _payment(db_session, may.id, 60.0, _at(10, 15))
+    _payment(db_session, may.id, 25.0, _at(12, 9), method="transfer", voided=True)
+    june = _order(
+        db_session, c.id, branch_id=macas.id, queued_at=_at(8, 10), credit=40.0
+    )
+    _payment(db_session, june.id, 40.0, _at(2, 9, month=7))  # July's money
+    # Cancelled after selling on credit: neither a sale nor a debt.
+    dead = _order(
+        db_session, c.id, status="cancelled", queued_at=_at(9, 10), credit=70.0
+    )
+    _payment(db_session, dead.id, 10.0, _at(9, 12))
+
+    data = _get(client, "branch-comparison")
+    matriz, other = data["branches"]
+
+    # No June sale on Casa Matriz, and still 60 came in.
+    assert _sale(matriz["sales"]) == {
+        "cash": 0,
+        "credit": 0,
+        "total": 0,
+        "paidOrders": 0,
+    }
+    assert matriz["sales"]["creditCollected"] == 60.0
+    # What is owed is a snapshot of TODAY: the voided payment never happened.
+    assert matriz["sales"]["creditOutstanding"] == 40.0
+    assert matriz["sales"]["creditOutstandingOrders"] == 1
+    # Macas sold 40 on credit in June; it was paid in July, so nothing is owed.
+    assert (other["sales"]["credit"], other["sales"]["creditCollected"]) == (40.0, 0)
+    assert other["sales"]["creditOutstanding"] == 0
+    assert data["total"]["sales"]["creditCollected"] == 60.0
+    assert data["total"]["sales"]["creditOutstandingOrders"] == 1
+
+
+def test_a_sellers_credit_adds_up_from_its_payments_and_what_is_owed(
+    client, db_session
+):
+    c = _client(db_session)
+    ana = _user(db_session, "Ana", ["vendedor"])
+    luis = _user(db_session, "Luis", ["vendedor"])
+    sold = _order(
+        db_session,
+        c.id,
+        queued_at=_at(5, 10),
+        cash=20.0,
+        credit=80.0,
+        created_by=ana.id,
+        code="ORD-000060",
+    )
+    _payment(db_session, sold.id, 50.0, _at(9, 16), method="transfer")
+    old = _order(
+        db_session,
+        c.id,
+        created_at=_at(2, 10, month=5),
+        queued_at=_at(2, 11, month=5),
+        credit=30.0,
+        created_by=ana.id,
+        code="OLD",
+    )
+    _payment(db_session, old.id, 30.0, _at(11, 9))  # settled: nothing owed
+    _order(db_session, c.id, queued_at=_at(6, 10), credit=15.0, created_by=luis.id)
+
+    report = _get(client, "productivity/sellers")
+    [row] = [r for r in report["sellers"] if r["userId"] == ana.id]
+    detail = _get(client, f"productivity/sellers/{ana.id}/orders")
+
+    assert detail["figures"] == {k: row[k] for k in detail["figures"]}
+    assert (row["credit"], row["creditCollected"]) == (80.0, 80.0)  # 50 + 30
+    assert row["creditOutstanding"] == 30.0
+    assert report["total"]["creditOutstanding"] == 45.0  # hers and Luis's 15
+
+    [sale] = detail["paid"]
+    assert (sale["creditCollected"], sale["creditBalance"]) == (50.0, 30.0)
+    newest, oldest = detail["collections"]  # newest payment first
+    assert (newest["orderCode"], newest["amount"], newest["day"]) == (
+        "OLD",
+        30.0,
+        "2026-06-11",
+    )
+    assert (oldest["orderCode"], oldest["method"]) == ("ORD-000060", "transfer")
+    assert oldest["soldAt"] == "2026-06-05T15:00:00Z"
+    [owed] = detail["outstanding"]
+    assert (owed["orderCode"], owed["creditBalance"]) == ("ORD-000060", 30.0)

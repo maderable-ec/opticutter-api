@@ -874,6 +874,12 @@ class DocumentService:
         Returns ``[]`` when there's no payment registered, to omit the block on
         ephemeral quotes and on orders not yet sent to the queue. An order
         registered before bank transfer existed leaves that amount ``None``.
+
+        The three amounts are the SALE's terms and never change. Once the
+        client has paid some of the credit, two more lines say so: what came in
+        since and what is still owed -- the document the client signs on
+        delivery must not print as debt what was already collected. An order
+        with no such payment prints exactly as before.
         """
         cash = carrier.payment_cash_amount or 0
         transfer = carrier.payment_transfer_amount or 0
@@ -888,6 +894,10 @@ class DocumentService:
         if credit > 0:
             rows.append(["A crédito:", f"${credit:.2f}"])
         rows.append(["Total:", f"${cash + transfer + credit:.2f}"])
+        collected = carrier.credit_collected or 0
+        if collected > 0:
+            rows.append(["Abonos recibidos:", f"${collected:.2f}"])
+            rows.append(["Saldo pendiente:", f"${max(credit - collected, 0):.2f}"])
         return [*_section("FORMA DE PAGO", heading_style), _totals_table(rows)]
 
 

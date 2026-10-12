@@ -6,11 +6,11 @@ them off the tables, so ``/analytics`` and the live state count the same rows.
 
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime, timedelta
-from typing import Optional
+from datetime import date, datetime, timedelta
+from typing import Iterable, Optional
 
 from fastapi import Depends
-from sqlalchemy import func
+from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
 from src.modules.branches.model import BranchModel
@@ -19,6 +19,7 @@ from src.modules.orders.model import (
     ActivityStatus,
     ActivityType,
     OrderActivityModel,
+    OrderActivityPauseModel,
     OrderBoardModel,
     OrderModel,
     OrderPlacedPieceModel,
@@ -26,10 +27,15 @@ from src.modules.orders.model import (
 )
 from src.modules.orders.pieces_export import customer_name
 from src.modules.orders.production import (
+    ActivityLiveState,
+    EventKind,
     LiveState,
+    TimelineEvent,
+    WorkSegment,
     activity_live_state,
     board_weight,
     cut_length_m,
+    cut_segments,
     live_state,
     run_start,
 )
@@ -38,8 +44,11 @@ from src.modules.orders.schemas import (
     BranchProductionStatus,
     ProductionStatusReport,
 )
+from src.modules.settings.service import SettingsService
+from src.shared.business_time import local_date
 from src.shared.config import config
 from src.shared.database import get_db
+from src.shared.work_schedule import WorkSchedule
 
 # How far back the live state looks for the run in progress. A run longer than
 # a day is not a run; the latest event itself is read without a window.
@@ -65,6 +74,46 @@ class CutEvent:
     # "piece" | "start" | "finish": a piece counts as cut work, the other two
     # only frame the run (taking the order before its first mark is work too).
     kind: str
+
+
+@dataclass(frozen=True)
+class PauseRecord:
+    """One registered pause of an activity, with what a report says of it."""
+
+    id: int
+    activity_id: int
+    order_id: int
+    branch_id: int
+    activity: str  # ``ActivityType`` value
+    reason: str  # ``PauseReason`` value
+    note: Optional[str]
+    started_at: datetime
+    started_by: Optional[int]
+    started_by_label: Optional[str]
+    # Null: the pause in force.
+    ended_at: Optional[datetime]
+    ended_by_label: Optional[str]
+
+    def interval(self, now: datetime) -> tuple[datetime, datetime]:
+        """Its span so far: a pause in force runs up to ``now``."""
+        return self.started_at, self.ended_at or now
+
+
+@dataclass(frozen=True)
+class OrderCut:
+    """One order's cut as the statistics read it: its work, segment by segment.
+
+    ``taken_at`` is the cutting activity's start (null on an order cut before
+    activities had clocks, or sent back to the queue); the marks bound the cut.
+    """
+
+    order_id: int
+    branch_id: int
+    taken_at: Optional[datetime]
+    first_mark_at: datetime
+    last_mark_at: datetime
+    segments: tuple[WorkSegment, ...]
+    pauses: tuple[PauseRecord, ...]
 
 
 @dataclass(frozen=True)
@@ -115,6 +164,238 @@ class OperatorSheet:
 class ProductionService:
     def __init__(self, db: Session):
         self.db = db
+        self._schedule: Optional[WorkSchedule] = None
+
+    @property
+    def schedule(self) -> WorkSchedule:
+        """The shop's working hours (settings), read once per request."""
+        if self._schedule is None:
+            self._schedule = SettingsService(self.db).get_work_schedule()
+        return self._schedule
+
+    # ---------------------------------------------------------------- the cut
+    def open_days(
+        self, start: datetime, end: datetime, branch_id: Optional[int] = None
+    ) -> dict[int, set[date]]:
+        """``branch_id -> business days`` with a cutting event in ``[start, end)``.
+
+        The days the shop was actually open, which is what tells a holiday from
+        a working day nobody registered anything on (``WorkSchedule.windows``).
+        Marks are read by the hour: a day needs one, not seven thousand.
+        """
+        days: dict[int, set[date]] = defaultdict(set)
+        marked = (
+            self.db.query(
+                OrderModel.branch_id,
+                func.date_trunc("hour", OrderPlacedPieceModel.cut_at),
+            )
+            .join(OrderModel, OrderPlacedPieceModel.order_id == OrderModel.id)
+            .filter(
+                OrderPlacedPieceModel.cut_at >= start,
+                OrderPlacedPieceModel.cut_at < end,
+            )
+            .distinct()
+        )
+        taken = (
+            self.db.query(OrderModel.branch_id, OrderActivityModel.started_at)
+            .join(OrderModel, OrderActivityModel.order_id == OrderModel.id)
+            .filter(
+                OrderActivityModel.type == ActivityType.cutting.value,
+                OrderActivityModel.started_at >= start,
+                OrderActivityModel.started_at < end,
+            )
+        )
+        for query in (marked, taken):
+            if branch_id is not None:
+                query = query.filter(OrderModel.branch_id == branch_id)
+            for bid, at in query.all():
+                days[bid].add(local_date(at))
+        return days
+
+    def order_cuts(
+        self, start: datetime, end: datetime, branch_id: Optional[int] = None
+    ) -> tuple[list[OrderCut], dict[int, set[date]]]:
+        """The cut of every order that was being cut at some point of ``[start, end)``.
+
+        Each comes with its WHOLE timeline, not just the events in range: the
+        stretch that reaches into the range can start before it (an order taken
+        on the 30th and finished on the 1st). The caller clips to the range
+        (``work_by_day``). Also returns the branches' open days over the span
+        those timelines cover.
+        """
+        marks = (
+            self.db.query(
+                OrderPlacedPieceModel.order_id.label("order_id"),
+                func.min(OrderPlacedPieceModel.cut_at).label("first_mark"),
+                func.max(OrderPlacedPieceModel.cut_at).label("last_mark"),
+            )
+            .filter(OrderPlacedPieceModel.cut_at.isnot(None))
+            .group_by(OrderPlacedPieceModel.order_id)
+            .subquery()
+        )
+        query = (
+            self.db.query(
+                OrderModel.id,
+                OrderModel.branch_id,
+                OrderActivityModel.id,
+                OrderActivityModel.started_at,
+                OrderActivityModel.started_by,
+                marks.c.first_mark,
+                marks.c.last_mark,
+            )
+            .join(marks, marks.c.order_id == OrderModel.id)
+            .outerjoin(
+                OrderActivityModel,
+                and_(
+                    OrderActivityModel.order_id == OrderModel.id,
+                    OrderActivityModel.type == ActivityType.cutting.value,
+                ),
+            )
+            .filter(
+                marks.c.last_mark >= start,
+                func.least(
+                    marks.c.first_mark,
+                    func.coalesce(OrderActivityModel.started_at, marks.c.first_mark),
+                )
+                < end,
+            )
+        )
+        if branch_id is not None:
+            query = query.filter(OrderModel.branch_id == branch_id)
+        rows = query.all()
+        if not rows:
+            return [], {}
+
+        order_ids = [row[0] for row in rows]
+        events: dict[int, list[TimelineEvent]] = defaultdict(list)
+        for order_id, at, by in self.db.query(
+            OrderPlacedPieceModel.order_id,
+            OrderPlacedPieceModel.cut_at,
+            OrderPlacedPieceModel.cut_by,
+        ).filter(
+            OrderPlacedPieceModel.order_id.in_(order_ids),
+            OrderPlacedPieceModel.cut_at.isnot(None),
+        ):
+            events[order_id].append(TimelineEvent(at, EventKind.mark, by))
+        pauses = self.pauses_of([row[2] for row in rows if row[2] is not None])
+        for order_id, _, activity_id, taken_at, taken_by, _, _ in rows:
+            if taken_at is not None:
+                events[order_id].append(
+                    TimelineEvent(taken_at, EventKind.take, taken_by)
+                )
+            for pause in pauses.get(activity_id, ()):
+                events[order_id].append(
+                    TimelineEvent(pause.started_at, EventKind.pause, pause.started_by)
+                )
+                if pause.ended_at is not None:
+                    events[order_id].append(
+                        TimelineEvent(pause.ended_at, EventKind.resume)
+                    )
+
+        earliest = min(event.at for evs in events.values() for event in evs)
+        open_days = self.open_days(min(earliest, start), end, branch_id)
+        # A timeline's own events open its days, whatever the range held.
+        for order_id, bid, *_ in rows:
+            open_days.setdefault(bid, set()).update(
+                local_date(event.at) for event in events[order_id]
+            )
+
+        cuts = [
+            OrderCut(
+                order_id=order_id,
+                branch_id=bid,
+                taken_at=taken_at,
+                first_mark_at=first_mark,
+                last_mark_at=last_mark,
+                segments=tuple(
+                    cut_segments(events[order_id], self.schedule, open_days[bid])
+                ),
+                pauses=tuple(pauses.get(activity_id, ())),
+            )
+            for order_id, bid, activity_id, taken_at, _, first_mark, last_mark in rows
+        ]
+        return cuts, open_days
+
+    # ------------------------------------------------------------------ pauses
+    def _pause_query(self):
+        return (
+            self.db.query(
+                OrderActivityPauseModel,
+                OrderActivityModel.type,
+                OrderModel.branch_id,
+            )
+            .join(
+                OrderActivityModel,
+                OrderActivityPauseModel.activity_id == OrderActivityModel.id,
+            )
+            .join(OrderModel, OrderActivityPauseModel.order_id == OrderModel.id)
+        )
+
+    @staticmethod
+    def _pause_records(rows: Iterable) -> list[PauseRecord]:
+        return [
+            PauseRecord(
+                id=pause.id,
+                activity_id=pause.activity_id,
+                order_id=pause.order_id,
+                branch_id=branch_id,
+                activity=kind,
+                reason=pause.reason,
+                note=pause.note,
+                started_at=pause.started_at,
+                started_by=pause.started_by,
+                started_by_label=pause.started_by_label,
+                ended_at=pause.ended_at,
+                ended_by_label=pause.ended_by_label,
+            )
+            for pause, kind, branch_id in rows
+        ]
+
+    def pauses(
+        self,
+        start: datetime,
+        end: datetime,
+        branch_id: Optional[int] = None,
+        activity: Optional[ActivityType] = None,
+    ) -> list[PauseRecord]:
+        """Every pause that overlaps ``[start, end)``, oldest first.
+
+        Overlaps, not "started in": a pause registered on Friday and lifted on
+        Monday stopped Monday's work too. One still in force overlaps every
+        range from its start on.
+        """
+        query = self._pause_query().filter(
+            OrderActivityPauseModel.started_at < end,
+            or_(
+                OrderActivityPauseModel.ended_at.is_(None),
+                OrderActivityPauseModel.ended_at >= start,
+            ),
+        )
+        if branch_id is not None:
+            query = query.filter(OrderModel.branch_id == branch_id)
+        if activity is not None:
+            query = query.filter(OrderActivityModel.type == activity.value)
+        return self._pause_records(
+            query.order_by(
+                OrderActivityPauseModel.started_at, OrderActivityPauseModel.id
+            ).all()
+        )
+
+    def pauses_of(self, activity_ids: Iterable[int]) -> dict[int, list[PauseRecord]]:
+        """``activity_id -> its pauses``, oldest first."""
+        ids = list(activity_ids)
+        if not ids:
+            return {}
+        by_activity: dict[int, list[PauseRecord]] = defaultdict(list)
+        rows = (
+            self._pause_query()
+            .filter(OrderActivityPauseModel.activity_id.in_(ids))
+            .order_by(OrderActivityPauseModel.started_at, OrderActivityPauseModel.id)
+            .all()
+        )
+        for record in self._pause_records(rows):
+            by_activity[record.activity_id].append(record)
+        return by_activity
 
     # ------------------------------------------------------------------ events
     def cut_events(
@@ -411,8 +692,16 @@ class ProductionService:
             .all()
         )
         cutting_codes: dict[int, list[str]] = defaultdict(list)
-        for branch_id, code, order_id in (
-            self.db.query(OrderModel.branch_id, OrderModel.code, OrderModel.id)
+        # ``(paused_at, order code, reason)`` of the cuts registered as paused.
+        paused_cuts: dict[int, list[tuple]] = defaultdict(list)
+        for branch_id, code, order_id, paused_at, reason in (
+            self.db.query(
+                OrderModel.branch_id,
+                OrderModel.code,
+                OrderModel.id,
+                OrderActivityModel.paused_at,
+                OrderActivityModel.pause_reason,
+            )
             .join(OrderActivityModel, OrderActivityModel.order_id == OrderModel.id)
             .filter(
                 OrderModel.status == OrderStatus.in_process.value,
@@ -422,26 +711,48 @@ class ProductionService:
             .order_by(OrderActivityModel.started_at, OrderModel.id)
             .all()
         ):
-            cutting_codes[branch_id].append(code or f"#{order_id}")
+            if paused_at is not None:
+                paused_cuts[branch_id].append(
+                    (paused_at, code or f"#{order_id}", reason)
+                )
+            else:
+                cutting_codes[branch_id].append(code or f"#{order_id}")
 
         tracks = self._activity_tracks([b.id for b in branches])
 
         items = []
         for branch in branches:
             last = last_ever.get(branch.id)
-            has_work = bool(queued.get(branch.id)) or bool(cutting_codes[branch.id])
-            state = live_state(last, now, gap, has_work)
-            since = (
-                run_start(recent[branch.id], gap)
-                if state is LiveState.cutting
-                else last
+            paused = sorted(paused_cuts[branch.id])
+            has_work = (
+                bool(queued.get(branch.id))
+                or bool(cutting_codes[branch.id])
+                or bool(paused)
             )
+            # A paused cut explains a quiet saw only when it is the only cut
+            # open: with another one in progress and no marks, somebody still
+            # has to look.
+            state = live_state(
+                last,
+                now,
+                gap,
+                has_work,
+                paused=bool(paused) and not cutting_codes[branch.id],
+            )
+            if state is LiveState.cutting:
+                since = run_start(recent[branch.id], gap)
+            elif state is LiveState.paused:
+                since = paused[0][0]
+            else:
+                since = last
             items.append(
                 BranchProductionStatus(
                     branch_id=branch.id,
                     branch_name=branch.name,
                     state=state,
                     since=since,
+                    pause_reason=paused[0][2] if state is LiveState.paused else None,
+                    paused_order_codes=[code for _, code, _ in paused],
                     last_event_at=last,
                     queued_count=queued.get(branch.id, 0),
                     cutting_order_codes=cutting_codes[branch.id],
@@ -464,8 +775,19 @@ class ProductionService:
         saw); before that there is nothing to work on.
         """
         working: dict[tuple, list] = defaultdict(list)
+        paused: dict[tuple, list] = defaultdict(list)
         ready: dict[tuple, list[datetime]] = defaultdict(list)
-        for branch_id, code, order_id, kind, status, started_at, ready_at in (
+        for (
+            branch_id,
+            code,
+            order_id,
+            kind,
+            status,
+            started_at,
+            ready_at,
+            paused_at,
+            reason,
+        ) in (
             self.db.query(
                 OrderModel.branch_id,
                 OrderModel.code,
@@ -474,6 +796,8 @@ class ProductionService:
                 OrderActivityModel.status,
                 OrderActivityModel.started_at,
                 OrderActivityModel.ready_at,
+                OrderActivityModel.paused_at,
+                OrderActivityModel.pause_reason,
             )
             .join(OrderModel, OrderActivityModel.order_id == OrderModel.id)
             .filter(
@@ -486,7 +810,9 @@ class ProductionService:
             .all()
         ):
             key = (branch_id, ActivityType(kind))
-            if status == ActivityStatus.in_progress.value:
+            if paused_at is not None:
+                paused[key].append((paused_at, code or f"#{order_id}", reason))
+            elif status == ActivityStatus.in_progress.value:
                 working[key].append((started_at, order_id, code or f"#{order_id}"))
             elif ready_at is not None:
                 ready[key].append(ready_at)
@@ -515,9 +841,12 @@ class ProductionService:
                 working[key], key=lambda r: (r[0] is None, r[0] or datetime.min, r[1])
             )
             waits = ready[key]
-            state = activity_live_state(len(runs), len(waits))
+            stopped = sorted(paused[key])
+            state = activity_live_state(len(runs), len(waits), len(stopped))
             if runs:
                 since = runs[0][0]
+            elif stopped:
+                since = stopped[0][0]
             elif waits:
                 since = min(waits)
             else:
@@ -525,6 +854,10 @@ class ProductionService:
             return ActivityLiveStatus(
                 state=state,
                 since=since,
+                pause_reason=(
+                    stopped[0][2] if state is ActivityLiveState.paused else None
+                ),
+                paused_order_codes=[code for _, code, _ in stopped],
                 order_codes=[code for _, _, code in runs],
                 waiting_count=len(waits),
                 last_finished_at=last_closed.get(key),

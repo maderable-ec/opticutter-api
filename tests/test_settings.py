@@ -239,3 +239,50 @@ def test_stock_thresholds_reach_the_alert(client, db_session):
         "board": 7.0,
         "edge_banding": 99.0,
     }
+
+
+# --- Working hours ------------------------------------------------------------
+def test_the_work_schedule_defaults_to_the_shop_s_hours(client):
+    """Nobody has edited it: the column is NULL and reads as the default."""
+    data = client.get("/api/v1/settings/work-schedule").json()["data"]
+
+    weekday = [{"start": "08:00", "end": "13:00"}, {"start": "14:00", "end": "18:00"}]
+    assert data["mon"] == data["fri"] == weekday
+    assert data["sat"] == [{"start": "08:00", "end": "13:00"}]
+    assert data["sun"] == []
+
+
+def test_the_work_schedule_is_replaced_whole(client, db_session):
+    """One value, not seven: a day left out of the PATCH is a day closed."""
+    from src.modules.settings.service import SettingsService
+
+    resp = client.patch(
+        "/api/v1/settings/work-schedule",
+        json={"mon": [{"start": "07:00", "end": "15:00"}]},
+    )
+
+    assert resp.status_code == 200, resp.text
+    data = client.get("/api/v1/settings/work-schedule").json()["data"]
+    assert data["mon"] == [{"start": "07:00", "end": "15:00"}]
+    assert data["tue"] == [] and data["sat"] == []
+    schedule = SettingsService(db_session).get_work_schedule()
+    assert schedule.days[0] == ((7 * 60, 15 * 60),)
+
+
+def test_a_work_schedule_that_makes_no_sense_is_rejected(client):
+    backwards = [{"start": "13:00", "end": "08:00"}]
+    overlapping = [
+        {"start": "08:00", "end": "13:00"},
+        {"start": "12:00", "end": "18:00"},
+    ]
+    for windows in (backwards, overlapping, [{"start": "8", "end": "13:00"}]):
+        resp = client.patch("/api/v1/settings/work-schedule", json={"mon": windows})
+        assert resp.status_code == 422, windows
+
+
+def test_the_work_schedule_is_the_admin_s(client, db_session):
+    from tests.order_helpers import _token_for
+
+    seller = _token_for(client, db_session, "vendedor")
+    resp = client.get("/api/v1/settings/work-schedule", headers=seller)
+    assert resp.status_code == 403
