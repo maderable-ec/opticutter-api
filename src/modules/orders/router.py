@@ -20,6 +20,7 @@ from src.modules.orders.production_service import (
     production_service,
 )
 from src.modules.orders.schemas import (
+    ActivityPauseRequest,
     ActivityResult,
     ActivityUpdate,
     AttachmentResponse,
@@ -27,6 +28,8 @@ from src.modules.orders.schemas import (
     OrderBranchUpdate,
     OrderExportResponse,
     OrderInvoiceUpdate,
+    OrderPaymentCreate,
+    OrderPaymentVoid,
     OrderPriorityUpdate,
     OrderResponse,
     OrderStatusUpdate,
@@ -152,6 +155,17 @@ def list_orders(
         description="Narrows to one stage of that activity (e.g. everything "
         "still to band). Works with or without ``activity``",
     ),
+    paused: Optional[bool] = Query(
+        default=None,
+        description="Only orders with an activity paused right now (true) or "
+        "with none (false). Reads ``activity`` too: every cut waiting on boards",
+    ),
+    has_balance: Optional[bool] = Query(
+        default=None,
+        alias="hasBalance",
+        description="Only orders the client still owes on (true) or the settled "
+        "ones (false): the credit sold less the payments received since",
+    ),
     paging: PageParams = Depends(),
     svc: OrderService = Depends(order_service),
     branch_scope: Optional[int] = Depends(get_branch_scope),
@@ -183,6 +197,8 @@ def list_orders(
         is_priority=is_priority,
         activity=activity,
         activity_status=activity_status,
+        paused=paused,
+        has_balance_due=has_balance,
     )
     return page(items, total, paging.limit, paging.offset)
 
@@ -295,6 +311,109 @@ def update_order_activity(
             data.status,
             actor=staff_actor(current_user),
             note=data.note,
+            branch_scope=branch_scope,
+        )
+    )
+
+
+@router.post(
+    "/{order_id}/activities/{activity_type}/pause",
+    response_model=DataResponse[ActivityResult],
+)
+def pause_order_activity(
+    order_id: int,
+    activity_type: ActivityType,
+    data: ActivityPauseRequest,
+    svc: OrderService = Depends(order_service),
+    current_user: UserModel = Depends(require_permission("orders:activities")),
+    branch_scope: Optional[int] = Depends(get_branch_scope),
+):
+    """Pauses an activity in progress with the reason it cannot go on.
+
+    No boards, no edge banding or a machine down: the stretch stays out of the
+    worker's time, and the office is told. The activity keeps its
+    ``in_progress`` status; ``pausedAt``/``pauseReason`` say it is paused.
+    Idempotent. ``ACTIVITY_ROLES`` decides who may pause THIS activity.
+    """
+    return ok(
+        svc.pause_activity(
+            order_id,
+            activity_type,
+            data.reason,
+            note=data.note,
+            actor=staff_actor(current_user),
+            branch_scope=branch_scope,
+        )
+    )
+
+
+@router.post(
+    "/{order_id}/activities/{activity_type}/resume",
+    response_model=DataResponse[ActivityResult],
+)
+def resume_order_activity(
+    order_id: int,
+    activity_type: ActivityType,
+    svc: OrderService = Depends(order_service),
+    current_user: UserModel = Depends(require_permission("orders:activities")),
+    branch_scope: Optional[int] = Depends(get_branch_scope),
+):
+    """Lifts the pause of an activity. Idempotent: a no-op when it is not paused."""
+    return ok(
+        svc.resume_activity(
+            order_id,
+            activity_type,
+            actor=staff_actor(current_user),
+            branch_scope=branch_scope,
+        )
+    )
+
+
+@router.post(
+    "/{order_id}/payments",
+    response_model=DataResponse[OrderResponse],
+)
+def add_order_payment(
+    order_id: int,
+    data: OrderPaymentCreate,
+    svc: OrderService = Depends(order_service),
+    current_user: UserModel = Depends(require_permission("orders:write")),
+    branch_scope: Optional[int] = Depends(get_branch_scope),
+):
+    """Registers money received after the sale, against the order's credit.
+
+    Cash and/or transfer, never more than the balance. Works in every status
+    after the queue, dispatched included: the client pays when they pay.
+    """
+    return ok(
+        svc.add_payment(
+            order_id,
+            data,
+            actor=staff_actor(current_user),
+            branch_scope=branch_scope,
+        )
+    )
+
+
+@router.post(
+    "/{order_id}/payments/{payment_id}/void",
+    response_model=DataResponse[OrderResponse],
+)
+def void_order_payment(
+    order_id: int,
+    payment_id: int,
+    data: OrderPaymentVoid,
+    svc: OrderService = Depends(order_service),
+    current_user: UserModel = Depends(require_permission("orders:payments-void")),
+    branch_scope: Optional[int] = Depends(get_branch_scope),
+):
+    """Voids a payment registered by mistake (admin only). The row stays."""
+    return ok(
+        svc.void_payment(
+            order_id,
+            payment_id,
+            data.reason,
+            actor=staff_actor(current_user),
             branch_scope=branch_scope,
         )
     )

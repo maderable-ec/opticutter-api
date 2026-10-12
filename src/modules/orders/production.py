@@ -1,31 +1,33 @@
-"""Production on the shop floor, read off the cutting events.
+"""Production on the shop floor, read off the events it registers.
 
-Nothing on the shop floor registers "production": there is no pause button and
-no shift clock. What it does leave is a timestamp every time somebody touches
-the saw's work -- a cut taken (the cutting activity's ``started_at``), a piece
-marked (``cut_at``), a cut closed (``finished_at``). The shop's rule is to mark
-each piece the moment it comes off the saw, so the gaps between those events
-ARE the saw's rhythm: one no longer than the idle gap
-(``config.PRODUCTION_IDLE_MINUTES``) is work, a longer one is a stop.
+Nobody on the shop floor registers "production": there is no shift clock. What
+it does leave is a timestamp every time somebody touches the work -- an order
+taken (the cutting activity's ``started_at``), a piece marked (``cut_at``), an
+activity paused or resumed, a cut closed. The cut's time is read off those:
+from taking the order to its last piece, less the registered pauses and the
+time off it ran across (``cut_segments``, with ``shared/work_schedule.py``).
 
-Pure on purpose, and the single home of these rules: the live state
-(``GET /orders/production-status``) and the statistics (``/analytics``) both
-read them, so the board never calls a stretch "Detenida" that the history later
-counts as effective time.
+Pure on purpose, and the single home of these rules: the statistics
+(``/analytics``) and the live state (``GET /orders/production-status``) both
+read them. The live state alone still uses the idle gap
+(``config.PRODUCTION_IDLE_MINUTES``): it answers "is the saw moving right
+now", which a stretch that is still open cannot.
 
 The banding and the additional work mark no pieces: all they leave is their
-activity's start and close. Those are read as registered -- an activity in
-progress IS being worked -- with one guard, ``clocked_seconds``: a start and a
-close a few seconds apart are a registration after the fact, not a duration.
+activity's start and close, and their pauses. Those are read as registered --
+an activity in progress IS being worked -- with one guard, ``clocked_seconds``:
+a start and a close a few seconds apart are a registration after the fact, not
+a duration.
 """
 
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from enum import Enum
-from typing import Iterable, Optional, Sequence
+from typing import AbstractSet, Iterable, Optional, Sequence
 
-from src.shared.business_time import local_date
+from src.shared.business_time import local_date, local_midnight_utc
+from src.shared.work_schedule import Interval, WorkSchedule
 
 # Material sources that are not a sheet anybody buys: a retazo the shop or the
 # client already owns. Their cuts are real saw work (their metres count), but a
@@ -110,66 +112,249 @@ def cut_length_m(cuts) -> float:
     return total_mm / 1000.0
 
 
+# ------------------------------------------------------------------- work time
+# The cut's time, as business reads it (2026-10-12): from the operator TAKING
+# the order to its LAST piece marked. Inside it, the stretch up to the first
+# piece is the LOADING (pulling the sheets off the rack and onto the saw) and
+# the rest is the SAWING; the two add up to the cut's work time, which is what
+# every rate divides by. A registered pause is out, and so is the time off the
+# stretch ran across (``WorkSchedule.worked``). Nothing else is: inside working
+# hours a quiet stretch counts, which is what makes registering the pause the
+# thing that protects whoever is waiting on boards.
+
+
+class EventKind(str, Enum):
+    """What an instant on an activity's timeline says."""
+
+    take = "take"  # the activity started: for the cut, the order taken
+    mark = "mark"  # work registered: a piece marked, or the activity closed
+    pause = "pause"
+    resume = "resume"
+
+
+# Two events of one instant, in the order they can only have happened.
+_KIND_ORDER = {
+    EventKind.take: 0,
+    EventKind.resume: 1,
+    EventKind.mark: 2,
+    EventKind.pause: 3,
+}
+
+
 @dataclass(frozen=True)
-class Stop:
-    """A gap longer than the idle gap between two cutting events of one day."""
+class TimelineEvent:
+    at: datetime
+    kind: EventKind
+    user_id: Optional[int] = None
+
+
+class Phase(str, Enum):
+    loading = "loading"  # taken, no piece marked yet
+    sawing = "sawing"  # from the first piece to the last
+
+
+@dataclass(frozen=True)
+class WorkSegment:
+    """A stretch of an order's cut that counts as work, credited to one user."""
 
     start: datetime
     end: datetime
+    phase: Phase
+    # Who registered the event that closes it: the work that led to a mark is
+    # the marker's, the same way a sheet is its last marker's.
+    user_id: Optional[int]
 
-    @property
-    def seconds(self) -> float:
-        return (self.end - self.start).total_seconds()
+
+def _worked_stretches(
+    events: Iterable[TimelineEvent],
+    schedule: WorkSchedule,
+    open_days: Optional[AbstractSet[date]],
+):
+    """``(start, end, closing event)`` of every stretch of a timeline that counts.
+
+    A stretch counts when it ENDS in work registered: a mark, or the pause that
+    interrupts it. One ending at a take or a resume is the order waiting (in
+    the queue after a rollback, or paused), and one starting at a pause is the
+    pause itself.
+    """
+    ordered = sorted(events, key=lambda e: (e.at, _KIND_ORDER[e.kind]))
+    for prev, cur in zip(ordered, ordered[1:]):
+        if cur.kind not in (EventKind.mark, EventKind.pause):
+            continue
+        if prev.kind is EventKind.pause:
+            continue
+        for start, end in schedule.worked(prev.at, cur.at, open_days):
+            yield start, end, cur
+
+
+def cut_segments(
+    events: Iterable[TimelineEvent],
+    schedule: WorkSchedule,
+    open_days: Optional[AbstractSet[date]] = None,
+) -> list[WorkSegment]:
+    """The work of one order's cut: its loading and its sawing.
+
+    ``events``: the order taken, every piece marked, every pause and resume.
+    The cut ends at its last mark -- whatever comes after (a pause, the tap on
+    "Terminar corte") is not cutting. An order with no piece marked yet has no
+    time: its loading only exists once the first piece closes it.
+    """
+    events = list(events)
+    marks = [e.at for e in events if e.kind is EventKind.mark]
+    if not marks:
+        return []
+    first_mark, last_mark = min(marks), max(marks)
+    return [
+        WorkSegment(
+            start=start,
+            end=end,
+            phase=Phase.loading if closing.at <= first_mark else Phase.sawing,
+            user_id=closing.user_id,
+        )
+        for start, end, closing in _worked_stretches(
+            (e for e in events if e.at <= last_mark), schedule, open_days
+        )
+    ]
+
+
+def activity_seconds(
+    started_at: Optional[datetime],
+    finished_at: Optional[datetime],
+    pauses: Iterable[tuple[datetime, Optional[datetime]]],
+    schedule: WorkSchedule,
+    open_days: Optional[AbstractSet[date]] = None,
+) -> Optional[float]:
+    """The worked time of an activity that marks no pieces, or ``None``.
+
+    The banding and the additional work leave a start and a close: the time
+    between them, less the registered pauses and the time off it ran across.
+    ``None`` when it was not clocked (``clocked_seconds``): the guard reads the
+    raw span, since a tap after the work is a tap whatever the schedule says.
+    """
+    if clocked_seconds(started_at, finished_at) is None:
+        return None
+    events = [
+        TimelineEvent(started_at, EventKind.take),
+        TimelineEvent(finished_at, EventKind.mark),
+    ]
+    for paused_at, resumed_at in pauses:
+        events.append(TimelineEvent(paused_at, EventKind.pause))
+        if resumed_at is not None:
+            events.append(TimelineEvent(resumed_at, EventKind.resume))
+    return sum(
+        (end - start).total_seconds()
+        for start, end, _ in _worked_stretches(events, schedule, open_days)
+    )
 
 
 @dataclass
-class Workday:
-    """One business day of a stream of cutting events.
-
-    ``first_at``/``last_at`` are the day's first and last event (naive UTC).
-    The span between them splits exactly into effective + paused time.
-    """
+class DayWork:
+    """One business day of cut work: the loading, the sawing and their sum."""
 
     day: date
-    first_at: datetime
-    last_at: datetime
-    effective_seconds: float = 0.0
-    paused_seconds: float = 0.0
-    stops: list[Stop] = field(default_factory=list)
+    loading_seconds: float = 0.0
+    sawing_seconds: float = 0.0
+
+    @property
+    def work_seconds(self) -> float:
+        return self.loading_seconds + self.sawing_seconds
 
 
-def workdays(times: Iterable[datetime], idle_gap: timedelta) -> list[Workday]:
-    """Splits a stream of event instants into business days, oldest first.
+def _split_by_day(start: datetime, end: datetime):
+    """``[start, end)`` cut at the business's midnights."""
+    while start < end:
+        midnight = local_midnight_utc(local_date(start) + timedelta(days=1))
+        cut = min(end, midnight)
+        yield start, cut
+        start = cut
 
-    Inside a day, every gap between two consecutive events is either effective
-    (no longer than ``idle_gap``) or a stop. A gap across the business midnight
-    belongs to no day: the night is not a stop.
 
-    The stream is ONE saw's work (a branch, or one operator): two branches'
-    events interleaved would hide each other's stops.
+def _union_seconds(intervals: list[Interval]) -> float:
+    """How long the intervals cover together: an overlap counts once."""
+    total, reach = 0.0, None
+    for start, end in sorted(intervals):
+        if reach is None or start > reach:
+            total += (end - start).total_seconds()
+            reach = end
+        elif end > reach:
+            total += (end - reach).total_seconds()
+            reach = end
+    return total
+
+
+def _clip(
+    start: datetime,
+    end: datetime,
+    lower: Optional[datetime],
+    upper: Optional[datetime],
+) -> Optional[Interval]:
+    if lower is not None:
+        start = max(start, lower)
+    if upper is not None:
+        end = min(end, upper)
+    return (start, end) if end > start else None
+
+
+def work_by_day(
+    segments: Iterable[WorkSegment],
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+) -> dict[date, DayWork]:
+    """The segments of ONE saw (a branch, or one operator) as business days.
+
+    A UNION, not a sum: with two orders open at once the same minute would
+    otherwise count twice, and no day can hold more work than it has minutes.
+    Where a loading and a sawing overlap the minute is sawing. Clipped to
+    ``[start, end)``, the report's range.
     """
-    by_day: dict[date, list[datetime]] = defaultdict(list)
-    for at in times:
-        by_day[local_date(at)].append(at)
-    days = []
-    for day in sorted(by_day):
-        stamps = sorted(by_day[day])
-        workday = Workday(day=day, first_at=stamps[0], last_at=stamps[-1])
-        for prev, cur in zip(stamps, stamps[1:]):
-            gap = cur - prev
-            if gap <= idle_gap:
-                workday.effective_seconds += gap.total_seconds()
-            else:
-                workday.paused_seconds += gap.total_seconds()
-                workday.stops.append(Stop(start=prev, end=cur))
-        days.append(workday)
+    by_day: dict[date, dict[Phase, list[Interval]]] = defaultdict(
+        lambda: {Phase.loading: [], Phase.sawing: []}
+    )
+    for segment in segments:
+        clipped = _clip(segment.start, segment.end, start, end)
+        if clipped is None:
+            continue
+        for piece in _split_by_day(*clipped):
+            by_day[local_date(piece[0])][segment.phase].append(piece)
+    days = {}
+    for day, phases in by_day.items():
+        sawing = _union_seconds(phases[Phase.sawing])
+        total = _union_seconds(phases[Phase.sawing] + phases[Phase.loading])
+        days[day] = DayWork(
+            day=day, loading_seconds=total - sawing, sawing_seconds=sawing
+        )
     return days
+
+
+def paused_by_day(
+    pauses: Iterable[Interval],
+    schedule: WorkSchedule,
+    open_days: Optional[AbstractSet[date]] = None,
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+) -> dict[date, float]:
+    """Seconds of registered pause per business day, inside working hours only.
+
+    A pause registered at 16:00 and lifted at 10:00 the next morning stopped
+    the work for four hours, not eighteen. A union, like the work: two orders
+    paused at once stopped one saw.
+    """
+    by_day: dict[date, list[Interval]] = defaultdict(list)
+    for paused_at, resumed_at in pauses:
+        clipped = _clip(paused_at, resumed_at, start, end)
+        if clipped is None:
+            continue
+        for window in schedule.overlap(*clipped, open_days):
+            for piece in _split_by_day(*window):
+                by_day[local_date(piece[0])].append(piece)
+    return {day: _union_seconds(pieces) for day, pieces in by_day.items()}
 
 
 class LiveState(str, Enum):
     """What a branch's saw is doing right now, read off its cutting events."""
 
     cutting = "cutting"  # an event within the idle gap
+    paused = "paused"  # nothing within the gap, and a cut registered as paused
     stopped = "stopped"  # nothing within the gap, with work waiting
     idle = "idle"  # nothing within the gap, and nothing to do
 
@@ -179,14 +364,19 @@ def live_state(
     now: datetime,
     idle_gap: timedelta,
     has_work: bool,
+    paused: bool = False,
 ) -> LiveState:
-    """The branch's live state, by the same idle gap as the statistics.
+    """The branch's live state, read off its latest cutting event.
 
     ``has_work``: an order in the queue or a cut in progress. Without it a quiet
-    saw is a quiet day (``idle``), not a problem (``stopped``).
+    saw is a quiet day (``idle``), not a problem (``stopped``). ``paused``: some
+    cut in progress carries a registered pause -- a quiet saw then has a reason,
+    and says it instead of asking somebody to act.
     """
     if last_event_at is not None and now - last_event_at <= idle_gap:
         return LiveState.cutting
+    if paused:
+        return LiveState.paused
     return LiveState.stopped if has_work else LiveState.idle
 
 
@@ -215,18 +405,25 @@ class ActivityLiveState(str, Enum):
     """
 
     working = "working"  # an activity in progress
+    paused = "paused"  # none being worked, some registered as paused
     waiting = "waiting"  # none in progress, some ready (a piece of its set cut)
     idle = "idle"  # nothing in progress and nothing ready
 
 
-def activity_live_state(in_progress: int, waiting: int) -> ActivityLiveState:
-    """``in_progress``/``waiting``: how many of the branch's activities are in each.
+def activity_live_state(
+    in_progress: int, waiting: int, paused: int = 0
+) -> ActivityLiveState:
+    """``in_progress``/``waiting``/``paused``: how many activities are in each.
 
-    ``waiting`` counts only the activities that are READY (``ready_at``): one
-    whose first piece is still on the saw has nothing to work on yet.
+    ``in_progress`` leaves the paused ones out: an activity somebody stopped
+    for lack of tape is not being worked. ``waiting`` counts only the
+    activities that are READY (``ready_at``): one whose first piece is still on
+    the saw has nothing to work on yet.
     """
     if in_progress:
         return ActivityLiveState.working
+    if paused:
+        return ActivityLiveState.paused
     return ActivityLiveState.waiting if waiting else ActivityLiveState.idle
 
 

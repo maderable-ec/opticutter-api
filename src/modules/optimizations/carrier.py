@@ -57,6 +57,10 @@ class DocumentCarrier:
     payment_cash_amount: Optional[float] = None
     payment_transfer_amount: Optional[float] = None
     payment_credit_amount: Optional[float] = None
+    # What the client paid of that credit after the sale, already added up: the
+    # render layer never reads the payments. 0 on an order with none, which
+    # prints the block exactly as it always did.
+    credit_collected: float = 0.0
 
     def service_net(self, service: dict) -> float:
         """One service line's net total (it is registered tax-included)."""
@@ -139,4 +143,5 @@ class DocumentCarrier:
         carrier.payment_cash_amount = order.payment_cash_amount
         carrier.payment_transfer_amount = order.payment_transfer_amount
         carrier.payment_credit_amount = order.payment_credit_amount
+        carrier.credit_collected = order.credit_collected
         return carrier

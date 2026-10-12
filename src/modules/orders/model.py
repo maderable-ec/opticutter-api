@@ -103,6 +103,44 @@ ACTIVITY_TRANSITIONS: dict[ActivityStatus, set[ActivityStatus]] = {
     ActivityStatus.done: set(),
 }
 
+
+class PauseReason(str, Enum):
+    """Why an activity in progress was stopped by something outside the worker.
+
+    A pause takes its stretch out of the worker's time: an order waiting on
+    boards is not an operator being slow. Any reason is valid for any activity
+    -- the bander runs out of pieces when the saw runs out of boards.
+    """
+
+    no_boards = "no_boards"
+    no_edge_banding = "no_edge_banding"
+    machine_failure = "machine_failure"
+
+
+# What the shop floor, the history and the notification read.
+PAUSE_REASON_LABELS: dict["PauseReason", str] = {
+    PauseReason.no_boards: "Sin tableros",
+    PauseReason.no_edge_banding: "Sin canto",
+    PauseReason.machine_failure: "Daño de máquina",
+}
+
+
+class PaymentMethod(str, Enum):
+    """How money arrived AFTER the sale. Credit is not one: it is what is owed."""
+
+    cash = "cash"
+    transfer = "transfer"
+
+
+PAYMENT_METHOD_LABELS: dict["PaymentMethod", str] = {
+    PaymentMethod.cash: "efectivo",
+    PaymentMethod.transfer: "transferencia",
+}
+
+# A balance under a cent is rounding, not a debt.
+BALANCE_TOLERANCE = 0.01
+
+
 # Who registers each activity: the operator cuts, the bander bands and does the
 # additional work. Same two-layer scheme as the order's own machine -- the
 # ``orders:activities`` permission opens the endpoint, this filters the activity.
@@ -391,6 +429,13 @@ class OrderModel(TimestampMixin, AuditMixin, Base):
         cascade="all, delete-orphan",
         order_by="OrderAttachmentModel.id",
     )
+    # Money received after the sale (see ``OrderPaymentModel``), oldest first.
+    payments: Mapped[list["OrderPaymentModel"]] = relationship(
+        "OrderPaymentModel",
+        back_populates="order",
+        cascade="all, delete-orphan",
+        order_by="OrderPaymentModel.id",
+    )
     # Back-reference over the FK the quote already carries (``preorders.order_id``):
     # the order itself stores nothing, so there is no column and no migration. A
     # LIST and not a scalar because the link is N:1 -- ``create()`` dedupes, so two
@@ -424,6 +469,24 @@ class OrderModel(TimestampMixin, AuditMixin, Base):
     def preorder_code(self) -> Optional[str]:
         preorder = self.preorder
         return preorder.code if preorder is not None else None
+
+    @property
+    def credit_collected(self) -> float:
+        """What came in after the sale: the payments standing (not voided)."""
+        return round(sum(p.amount for p in self.payments if p.voided_at is None), 2)
+
+    @property
+    def credit_balance(self) -> float:
+        """What the client still owes: the credit sold less what came in since.
+
+        A cancelled order owes nothing: its amounts survive as a record of
+        what was agreed, not as a debt. The same figure as
+        ``payments.credit_balance_expr`` reads in SQL.
+        """
+        if self.status == OrderStatus.cancelled.value:
+            return 0.0
+        owed = (self.payment_credit_amount or 0.0) - self.credit_collected
+        return round(owed, 2) if owed > BALANCE_TOLERANCE else 0.0
 
     @property
     def created_by_name(self) -> Optional[str]:
@@ -499,9 +562,104 @@ class OrderActivityModel(TimestampMixin, AuditMixin, Base):
     )
     finished_by_label: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
 
+    # The pause in force right now, mirrored off ``pauses`` so the board, the
+    # listing and the live state filter on real columns. NULL = not paused.
+    # ``status`` stays ``in_progress`` throughout: a pause is a property of work
+    # under way, not a step of the activity's own machine.
+    paused_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    pause_reason: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+
     order: Mapped["OrderModel"] = relationship(
         "OrderModel", back_populates="activities"
     )
+    pauses: Mapped[list["OrderActivityPauseModel"]] = relationship(
+        "OrderActivityPauseModel",
+        back_populates="activity",
+        cascade="all, delete-orphan",
+        order_by="OrderActivityPauseModel.started_at",
+    )
+
+
+class OrderActivityPauseModel(TimestampMixin, AuditMixin, Base):
+    """One pause of an activity: why, from when to when, and who registered it.
+
+    The record behind ``OrderActivityModel.paused_at``. ``ended_at`` null is the
+    pause in force; the partial unique index keeps it to one per activity.
+    ``order_id`` is denormalized for the reports, which read pauses by range and
+    branch without walking through the activity.
+    """
+
+    __tablename__ = "order_activity_pauses"
+    __table_args__ = (
+        Index("ix_order_activity_pauses_activity_id", "activity_id"),
+        Index("ix_order_activity_pauses_order_id", "order_id"),
+        Index("ix_order_activity_pauses_started_at", "started_at"),
+        Index(
+            "uq_order_activity_pauses_open",
+            "activity_id",
+            unique=True,
+            postgresql_where=text("ended_at IS NULL"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    activity_id: Mapped[int] = mapped_column(
+        ForeignKey("order_activities.id", ondelete="CASCADE")
+    )
+    order_id: Mapped[int] = mapped_column(ForeignKey("orders.id", ondelete="CASCADE"))
+    reason: Mapped[str] = mapped_column(String(32))
+    note: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime)
+    started_by: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    started_by_label: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    ended_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    ended_by: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    ended_by_label: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+
+    activity: Mapped["OrderActivityModel"] = relationship(
+        "OrderActivityModel", back_populates="pauses"
+    )
+
+
+class OrderPaymentModel(TimestampMixin, AuditMixin, Base):
+    """Money received AFTER the sale, against the order's credit.
+
+    The sale's own terms stay where they were, frozen on the order
+    (``payment_cash_amount`` / ``payment_transfer_amount`` /
+    ``payment_credit_amount``). This is what comes in later -- on dispatch, or
+    whenever the client pays -- so the credit sold stops reading as owed for
+    ever. Never deleted: a mistake is voided, with who and why.
+    """
+
+    __tablename__ = "order_payments"
+    __table_args__ = (
+        Index("ix_order_payments_order_id", "order_id"),
+        Index("ix_order_payments_paid_at", "paid_at"),
+        CheckConstraint("amount > 0", name="amount_positive"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    order_id: Mapped[int] = mapped_column(ForeignKey("orders.id", ondelete="CASCADE"))
+    method: Mapped[str] = mapped_column(String(16))
+    amount: Mapped[float] = mapped_column(Float)
+    paid_at: Mapped[datetime] = mapped_column(DateTime)
+    note: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    received_by: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    received_by_label: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    voided_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    voided_by: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    voided_by_label: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    void_reason: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+
+    order: Mapped["OrderModel"] = relationship("OrderModel", back_populates="payments")
 
 
 class OrderLineModel(TimestampMixin, AuditMixin, Base):

@@ -28,3 +28,6 @@ class NotificationType(str, Enum):
     # -- and ONLY when something is actually low, which is what makes it a
     # purchasing signal instead of one more "a sale happened" line.
     order_low_stock = "order.low_stock"
+    # Somebody on the shop floor paused an activity because it cannot go on: no
+    # boards, no edge banding, a machine down. The office is who can fix that.
+    order_activity_paused = "order.activity_paused"

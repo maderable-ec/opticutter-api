@@ -14,7 +14,13 @@ from src.modules.optimizations.schemas import (
     Requirement,
     validate_material_graph,
 )
-from src.modules.orders.model import ActivityStatus, ActivityType, OrderStatus
+from src.modules.orders.model import (
+    ActivityStatus,
+    ActivityType,
+    OrderStatus,
+    PauseReason,
+    PaymentMethod,
+)
 from src.modules.orders.production import ActivityLiveState, LiveState
 from src.shared.schemas import CamelModel
 
@@ -96,6 +102,51 @@ class OrderPaymentInput(CamelModel):
     )
 
 
+class OrderPaymentCreate(CamelModel):
+    """Money received after the sale, against the order's credit.
+
+    Cash and transfer only: credit is what is owed, not a way of paying it. At
+    least one amount > 0, and together no more than the balance.
+    """
+
+    cash_amount: Optional[float] = Field(
+        default=None, ge=0, description="Amount received in cash"
+    )
+    transfer_amount: Optional[float] = Field(
+        default=None, ge=0, description="Amount received by bank transfer"
+    )
+    note: Optional[str] = Field(
+        default=None, max_length=255, description="Reference or comment"
+    )
+
+
+class OrderPaymentVoid(CamelModel):
+    """Voids a payment registered by mistake. The row stays, with who and why."""
+
+    reason: str = Field(..., min_length=1, max_length=255)
+
+
+class OrderPaymentResponse(CamelModel):
+    """One payment received after the sale."""
+
+    id: int
+    method: PaymentMethod
+    amount: float
+    paid_at: datetime
+    note: Optional[str] = None
+    received_by: Optional[int] = Field(
+        default=None, description="User id who registered it"
+    )
+    received_by_label: Optional[str] = Field(
+        default=None, description="Frozen name of who registered it"
+    )
+    voided_at: Optional[datetime] = Field(
+        default=None, description="Set when the payment was voided: it no longer counts"
+    )
+    voided_by_label: Optional[str] = None
+    void_reason: Optional[str] = None
+
+
 class OrderStatusUpdate(CamelModel):
     """Requested state transition."""
 
@@ -104,8 +155,11 @@ class OrderStatusUpdate(CamelModel):
     payment: Optional[OrderPaymentInput] = Field(
         default=None,
         description=(
-            "Payment method (cash / bank transfer / credit), required when moving "
-            "from 'confirmed' to 'queued' (at least one amount > 0)"
+            "Moving from 'confirmed' to 'queued': the payment method (cash / bank "
+            "transfer / credit), required, at least one amount > 0. Moving to "
+            "'dispatched': what the client pays of the credit on delivery (cash "
+            "and/or transfer, optional, never more than the balance); if a "
+            "balance remains, 'note' is required"
         ),
     )
     external_invoice_id: Optional[str] = Field(
@@ -265,6 +319,27 @@ class CuttingProgress(CamelModel):
     total_pieces: int
 
 
+class ActivityPauseRequest(CamelModel):
+    """Pauses an activity in progress, with the reason it cannot go on."""
+
+    reason: PauseReason = Field(
+        ..., description="no_boards | no_edge_banding | machine_failure"
+    )
+    note: Optional[str] = Field(default=None, max_length=255)
+
+
+class ActivityPauseResponse(CamelModel):
+    """One pause of an activity. ``ended_at`` null: the pause in force."""
+
+    id: int
+    reason: PauseReason
+    note: Optional[str] = None
+    started_at: datetime
+    started_by_label: Optional[str] = None
+    ended_at: Optional[datetime] = None
+    ended_by_label: Optional[str] = None
+
+
 class OrderActivityResponse(CamelModel):
     """One activity of an order in process, with its clocks and its own progress.
 
@@ -299,6 +374,18 @@ class OrderActivityResponse(CamelModel):
     )
     finished_by_label: Optional[str] = Field(
         default=None, description="Frozen name of who finished it"
+    )
+    paused_at: Optional[datetime] = Field(
+        default=None,
+        description="Since when the activity is paused. NULL: not paused. The "
+        "status stays 'in_progress' while paused; no piece can be marked and the "
+        "activity cannot be finished until it is resumed",
+    )
+    pause_reason: Optional[PauseReason] = Field(
+        default=None, description="Why it is paused (null when it is not)"
+    )
+    pauses: List[ActivityPauseResponse] = Field(
+        default_factory=list, description="Every pause registered, oldest first"
     )
     progress: Optional[CuttingProgress] = Field(
         default=None,
@@ -399,6 +486,19 @@ class OrderResponse(CamelModel):
     )
     payment_credit_amount: Optional[float] = Field(
         default=None, description="Credit amount (registered on confirmed → queued)"
+    )
+    payments: List[OrderPaymentResponse] = Field(
+        default_factory=list,
+        description="Money received AFTER the sale against the credit (on "
+        "dispatch or later), voided ones included and flagged",
+    )
+    credit_collected: float = Field(
+        default=0.0, description="Sum of the payments standing (not voided)"
+    )
+    credit_balance: float = Field(
+        default=0.0,
+        description="What the client still owes: the credit sold less what came "
+        "in since. 0 on a cancelled order",
     )
     activities: List[OrderActivityResponse] = Field(
         default_factory=list,
@@ -670,14 +770,21 @@ class ActivityLiveStatus(CamelModel):
 
     state: ActivityLiveState = Field(
         ...,
-        description="'working': an activity in progress. 'waiting': none in "
-        "progress, some ready (a piece of its set already cut). 'idle': neither",
+        description="'working': an activity in progress. 'paused': none being "
+        "worked, some registered as paused. 'waiting': none in progress, some "
+        "ready (a piece of its set already cut). 'idle': neither",
     )
     since: Optional[datetime] = Field(
         default=None,
-        description="Working: the start of the oldest in progress. Waiting: "
-        "when the oldest ready one became ready. Idle: the last close "
-        "(null: never closed)",
+        description="Working: the start of the oldest in progress. Paused: the "
+        "oldest pause in force. Waiting: when the oldest ready one became "
+        "ready. Idle: the last close (null: never closed)",
+    )
+    pause_reason: Optional[PauseReason] = Field(
+        default=None, description="Paused: the reason of the oldest pause in force"
+    )
+    paused_order_codes: List[str] = Field(
+        default_factory=list, description="Codes of the orders paused, oldest first"
     )
     order_codes: List[str] = Field(
         default_factory=list,
@@ -700,14 +807,23 @@ class BranchProductionStatus(CamelModel):
     state: LiveState = Field(
         ...,
         description="'cutting': a cutting event (piece marked, cut taken or "
-        "closed) within the idle gap. 'stopped': nothing within the gap while "
-        "there is work (an order queued or a cut in progress). 'idle': nothing "
-        "within the gap and nothing to do",
+        "closed) within the idle gap. 'paused': nothing within the gap and a cut "
+        "registered as paused. 'stopped': nothing within the gap while there is "
+        "work (an order queued or a cut in progress). 'idle': nothing within the "
+        "gap and nothing to do",
     )
     since: Optional[datetime] = Field(
         default=None,
         description="When the current state began: the start of the continuous "
-        "run while cutting, the last event otherwise (null: never cut)",
+        "run while cutting, the oldest pause in force while paused, the last "
+        "event otherwise (null: never cut)",
+    )
+    pause_reason: Optional[PauseReason] = Field(
+        default=None, description="Paused: the reason of the oldest pause in force"
+    )
+    paused_order_codes: List[str] = Field(
+        default_factory=list,
+        description="Codes of the orders whose cut is paused, oldest pause first",
     )
     last_event_at: Optional[datetime] = Field(
         default=None, description="The branch's latest cutting event (null: never)"

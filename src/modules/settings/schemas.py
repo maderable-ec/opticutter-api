@@ -1,8 +1,9 @@
 from typing import List, Optional
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from src.shared.schemas import CamelModel
+from src.shared.work_schedule import DAY_KEYS, parse_schedule
 
 
 # --- Cutting parameters --------------------------------------------------------
@@ -125,3 +126,51 @@ class CompanySettingsUpdate(CamelModel):
     email: Optional[str] = Field(None, max_length=128)
     phone: Optional[str] = Field(None, max_length=128)
     branches: Optional[List[Branch]] = None
+
+
+# --- Working hours ----------------------------------------------------------------
+class TimeWindow(CamelModel):
+    """One stretch of working hours on the shop's wall clock (``HH:MM``)."""
+
+    start: str = Field(..., pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    end: str = Field(..., pattern=r"^(([01]\d|2[0-3]):[0-5]\d|24:00)$")
+
+
+class WorkScheduleSettings(CamelModel):
+    """The shop's working hours, per weekday. A day with no window is closed.
+
+    One schedule for every branch. It is what the statistics read the cut's
+    time against: a stretch that ran across the night, the lunch hour or a
+    closed day is not work. Replaced whole on update (it is one value, not
+    seven), and changing it re-reads every past period with the new hours.
+    """
+
+    mon: List[TimeWindow] = Field(default_factory=list)
+    tue: List[TimeWindow] = Field(default_factory=list)
+    wed: List[TimeWindow] = Field(default_factory=list)
+    thu: List[TimeWindow] = Field(default_factory=list)
+    fri: List[TimeWindow] = Field(default_factory=list)
+    sat: List[TimeWindow] = Field(default_factory=list)
+    sun: List[TimeWindow] = Field(default_factory=list)
+
+    def to_stored(self) -> dict:
+        """The shape the settings row keeps (``shared/work_schedule.py``)."""
+        return {
+            day: [[window.start, window.end] for window in getattr(self, day)]
+            for day in DAY_KEYS
+        }
+
+    @classmethod
+    def from_stored(cls, stored: dict) -> "WorkScheduleSettings":
+        return cls(
+            **{
+                day: [{"start": start, "end": end} for start, end in stored[day]]
+                for day in DAY_KEYS
+            }
+        )
+
+    @model_validator(mode="after")
+    def _windows_are_ordered_and_apart(self):
+        # The one definition of a valid schedule; its ValueError is the 422.
+        parse_schedule(self.to_stored())
+        return self

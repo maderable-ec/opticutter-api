@@ -240,6 +240,8 @@ def test_banding_and_additional_read_working_waiting_or_idle(client, db_session)
     assert other["additional"] == {
         "state": "idle",
         "since": None,
+        "pauseReason": None,
+        "pausedOrderCodes": [],
         "orderCodes": [],
         "waitingCount": 0,
         "lastFinishedAt": None,

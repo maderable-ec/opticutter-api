@@ -1,3 +1,5 @@
+from typing import Optional
+
 from sqlalchemy import JSON, CheckConstraint, Float, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -59,3 +61,10 @@ class SettingsModel(TimestampMixin, AuditMixin, Base):
     company_email: Mapped[str] = mapped_column(String(128))
     company_phone: Mapped[str] = mapped_column(String(128))
     company_branches: Mapped[list] = mapped_column(JSON, default=list)
+
+    # The shop's working hours (``shared/work_schedule.py``): what tells a
+    # stretch of work from a night, a lunch hour or a weekend in every hour the
+    # statistics report. NULL on a row written before the column existed; read
+    # through ``SettingsService.get_work_schedule``, which coerces it to the
+    # default. One schedule for every branch.
+    work_schedule: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)

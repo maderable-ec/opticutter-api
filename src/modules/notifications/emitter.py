@@ -161,6 +161,16 @@ def _global_admins(db: Session) -> List[UserModel]:
     return UserService(db).list_by_roles([UserRole.ADMIN])
 
 
+def _admins_and_owner(db: Session, user_id: Optional[int]) -> List[UserModel]:
+    """Every active administrator, plus the seller the order belongs to."""
+    recipients = _global_admins(db)
+    if user_id is not None and all(user.id != user_id for user in recipients):
+        owner = db.get(UserModel, user_id)
+        if owner is not None and owner.is_active:
+            recipients.append(owner)
+    return recipients
+
+
 def _recipients(db: Session, audience: _Audience, order) -> List[UserModel]:
     """Adapter for ``resolve_plan``'s audiences."""
     if audience is _Audience.GLOBAL_ADMINS_SELLERS:
@@ -257,6 +267,22 @@ def _render_low_stock(code: str, payload: Mapping[str, Any]) -> Tuple[str, str]:
     )
 
 
+def _render_activity_paused(code: str, payload: Mapping[str, Any]) -> Tuple[str, str]:
+    # The reason is the headline: it is what somebody in the office has to act
+    # on. Branch and note are clipped for the same reason ``_render_low_stock``
+    # clips -- each can fill the body on its own.
+    activity = payload.get("activityLabel") or "trabajo"
+    reason = payload.get("reasonLabel") or "En pausa"
+    branch = _clip(payload.get("branchName") or "", 40)
+    note = _clip(payload.get("note") or "", 120)
+    where = f" en {branch}" if branch else ""
+    detail = f" {note}" if note else ""
+    return (
+        f"Orden {code}: {activity} en pausa",
+        f"{reason}. El {activity} de la orden {code} se pausó{where}.{detail}",
+    )
+
+
 _RENDERERS: Dict[NotificationType, Renderer] = {
     NotificationType.order_completed: _render_completed,
     NotificationType.order_queued: _render_queued,
@@ -265,6 +291,7 @@ _RENDERERS: Dict[NotificationType, Renderer] = {
     NotificationType.order_branch_left: _render_branch_left,
     NotificationType.order_cancelled: _render_cancelled,
     NotificationType.order_low_stock: _render_low_stock,
+    NotificationType.order_activity_paused: _render_activity_paused,
 }
 
 
@@ -435,6 +462,45 @@ def notify_order_low_stock(
             "branchName": branch_name,
             "productNames": names,
             "count": len(names),
+        },
+    )
+
+
+def notify_activity_paused(
+    db: Session,
+    order,
+    *,
+    activity: str,
+    activity_label: str,
+    reason: str,
+    reason_label: str,
+    branch_name: Optional[str] = None,
+    note: Optional[str] = None,
+    owner_user_id: Optional[int] = None,
+    actor: Optional[Actor] = None,
+) -> None:
+    """The shop floor paused an activity it cannot go on with (best-effort).
+
+    Goes to the administrators -- who buy the boards, the tape, or call the
+    technician -- and to the seller the order belongs to, who is the one the
+    client will ask. Not on resume: work going on again asks nothing of anybody.
+
+    Everything arrives as plain strings, labels included: this module knows
+    neither the activities nor the pause reasons of ``orders``.
+    """
+    _emit(
+        db,
+        order,
+        NotificationType.order_activity_paused,
+        partial(_admins_and_owner, user_id=owner_user_id),
+        actor=actor,
+        data={
+            "activity": activity,
+            "activityLabel": activity_label,
+            "reason": reason,
+            "reasonLabel": reason_label,
+            "branchName": branch_name,
+            "note": note,
         },
     )
 

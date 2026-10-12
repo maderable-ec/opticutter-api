@@ -7,6 +7,7 @@ time series are parallel arrays over the same ``buckets`` axis.
 from datetime import date, datetime
 from typing import List, Literal, Optional
 
+from src.modules.orders.model import ActivityType, PauseReason, PaymentMethod
 from src.modules.orders.production import SheetCredit, SheetKind
 from src.shared.schemas import CamelModel
 
@@ -73,16 +74,25 @@ class AttendanceReport(CamelModel):
 
 # ------------------------------------------------------------ branch comparison
 class SalesFigures(CamelModel):
-    """Collected sales: the payment registered on entering the queue (``queuedAt``).
+    """Sales of the range, and the money that came in during it.
 
-    Two methods, as the office reads them: ``cash`` is money already received
-    (cash + bank transfer), ``credit`` is owed. Cancelled orders are out.
+    A sale is dated by its payment (``queuedAt``) and splits, as it was SOLD,
+    into ``cash`` (received on the spot: cash + bank transfer) and ``credit``
+    (sold on credit); the two add up to ``total``. Cancelled orders are out.
+
+    ``credit_collected`` is the credit paid back IN the range, whenever its
+    order was sold -- dated by when the money came in, like everything here.
+    ``credit_outstanding`` is not a period figure: it is what clients owe RIGHT
+    NOW, over every order, and it goes down with each payment.
     """
 
     cash: float
     credit: float
     total: float
     paid_orders: int
+    credit_collected: float = 0.0
+    credit_outstanding: float = 0.0
+    credit_outstanding_orders: int = 0
 
 
 class OrderFigures(CamelModel):
@@ -99,10 +109,18 @@ class ProductionFigures(CamelModel):
     are the saw travel of every sheet finished, and the banded metres the net
     tape of every banding closed (no waste factor). ``orders_banded`` and
     ``orders_additional`` count the bandings and additional works closed in
-    range, dated by the close. Hours split each business day's span
-    into effective and paused by the idle gap. ``days_worked`` and the average
-    start/end (minutes after the business's midnight) count only days with some
-    effective time: a lone event is not a workday. Rates are 0 without hours.
+    range, dated by the close.
+
+    The cut's time runs from taking an order to its last piece
+    (``orders/production.py``): ``loading_hours`` up to the first piece,
+    ``sawing_hours`` from there on, ``work_hours`` their sum -- what the rates
+    divide by. Registered pauses and the time off the work ran across are out;
+    ``paused_hours`` is the working time the cut spent in a registered pause.
+    ``days_worked`` and the average start/end (minutes after the business's
+    midnight) count only days with some work. Rates are 0 without hours.
+
+    ``effective_hours`` is ``work_hours`` under its old name, kept for one
+    release.
     """
 
     boards: float
@@ -110,6 +128,9 @@ class ProductionFigures(CamelModel):
     banded_linear_m: float
     orders_banded: int
     orders_additional: int
+    work_hours: float = 0.0
+    loading_hours: float = 0.0
+    sawing_hours: float = 0.0
     effective_hours: float
     paused_hours: float
     boards_per_hour: float
@@ -151,8 +172,11 @@ class ProductionDay(CamelModel):
     branch_name: str
     first_event_at: Optional[datetime]  # null: boards/orders but no event that day
     last_event_at: Optional[datetime]
-    effective_hours: float
-    paused_hours: float
+    work_hours: float = 0.0  # loading + sawing: the cut's time that day
+    loading_hours: float = 0.0
+    sawing_hours: float = 0.0
+    effective_hours: float  # ``work_hours`` under its old name, for one release
+    paused_hours: float  # working time in a registered pause of the cut
     boards: float
     cut_linear_m: float
     banded_linear_m: float  # bandings closed that day
@@ -183,13 +207,52 @@ class BranchMaterial(CamelModel):
     waste_estimate_m2: float
 
 
+class ProductionPause(CamelModel):
+    """One registered pause that overlaps the range, of any activity.
+
+    ``hours`` is the working time it took (the schedule's hours between its
+    start and its end, or now when it is still in force): a pause from 16:00 to
+    10:00 the next morning stopped the work four hours.
+    """
+
+    id: int
+    branch_id: int
+    branch_name: str
+    order_id: int
+    order_code: Optional[str]
+    client_name: str
+    activity: ActivityType
+    reason: PauseReason
+    note: Optional[str]
+    started_at: datetime
+    started_by: Optional[str]
+    ended_at: Optional[datetime]  # null: still paused
+    ended_by: Optional[str]
+    hours: float
+
+
+class PauseTotal(CamelModel):
+    """The pauses of the range by reason."""
+
+    reason: PauseReason
+    count: int
+    hours: float
+
+
 class ProductionReport(CamelModel):
-    """The production tab: days (newest first), the longest stops, material."""
+    """The production tab: days (newest first), the pauses, material.
+
+    ``stops`` is always empty: the stops used to be DERIVED from the gaps
+    between marks, and a stretch without marks now counts as work unless
+    somebody registered a pause. Kept for one release.
+    """
 
     range: RangeInfo
     idle_minutes: int
     days: List[ProductionDay]
     stops: List[ProductionStop]
+    pauses: List[ProductionPause] = []
+    pause_totals: List[PauseTotal] = []
     material: List[BranchMaterial]
 
 
@@ -208,6 +271,10 @@ class SellerFigures(CamelModel):
     average_ticket: float
     pending_count: int
     pending_amount: float
+    # Credit paid back in range on the seller's orders, whenever they were sold;
+    # and what their clients owe right now (a snapshot, like ``pending_*``).
+    credit_collected: float = 0.0
+    credit_outstanding: float = 0.0
 
 
 class SellerRow(SellerFigures):
@@ -242,6 +309,43 @@ class SellerOrder(CamelModel):
     credit: float
     total: float  # cash + transfer + credit
     invoice: Optional[str]
+    # Of that credit, what the client has paid since (to date) and still owes.
+    credit_collected: float = 0.0
+    credit_balance: float = 0.0
+
+
+class SellerCollection(CamelModel):
+    """A payment received in range on one of the seller's orders.
+
+    Dated by when the money came in (``paid_at``), not by the sale: credit sold
+    in September and paid in October is October's money.
+    """
+
+    payment_id: int
+    order_id: int
+    order_code: Optional[str]
+    client_name: str
+    branch_name: str
+    sold_at: Optional[datetime]
+    paid_at: datetime
+    day: date  # the business day the money came in
+    method: PaymentMethod
+    amount: float
+    received_by: Optional[str]
+    note: Optional[str]
+
+
+class SellerOutstandingOrder(CamelModel):
+    """An order of the seller the client still owes on, today."""
+
+    order_id: int
+    order_code: Optional[str]
+    client_name: str
+    branch_name: str
+    sold_at: Optional[datetime]
+    credit: float
+    credit_collected: float
+    credit_balance: float
 
 
 class SellerPendingOrder(CamelModel):
@@ -257,7 +361,9 @@ class SellerPendingOrder(CamelModel):
 
 class SellerOrdersReport(CamelModel):
     """The orders behind one seller's row. ``figures`` IS the row: it adds up
-    from ``paid`` (the sales) and ``pending`` (what is still to collect)."""
+    from ``paid`` (the sales), ``pending`` (what is still to collect),
+    ``collections`` (the credit paid back in range) and ``outstanding`` (what
+    their clients owe today)."""
 
     range: RangeInfo
     user_id: int
@@ -265,18 +371,27 @@ class SellerOrdersReport(CamelModel):
     figures: SellerFigures
     paid: List[SellerOrder]
     pending: List[SellerPendingOrder]
+    collections: List[SellerCollection] = []
+    outstanding: List[SellerOutstandingOrder] = []
 
 
 class OperatorFigures(CamelModel):
     """An operator's cut in range, by the same rules as the production tab.
 
-    A sheet is credited to whoever marked its last piece; the hours are the
-    workday rule applied to the operator's OWN events.
+    A sheet is credited to whoever marked its last piece, and a stretch of the
+    cut's time to whoever closed it (the mark, or the pause, at its end). The
+    hours split like the branch's: loading, sawing and their sum.
+    ``effective_hours`` is ``work_hours`` under its old name, for one release.
     """
 
     pieces_cut: int
     boards: float
     cut_linear_m: float
+    work_hours: float = 0.0
+    loading_hours: float = 0.0
+    sawing_hours: float = 0.0
+    paused_hours: float = 0.0  # working time in the pauses they registered
+    pauses: int = 0
     effective_hours: float
     boards_per_hour: float
     meters_per_hour: float
@@ -333,11 +448,37 @@ class OperatorBoard(CamelModel):
     status: SheetCredit
 
 
+class OperatorOrderTime(CamelModel):
+    """The time one operator put into one order's cut, in range.
+
+    ``loading_hours`` up to the order's first piece, ``sawing_hours`` after it,
+    counted where THEY closed the stretch. ``paused_hours`` is the working time
+    the order's cut spent in a registered pause, whoever registered it.
+    """
+
+    order_id: int
+    order_code: Optional[str]
+    client_name: str
+    branch_name: str
+    taken_at: Optional[datetime]  # null: cut before the activities had clocks
+    first_piece_at: datetime
+    last_piece_at: datetime
+    loading_hours: float
+    sawing_hours: float
+    work_hours: float
+    paused_hours: float
+    pause_reasons: List[PauseReason]
+
+
 class OperatorBoardsReport(CamelModel):
     """The ledger behind one operator's row: every sheet they touched in range.
 
     ``boards`` and ``pieces_cut`` are the row's own figures, and add up from
     ``sheets``: the weights of the credited ones, the in-range marks of all.
+
+    ``orders`` is the same for the hours: order by order, what the row's time
+    is made of. They add up to the row except where two orders were open at
+    once -- the row counts that stretch a single time.
     """
 
     range: RangeInfo
@@ -347,14 +488,17 @@ class OperatorBoardsReport(CamelModel):
     credited_count: int
     pieces_cut: int
     sheets: List[OperatorBoard]
+    orders: List[OperatorOrderTime] = []
 
 
 class BanderFigures(CamelModel):
     """Banding and additional work closed in range, credited to who closed it.
 
-    Hours run from the activity's start to its close: the banding marks no
-    pieces, so its stops cannot be told apart the way the cut's can. The metres
-    are the order's NET tape (no waste factor), special edges included.
+    Hours run from the activity's start to its close, less its registered
+    pauses and the time off it ran across (the night, the lunch hour): the
+    banding marks no pieces, so that is all there is to read. ``paused_hours``
+    is the working time those pauses took. The metres are the order's NET tape
+    (no waste factor), special edges included.
 
     Every closed activity counts as work done (orders, metres), but only the
     CLOCKED ones carry time: a start and a close under a minute apart were
@@ -373,6 +517,7 @@ class BanderFigures(CamelModel):
     orders_additional_unclocked: int
     additional_hours: float
     average_additional_hours: float
+    paused_hours: float = 0.0
 
 
 class BanderRow(BanderFigures):
@@ -403,6 +548,7 @@ class BanderOrder(CamelModel):
     finished_at: datetime
     day: date  # the business day of the close
     hours: Optional[float]
+    paused_hours: float = 0.0  # working time in its registered pauses
     banded_linear_m: float  # the order's net tape; 0 for the additional work
 
 

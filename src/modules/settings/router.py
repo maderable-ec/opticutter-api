@@ -11,6 +11,7 @@ from src.modules.settings.schemas import (
     StockSettingsUpdate,
     TaxSettingsResponse,
     TaxSettingsUpdate,
+    WorkScheduleSettings,
 )
 from src.modules.settings.service import SettingsService, settings_service
 from src.modules.users.dependencies import require_permission
@@ -106,3 +107,22 @@ def update_stock_settings(
     """Partially updates the low-stock thresholds (admin only)."""
     svc.update_stock(data)
     return ok(svc.get_stock_thresholds())
+
+
+@router.get("/work-schedule", response_model=DataResponse[WorkScheduleSettings])
+def get_work_schedule_settings(svc: SettingsService = Depends(settings_service)):
+    """Returns the shop's working hours (the default until somebody edits them)."""
+    return ok(WorkScheduleSettings.from_stored(svc.get_work_schedule().to_dict()))
+
+
+@router.patch("/work-schedule", response_model=DataResponse[WorkScheduleSettings])
+def update_work_schedule_settings(
+    data: WorkScheduleSettings, svc: SettingsService = Depends(settings_service)
+):
+    """Replaces the working hours (admin only).
+
+    Every hour the statistics report is read against them, past periods
+    included: changing the schedule changes what last month's hours say.
+    """
+    schedule = svc.update_work_schedule(data)
+    return ok(WorkScheduleSettings.from_stored(schedule.to_dict()))

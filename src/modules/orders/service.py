@@ -12,6 +12,7 @@ from src.modules.clients.schemas import ClientResponse
 from src.modules.clients.service import require_phone
 from src.modules.inventory.service import StockService
 from src.modules.notifications.emitter import (
+    notify_activity_paused,
     notify_order_branch_changed,
     notify_order_low_stock,
     notify_order_transition,
@@ -34,6 +35,8 @@ from src.modules.orders.model import (
     ACTIVITY_ROLES,
     ACTIVITY_START_NEEDS_A_CUT_PIECE,
     ACTIVITY_TRANSITIONS,
+    PAUSE_REASON_LABELS,
+    PAYMENT_METHOD_LABELS,
     TERMINAL_STATUSES,
     TRANSITION_ROLES,
     TRANSITIONS,
@@ -41,6 +44,7 @@ from src.modules.orders.model import (
     ActivityStatus,
     ActivityType,
     OrderActivityModel,
+    OrderActivityPauseModel,
     OrderBoardModel,
     OrderLineModel,
     OrderModel,
@@ -48,8 +52,17 @@ from src.modules.orders.model import (
     OrderPlacedPieceModel,
     OrderStatus,
     OrderStatusHistoryModel,
+    PauseReason,
+    PaymentMethod,
 )
 from src.modules.orders.order_events import OrderEvent, order_event_filter
+from src.modules.orders.payments import (
+    check_against_balance,
+    describe_amounts,
+    has_balance,
+    payment_amounts,
+    register_payments,
+)
 from src.modules.orders.schemas import (
     ActivityResult,
     CuttingPlanResponse,
@@ -59,6 +72,7 @@ from src.modules.orders.schemas import (
     OrderCreate,
     OrderExportLine,
     OrderExportResponse,
+    OrderPaymentCreate,
     OrderPaymentInput,
     PieceCutResponse,
     PlacedPieceResponse,
@@ -152,6 +166,8 @@ class OrderService(BranchScopedMixin):
         is_priority: Optional[bool] = None,
         activity: Optional[ActivityType] = None,
         activity_status: Optional[ActivityStatus] = None,
+        paused: Optional[bool] = None,
+        has_balance_due: Optional[bool] = None,
     ) -> Tuple[List[OrderModel], int]:
         """Lists orders with total count: ``(items, total)``.
 
@@ -176,7 +192,12 @@ class OrderService(BranchScopedMixin):
 
         ``activity``/``activity_status`` narrow to one stage of one parallel
         activity ("show me everything still to band"). Either alone works: the
-        type alone means "orders that carry this activity at all".
+        type alone means "orders that carry this activity at all". ``paused``
+        narrows to the orders with an activity paused right now (or without
+        one), and reads ``activity`` too: "every cut waiting on boards".
+
+        ``has_balance_due`` narrows to the orders the client still owes on (or
+        the ones settled): the credit sold less the payments since.
 
         ``date_field`` picks the moment ``date_from``/``date_to`` and ``actor_id``
         read: when the order was created, paid, finished... and who did it
@@ -193,7 +214,8 @@ class OrderService(BranchScopedMixin):
             selectinload(OrderModel.lines),
             selectinload(OrderModel.pieces),
             selectinload(OrderModel.history),
-            selectinload(OrderModel.activities),
+            selectinload(OrderModel.activities).selectinload(OrderActivityModel.pauses),
+            selectinload(OrderModel.payments),
             # ``load_only`` is load-bearing, not tidiness: a pre-order carries the
             # whole cut list as JSON (``materials``/``requirements``), so without
             # it a page of 20 orders drags 20 full cut lists into memory to read
@@ -225,6 +247,16 @@ class OrderService(BranchScopedMixin):
                     OrderActivityModel.status == activity_status.value
                 )
             query = query.filter(exists.exists())
+        if paused is not None:
+            in_pause = self.db.query(OrderActivityModel.id).filter(
+                OrderActivityModel.order_id == OrderModel.id,
+                OrderActivityModel.paused_at.isnot(None),
+            )
+            if activity is not None:
+                in_pause = in_pause.filter(OrderActivityModel.type == activity.value)
+            query = query.filter(in_pause.exists() if paused else ~in_pause.exists())
+        if has_balance_due is not None:
+            query = query.filter(has_balance() if has_balance_due else ~has_balance())
         if search:
             pattern = f"%{search}%"
             # Outer join: an order always has a client, but the join must not
@@ -649,6 +681,26 @@ class OrderService(BranchScopedMixin):
             if invoice:
                 self._ensure_invoice_unclaimed(order, invoice)
 
+        # Dispatch gate: what the client pays of the credit on delivery, and the
+        # balance that may be left. Delivering with money still owed is never
+        # blocked -- the shop does it -- but it has to be somebody's decision,
+        # so the note stops being optional. Checked here, written below.
+        dispatch_amounts = []
+        if to_status == OrderStatus.dispatched:
+            if payment is not None and (payment.credit_amount or 0) > 0:
+                raise ValidationError(
+                    "En el despacho solo se registra efectivo o transferencia",
+                    field="payment",
+                )
+            dispatch_amounts = payment_amounts(payment)
+            remaining = check_against_balance(order, dispatch_amounts)
+            if remaining > 0 and not (note or "").strip():
+                raise ValidationError(
+                    f"Queda un saldo de ${remaining:.2f}: indica quién autoriza "
+                    "el despacho y cuándo se cobra",
+                    field="note",
+                )
+
         # Cancelling is the only move that kills a sale, and the ONLY record of
         # why is the history row's ``note``: there is no cancellation reason nor
         # actor column. Required on BOTH origins -- from ``confirmed`` the quote
@@ -674,6 +726,9 @@ class OrderService(BranchScopedMixin):
             order.assigned_to_label = None
             cut = self._activity(order, ActivityType.cutting)
             if cut is not None:
+                # A cut that goes back to the queue is no longer paused: the
+                # pause was of work that, after all, has not started.
+                self._close_pause(cut, actor, now)
                 cut.status = ActivityStatus.pending.value
                 cut.started_at = None
                 cut.started_by = None
@@ -684,6 +739,14 @@ class OrderService(BranchScopedMixin):
             order.dispatched_at = now
             order.dispatched_by = actor.user_id
             order.dispatched_by_label = actor.label
+            if dispatch_amounts:
+                register_payments(order, dispatch_amounts, actor, now, note)
+                self._audit_row(
+                    order,
+                    actor,
+                    f"Abono al despachar: {describe_amounts(dispatch_amounts)}",
+                    now,
+                )
 
         # Payment method: freezes the amounts on entering the queue (informational).
         # The admin in_process → queued rollback doesn't hit this (current != confirmed).
@@ -779,6 +842,12 @@ class OrderService(BranchScopedMixin):
         ):
             raise BusinessRuleError(
                 "Solo se pueden marcar piezas con el corte en proceso"
+            )
+        # A paused cut takes no marks: the pause is out of the operator's time,
+        # so work registered inside it would be work nobody is charged for.
+        if cut_activity.paused_at is not None:
+            raise BusinessRuleError(
+                "El corte está en pausa: reanúdalo para marcar piezas"
             )
         piece = self.db.get(OrderPlacedPieceModel, placed_piece_id)
         if piece is None or piece.order_id != order.id:
@@ -983,6 +1052,12 @@ class OrderService(BranchScopedMixin):
                     f"Transición de {label} inválida de '{current.value}' a "
                     f"'{to_status.value}'"
                 )
+            # Resume first: closing straight out of a pause would leave whatever
+            # was worked since the pause outside the activity's time.
+            if activity.paused_at is not None:
+                raise BusinessRuleError(
+                    f"El {label} está en pausa: reanúdalo antes de terminarlo"
+                )
             starting_the_cut = (
                 activity_type == ActivityType.cutting
                 and to_status == ActivityStatus.in_progress
@@ -1040,6 +1115,240 @@ class OrderService(BranchScopedMixin):
             order_status=OrderStatus(order.status),
             activity=self._activity_response(order, activity),
         )
+
+    def pause_activity(
+        self,
+        order_id: int,
+        activity_type: ActivityType,
+        reason: PauseReason,
+        note: Optional[str] = None,
+        actor: Optional[Actor] = None,
+        branch_scope: Optional[int] = None,
+    ) -> ActivityResult:
+        """Pauses an activity in progress, with the reason it cannot go on.
+
+        The activity stays ``in_progress``: paused is a property of work under
+        way (``paused_at``/``pause_reason``, mirrored off the pause row), not a
+        step of its machine. What it buys is the stretch out of the worker's
+        time -- an order waiting on boards is not an operator being slow.
+
+        Idempotent: pausing a paused activity changes nothing, whatever reason
+        the second call brings.
+        """
+        actor = actor or system_actor()
+        order = self.get_scoped_or_404(order_id, branch_scope)
+        activity = self._registrable_activity(order, activity_type, actor)
+        if activity.paused_at is None:
+            label = ACTIVITY_LABELS[activity_type]
+            if (
+                OrderStatus(order.status) not in ACTIVITY_MUTABLE_ORDER_STATUSES
+                or ActivityStatus(activity.status) != ActivityStatus.in_progress
+            ):
+                raise BusinessRuleError(
+                    f"El {label} solo se pausa mientras está en curso"
+                )
+            note = (note or "").strip() or None
+            # One instant for the pause row, its mirror and the history row.
+            now = datetime.utcnow()
+            activity.pauses.append(
+                OrderActivityPauseModel(
+                    order_id=order.id,
+                    reason=reason.value,
+                    note=note,
+                    started_at=now,
+                    started_by=actor.user_id,
+                    started_by_label=actor.label,
+                )
+            )
+            activity.paused_at = now
+            activity.pause_reason = reason.value
+            detail = f" — {note}" if note else ""
+            self._audit_row(
+                order,
+                actor,
+                f"{label.capitalize()} en pausa: {PAUSE_REASON_LABELS[reason]}{detail}",
+                now,
+            )
+            # Read before the commit: afterwards the order is expired and every
+            # attribute is a query, and the notification must not run one.
+            branch_name = order.branch.name if order.branch else None
+            owner_id = order.created_by
+            self.db.commit()
+            self.db.refresh(order)
+            self.db.refresh(activity)
+            # Best-effort, post-commit: the office is who can fix what stopped it.
+            notify_activity_paused(
+                self.db,
+                order,
+                activity=activity_type.value,
+                activity_label=label,
+                reason=reason.value,
+                reason_label=PAUSE_REASON_LABELS[reason],
+                branch_name=branch_name,
+                note=note,
+                owner_user_id=owner_id,
+                actor=actor,
+            )
+        return self._activity_result(order, activity)
+
+    def resume_activity(
+        self,
+        order_id: int,
+        activity_type: ActivityType,
+        actor: Optional[Actor] = None,
+        branch_scope: Optional[int] = None,
+    ) -> ActivityResult:
+        """Lifts the pause of an activity. Idempotent: a no-op when not paused."""
+        actor = actor or system_actor()
+        order = self.get_scoped_or_404(order_id, branch_scope)
+        activity = self._registrable_activity(order, activity_type, actor)
+        if activity.paused_at is not None:
+            now = datetime.utcnow()
+            self._close_pause(activity, actor, now)
+            label = ACTIVITY_LABELS[activity_type]
+            self._audit_row(order, actor, f"{label.capitalize()} reanudado", now)
+            self.db.commit()
+            self.db.refresh(order)
+            self.db.refresh(activity)
+        return self._activity_result(order, activity)
+
+    def _registrable_activity(
+        self, order: OrderModel, activity_type: ActivityType, actor: Actor
+    ) -> OrderActivityModel:
+        """The order's activity, once the actor's role may register it."""
+        self._ensure_activities(order)
+        label = ACTIVITY_LABELS[activity_type]
+        if actor.roles and not set(actor.roles) & {
+            r.value for r in ACTIVITY_ROLES[activity_type]
+        }:
+            raise AuthorizationError(f"Tu rol no puede registrar el {label}")
+        activity = self._activity(order, activity_type)
+        if activity is None:
+            raise BusinessRuleError(f"Esta orden no lleva {label}")
+        return activity
+
+    @staticmethod
+    def _close_pause(activity: OrderActivityModel, actor: Actor, now: datetime) -> None:
+        """Ends the pause in force, if any, and clears its mirror."""
+        for pause in activity.pauses:
+            if pause.ended_at is None:
+                pause.ended_at = now
+                pause.ended_by = actor.user_id
+                pause.ended_by_label = actor.label
+        activity.paused_at = None
+        activity.pause_reason = None
+
+    def _activity_result(
+        self, order: OrderModel, activity: OrderActivityModel
+    ) -> ActivityResult:
+        return ActivityResult(
+            order_id=order.id,
+            order_code=order.code,
+            order_status=OrderStatus(order.status),
+            activity=self._activity_response(order, activity),
+        )
+
+    @staticmethod
+    def _audit_row(
+        order: OrderModel, actor: Actor, note: str, now: Optional[datetime] = None
+    ) -> None:
+        """A history row with ``from == to``: something that is not a transition.
+
+        The same shape ``set_priority`` and ``change_branch`` write, so a pause
+        or a payment shows on the order's timeline. Every reader of history
+        EVENTS already skips these rows (``from_status IS DISTINCT FROM
+        to_status``), and ``status_changed_at`` is not touched.
+        """
+        order.history.append(
+            OrderStatusHistoryModel(
+                from_status=order.status,
+                to_status=order.status,
+                actor=actor.type,
+                actor_user_id=actor.user_id,
+                actor_label=actor.label,
+                note=note[:512],
+                created_at=now or datetime.utcnow(),
+            )
+        )
+
+    # ------------------------------------------------------------------ payments
+    def add_payment(
+        self,
+        order_id: int,
+        data: OrderPaymentCreate,
+        actor: Optional[Actor] = None,
+        branch_scope: Optional[int] = None,
+    ) -> OrderModel:
+        """Registers money received after the sale, against the order's credit.
+
+        Not a transition and not tied to one: the client pays on delivery, or a
+        week later, so this works in every status the order can be in once it
+        was paid into the queue -- dispatched included. Never on a cancelled
+        order, which owes nothing.
+        """
+        actor = actor or system_actor()
+        order = self.get_scoped_or_404(order_id, branch_scope)
+        if OrderStatus(order.status) == OrderStatus.cancelled:
+            raise BusinessRuleError("Una orden cancelada no recibe pagos")
+        if order.queued_at is None:
+            raise BusinessRuleError(
+                "La forma de pago se registra al enviar la orden a cola"
+            )
+        amounts = payment_amounts(data)
+        if not amounts:
+            raise ValidationError(
+                "Ingresa al menos un monto mayor a 0", field="payment"
+            )
+        remaining = check_against_balance(order, amounts)
+        now = datetime.utcnow()
+        register_payments(order, amounts, actor, now, data.note)
+        self._audit_row(
+            order,
+            actor,
+            f"Abono: {describe_amounts(amounts)} · saldo ${remaining:.2f}",
+            now,
+        )
+        self.db.commit()
+        self.db.refresh(order)
+        return order
+
+    def void_payment(
+        self,
+        order_id: int,
+        payment_id: int,
+        reason: str,
+        actor: Optional[Actor] = None,
+        branch_scope: Optional[int] = None,
+    ) -> OrderModel:
+        """Voids a payment registered by mistake. The row stays, flagged.
+
+        The balance goes back up by its amount. Idempotent: voiding a voided
+        payment changes nothing.
+        """
+        actor = actor or system_actor()
+        order = self.get_scoped_or_404(order_id, branch_scope)
+        payment = next((p for p in order.payments if p.id == payment_id), None)
+        if payment is None:
+            raise EntityNotFoundError("OrderPayment", payment_id)
+        reason = (reason or "").strip()
+        if not reason:
+            raise ValidationError("Indica el motivo de la anulación", field="reason")
+        if payment.voided_at is None:
+            now = datetime.utcnow()
+            payment.voided_at = now
+            payment.voided_by = actor.user_id
+            payment.voided_by_label = actor.label
+            payment.void_reason = reason
+            method = PAYMENT_METHOD_LABELS[PaymentMethod(payment.method)]
+            self._audit_row(
+                order,
+                actor,
+                f"Abono anulado: {method} ${payment.amount:.2f} — {reason}",
+                now,
+            )
+            self.db.commit()
+            self.db.refresh(order)
+        return order
 
     def _check_activity_floor(
         self,
@@ -1702,6 +2011,9 @@ def _activity_responses(
             finished_at=a.finished_at,
             finished_by=a.finished_by,
             finished_by_label=a.finished_by_label,
+            paused_at=a.paused_at,
+            pause_reason=a.pause_reason,
+            pauses=a.pauses,
             progress=progress_by_set[ACTIVITY_PIECES[ActivityType(a.type)]],
         )
         for a in sorted(activities, key=lambda a: a.type)
