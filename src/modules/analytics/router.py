@@ -27,6 +27,8 @@ from src.modules.analytics.schemas import (
     SellerReport,
 )
 from src.modules.analytics.service import AnalyticsService, analytics_service
+from src.modules.consumables.schemas import ConsumableReport
+from src.modules.consumables.service import ConsumableService, consumable_service
 from src.modules.users.dependencies import require_permission
 from src.modules.users.enums import UserRole
 from src.shared.responses import ERROR_RESPONSES, DataResponse, ok
@@ -160,6 +162,20 @@ def get_bander_orders(
     """The work behind one bander's row: each banding and additional work they
     closed in range, with its time or why it has none."""
     return ok(svc.bander_orders(user_id, dr, branch_id=branch_id))
+
+
+@router.get("/consumables", response_model=DataResponse[ConsumableReport])
+def get_consumables(
+    dr: DateRange = Depends(),
+    branch_id: Optional[int] = _BRANCH_QUERY,
+    svc: ConsumableService = Depends(consumable_service),
+):
+    """Blades and glue: how many the shop went through and what each one gave.
+
+    The units mounted in the range, the yield of the lives that closed in it
+    (a life is dated by the day the blade came off) and the ones in use today.
+    """
+    return ok(svc.report(dr.start, dr.end, branch_id=branch_id))
 
 
 @router.get("/attendance", response_model=DataResponse[AttendanceReport])

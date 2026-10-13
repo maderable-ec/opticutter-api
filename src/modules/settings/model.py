@@ -68,3 +68,10 @@ class SettingsModel(TimestampMixin, AuditMixin, Base):
     # through ``SettingsService.get_work_schedule``, which coerces it to the
     # default. One schedule for every branch.
     work_schedule: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
+    # The standard glue load of the edge bander's pot, in kg
+    # (``src/modules/consumables/``): what the bander's control starts at. Each
+    # load freezes the kg it actually took, so retuning this never rewrites a
+    # past one. NULL on a row written before the column existed; read through
+    # ``SettingsService.get_glue_load_kg``, which falls back to ``config``.
+    glue_load_kg: Mapped[Optional[float]] = mapped_column(Float, nullable=True)

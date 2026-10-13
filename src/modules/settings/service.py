@@ -6,6 +6,7 @@ from src.modules.products.model import ProductType
 from src.modules.settings.model import SETTINGS_ID, SettingsModel
 from src.modules.settings.schemas import (
     CompanySettingsUpdate,
+    ConsumableSettingsUpdate,
     CuttingSettingsUpdate,
     PreOrderSettingsUpdate,
     StockSettingsUpdate,
@@ -188,6 +189,26 @@ class SettingsService:
         self._stamp_updated_by(settings)
         self.db.commit()
         return self.get_work_schedule()
+
+    def get_glue_load_kg(self) -> float:
+        """The standard glue load in kg, the runtime source of truth.
+
+        What the shop floor's control starts at and what a load registered
+        without a quantity takes (``ConsumableService``). A row written before
+        the column existed reads as ``config.GLUE_LOAD_KG``.
+        """
+        stored = self.get_or_init().glue_load_kg
+        return stored if stored is not None else config.GLUE_LOAD_KG
+
+    def update_consumables(self, data: ConsumableSettingsUpdate) -> float:
+        """Applies a partial PATCH to the consumables settings."""
+        settings = self.get_or_init()
+        for field, value in data.model_dump(exclude_unset=True).items():
+            if value is not None:
+                setattr(settings, field, value)
+        self._stamp_updated_by(settings)
+        self.db.commit()
+        return self.get_glue_load_kg()
 
     def update_company(self, data: CompanySettingsUpdate) -> SettingsModel:
         """Applies a partial PATCH to the company data."""

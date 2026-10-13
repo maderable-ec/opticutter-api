@@ -156,6 +156,13 @@ def test_cutting_plan_carries_the_client(client, db_session):
     assert plan_client["lastName"] == "Lovelace"
 
 
+def test_cutting_plan_carries_the_branch_of_its_saw(client, db_session):
+    """A blade changed from the touch view is registered to the order's branch."""
+    order = _create_order(client, db_session)
+
+    assert _get_plan(client, order["id"])["branchId"] == 1
+
+
 def test_cutting_plan_carries_the_branch_printing_switch(client, db_session):
     """The touch view gates its own label dispatch, so marking a piece cut in a shop
     with no thermal printer never fires the print request."""

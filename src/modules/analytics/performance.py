@@ -1075,21 +1075,9 @@ class PerformanceService:
         if branch_id is not None:
             query = query.filter(OrderModel.branch_id == branch_id)
         rows = query.all()
-        banded = {r.order_id for r in rows if r.type == ActivityType.banding.value}
-        meters: dict[int, float] = {}
-        if banded:
-            for order_id, value in (
-                self.db.query(
-                    OrderModel.id,
-                    OrderModel.optimization_snapshot["total_edge_banding_linear_m"],
-                )
-                .filter(OrderModel.id.in_(list(banded)))
-                .all()
-            ):
-                try:
-                    meters[order_id] = float(value or 0.0)
-                except (TypeError, ValueError):
-                    meters[order_id] = 0.0
+        meters = self.production.banded_meters_of(
+            {r.order_id for r in rows if r.type == ActivityType.banding.value}
+        )
 
         # Their time: start to close, less the pauses and the time off it ran
         # across. A day counts as worked when the branch's banders registered

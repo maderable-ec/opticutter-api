@@ -614,6 +614,11 @@ class CuttingPlanResponse(CamelModel):
 
     order_id: int
     order_code: Optional[str] = None
+    branch_id: int = Field(
+        ...,
+        description="Whose saw it is on: the branch a blade changed from this "
+        "screen is registered to",
+    )
     status: OrderStatus
     client: ClientResponse = Field(
         ..., description="Whose job is on the saw, next to its reference"

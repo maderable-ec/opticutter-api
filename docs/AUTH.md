@@ -120,6 +120,8 @@ when **any** of the user's roles is in the row.
 | `orders:cut`         | ✅ | ❌ | ✅ | ❌ | `PATCH /orders/{id}/cutting-plan/pieces/{id}` |
 | `orders:activities`  | ✅ | ❌ | ✅* | ✅* | `PATCH /orders/{id}/activities/{type}`, `POST /orders/{id}/activities/{type}/pause` and `/resume` (narrowed per-activity by `ACTIVITY_ROLES`) |
 | `orders:workshop`    | ✅ | ❌ | ✅ | ✅ | `GET /orders/workshop-queue` (shared shop-floor board) |
+| `consumables:register` | ✅ | ❌ | ✅* | ✅* | `GET /consumables/status`, `POST /consumables/changes`, `POST /consumables/changes/{id}/void` for one's own change of a moment ago (narrowed per-consumable by `CONSUMABLE_ROLES`: the operator changes the saw and scoring blades, the `canteador` loads the glue) |
+| `consumables:manage` | ✅ | ❌ | ❌ | ❌ | `changedAt` on `POST /consumables/changes` (a change somebody forgot) and voiding any change, with a reason. The yield report is `GET /analytics/consumables` (`analytics`) |
 
 \* Both starred rows are coarse gates, narrowed by a table in
 `src/modules/orders/model.py`: `TRANSITION_ROLES` per (from, to) transition and

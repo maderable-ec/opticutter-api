@@ -804,6 +804,7 @@ class OrderService(BranchScopedMixin):
         return CuttingPlanResponse(
             order_id=order.id,
             order_code=order.code,
+            branch_id=order.branch_id,
             status=OrderStatus(order.status),
             client=ClientResponse.model_validate(order.client),
             notes=order.notes,

@@ -3,6 +3,8 @@ from fastapi import APIRouter, Depends
 from src.modules.settings.schemas import (
     CompanySettingsResponse,
     CompanySettingsUpdate,
+    ConsumableSettingsResponse,
+    ConsumableSettingsUpdate,
     CuttingSettingsResponse,
     CuttingSettingsUpdate,
     PreOrderSettingsResponse,
@@ -107,6 +109,24 @@ def update_stock_settings(
     """Partially updates the low-stock thresholds (admin only)."""
     svc.update_stock(data)
     return ok(svc.get_stock_thresholds())
+
+
+@router.get("/consumables", response_model=DataResponse[ConsumableSettingsResponse])
+def get_consumable_settings(svc: SettingsService = Depends(settings_service)):
+    """Returns the consumables settings: the standard glue load, in kg."""
+    return ok({"glue_load_kg": svc.get_glue_load_kg()})
+
+
+@router.patch("/consumables", response_model=DataResponse[ConsumableSettingsResponse])
+def update_consumable_settings(
+    data: ConsumableSettingsUpdate, svc: SettingsService = Depends(settings_service)
+):
+    """Updates the standard glue load (admin only).
+
+    It only moves what the shop floor's control starts at: every load already
+    registered keeps the kg it took.
+    """
+    return ok({"glue_load_kg": svc.update_consumables(data)})
 
 
 @router.get("/work-schedule", response_model=DataResponse[WorkScheduleSettings])

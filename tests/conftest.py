@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 import src.modules.additional_services.model  # noqa: F401,E402
 import src.modules.branches.model  # noqa: F401,E402
 import src.modules.clients.model  # noqa: F401,E402
+import src.modules.consumables.model  # noqa: F401,E402
 import src.modules.notifications.model  # noqa: F401,E402
 import src.modules.optimization_drafts.model  # noqa: F401,E402
 import src.modules.orders.model  # noqa: F401,E402
