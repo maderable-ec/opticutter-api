@@ -131,6 +131,16 @@ class ProcessedBoard:
 
 
 @dataclass(frozen=True)
+class BandingClose:
+    """A banding closed, with the net tape its order carried."""
+
+    order_id: int
+    branch_id: int
+    finished_at: datetime
+    banded_m: float
+
+
+@dataclass(frozen=True)
 class OperatorSheet:
     """A sheet one operator marked pieces on, with everything the count reads.
 
@@ -629,6 +639,69 @@ class ProductionService:
                 )
             )
         return sheets
+
+    # ----------------------------------------------------------------- banding
+    def banded_meters_of(self, order_ids: Iterable[int]) -> dict[int, float]:
+        """``order_id -> net metres of tape`` its banding applied.
+
+        ``total_edge_banding_linear_m`` of the frozen snapshot: the edges of
+        every placed piece, special edges included -- what the bander actually
+        laid. The billed metres carry the waste factor on top and would count
+        tape nobody applied. Only that key of the snapshot is read.
+        """
+        ids = list(order_ids)
+        if not ids:
+            return {}
+        meters: dict[int, float] = {}
+        for order_id, value in (
+            self.db.query(
+                OrderModel.id,
+                OrderModel.optimization_snapshot["total_edge_banding_linear_m"],
+            )
+            .filter(OrderModel.id.in_(ids))
+            .all()
+        ):
+            try:
+                meters[order_id] = float(value or 0.0)
+            except (TypeError, ValueError):
+                meters[order_id] = 0.0
+        return meters
+
+    def banding_closes(
+        self, start: datetime, end: datetime, branch_id: Optional[int] = None
+    ) -> list[BandingClose]:
+        """Every banding closed in ``[start, end)``, dated by its closing.
+
+        The banding marks no pieces, so its close is the only instant its
+        metres can be placed at -- the one the statistics use too
+        (``PerformanceService._closed_activities``).
+        """
+        query = (
+            self.db.query(
+                OrderActivityModel.order_id,
+                OrderModel.branch_id,
+                OrderActivityModel.finished_at,
+            )
+            .join(OrderModel, OrderActivityModel.order_id == OrderModel.id)
+            .filter(
+                OrderActivityModel.type == ActivityType.banding.value,
+                OrderActivityModel.finished_at >= start,
+                OrderActivityModel.finished_at < end,
+            )
+        )
+        if branch_id is not None:
+            query = query.filter(OrderModel.branch_id == branch_id)
+        rows = query.all()
+        meters = self.banded_meters_of({order_id for order_id, _, _ in rows})
+        return [
+            BandingClose(
+                order_id=order_id,
+                branch_id=bid,
+                finished_at=finished_at,
+                banded_m=meters.get(order_id, 0.0),
+            )
+            for order_id, bid, finished_at in rows
+        ]
 
     def _material_sources(self, order_ids: set[int]) -> dict[tuple[int, str], str]:
         """``(order_id, material_key) -> source`` off the frozen snapshots.

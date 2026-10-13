@@ -128,6 +128,19 @@ class CompanySettingsUpdate(CamelModel):
     branches: Optional[List[Branch]] = None
 
 
+# --- Consumables ------------------------------------------------------------------
+class ConsumableSettingsResponse(CamelModel):
+    """The shop's consumables settings (``src/modules/consumables/``)."""
+
+    glue_load_kg: float
+
+
+class ConsumableSettingsUpdate(CamelModel):
+    """Partial update. ``glueLoadKg``: the standard load of the glue pot, in kg."""
+
+    glue_load_kg: Optional[float] = Field(None, gt=0, le=50)
+
+
 # --- Working hours ----------------------------------------------------------------
 class TimeWindow(CamelModel):
     """One stretch of working hours on the shop's wall clock (``HH:MM``)."""

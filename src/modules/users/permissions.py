@@ -27,6 +27,8 @@ route is protected with ``require_role(*RESOURCE_ROLES[key])`` (see ``dependenci
 | orders:activities (work)      | yes           | no       | yes*     | yes*      |
 | inventory:check (quoting)     | yes           | yes      | no       | no        |
 | inventory:low-stock (report)  | yes           | no       | no       | no        |
+| consumables:register (blades, glue) | yes     | no       | yes*     | yes*      |
+| consumables:manage (corrections) | yes        | no       | no       | no        |
 | analytics                     | yes           | no       | no       | no        |
 | notifications:read            | yes           | yes      | yes      | yes       |
 | print:agents (register/token) | yes           | no       | no       | no        |
@@ -40,6 +42,9 @@ route is protected with ``require_role(*RESOURCE_ROLES[key])`` (see ``dependenci
   Cancelling narrows further as the order advances: from ``confirmed`` it is
   admin/seller (the quote died), but from ``queued`` -- already paid for -- it
   is ADMIN ONLY, so the seller who raised it cannot undo a collected sale.
+
+``consumables:register`` follows the same scheme: ``CONSUMABLE_ROLES`` in
+``consumables/model.py`` narrows it per consumable.
 
 The bander doesn't see order detail (no ``orders:read``): only the activity
 endpoint (``orders:activities``) and the self-sufficient shop-floor board
@@ -98,6 +103,14 @@ RESOURCE_ROLES: dict[str, tuple[UserRole, ...]] = {
     # The low-stock report the admin reorders from (GET /inventory/low-stock).
     # Admin only, as it was while it hung off /analytics.
     "inventory:low-stock": (_ADMIN,),
+    # The shop's consumables (blades, glue): reading what is on the machine and
+    # registering a change. One area for the three, like ``orders:activities``:
+    # ``CONSUMABLE_ROLES`` (consumables/model.py) says the operator changes the
+    # blades and the bander loads the glue.
+    "consumables:register": (_ADMIN, _OPERATOR, _BANDER),
+    # Correcting the record: entering a change somebody forgot, and voiding one
+    # that is not the caller's own of a moment ago.
+    "consumables:manage": (_ADMIN,),
     "analytics": (_ADMIN,),
     # Any authenticated role reads/acks its own notifications; the service scopes
     # every query to the current user's id.

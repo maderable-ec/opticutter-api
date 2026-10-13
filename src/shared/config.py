@@ -276,6 +276,12 @@ class Config:
     STOCK_THRESHOLD_BOARD = env.float("STOCK_THRESHOLD_BOARD", 5.0)
     STOCK_THRESHOLD_EDGE_BANDING = env.float("STOCK_THRESHOLD_EDGE_BANDING", 50.0)
 
+    # The glue the edge bander's pot takes per load, in kg: what the shop floor's
+    # control starts at (the bander adjusts it when a load differs). Only the
+    # value a settings row with no ``glue_load_kg`` reads; the runtime source of
+    # truth is the table (PATCH /settings/consumables).
+    GLUE_LOAD_KG = env.float("GLUE_LOAD_KG", 5.0)
+
     # How long a read of the vendor's `binventario` is reused (seconds). The
     # query is cheap (~60 ms for both warehouses) but it runs on every quote,
     # every pre-order read and every order detail, and it hits a third party's
