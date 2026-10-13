@@ -36,6 +36,7 @@ from src.modules.orders.model import (
     ACTIVITY_START_NEEDS_A_CUT_PIECE,
     ACTIVITY_TRANSITIONS,
     PAUSE_REASON_LABELS,
+    PAUSE_REASONS_BY_ACTIVITY,
     PAYMENT_METHOD_LABELS,
     TERMINAL_STATUSES,
     TRANSITION_ROLES,
@@ -56,6 +57,13 @@ from src.modules.orders.model import (
     PaymentMethod,
 )
 from src.modules.orders.order_events import OrderEvent, order_event_filter
+from src.modules.orders.pauses import (
+    WAITS_ON_BANDING,
+    banding_is_open,
+    owes_pieces,
+    pause_reasons,
+    piece_arrives,
+)
 from src.modules.orders.payments import (
     check_against_balance,
     describe_amounts,
@@ -862,6 +870,8 @@ class OrderService(BranchScopedMixin):
             # carrying a workshop code. Sealed once -- unmarking the piece does
             # not give back the time already waited.
             self._seal_activity_ready(order, piece)
+            # And it may be the piece somebody downstream paused to wait for.
+            self._lift_waiting(order, actor, piece.cut_at, piece=piece)
         elif not cut:
             piece.cut_at = None
             piece.cut_by = None
@@ -938,7 +948,9 @@ class OrderService(BranchScopedMixin):
                     board_usage=_board_usage(snapshot),
                     banding_usage=_banding_usage(snapshot),
                     progress=progress["all"],
-                    activities=_activity_responses(o.activities, progress),
+                    activities=_activity_responses(
+                        o.activities, progress, banding_is_open(o.activities)
+                    ),
                     print_consolidated_enabled=o.branch.print_consolidated_enabled,
                 )
             )
@@ -1088,6 +1100,13 @@ class OrderService(BranchScopedMixin):
                 activity.finished_by = actor.user_id
                 activity.finished_by_label = actor.label
             activity.status = to_status.value
+            # The banding closing is how its pieces reach whoever works after
+            # it: the banding marks none, so this is the only arrival there is.
+            if (
+                activity_type == ActivityType.banding
+                and to_status == ActivityStatus.done
+            ):
+                self._lift_waiting(order, actor, now)
 
             # Derived transitions of the ORDER, in the same transaction.
             if starting_the_cut and order_status == OrderStatus.queued:
@@ -1148,6 +1167,8 @@ class OrderService(BranchScopedMixin):
                 raise BusinessRuleError(
                     f"El {label} solo se pausa mientras está en curso"
                 )
+            waiting = reason is PauseReason.waiting_for_pieces
+            progress = self._check_pause_reason(order, activity_type, reason)
             note = (note or "").strip() or None
             # One instant for the pause row, its mirror and the history row.
             now = datetime.utcnow()
@@ -1164,10 +1185,22 @@ class OrderService(BranchScopedMixin):
             activity.paused_at = now
             activity.pause_reason = reason.value
             detail = f" — {note}" if note else ""
+            # A wait is the bander's word for it -- the banding marks no pieces,
+            # so nobody can tell how many of the cut ones are still on the
+            # bench. What the saw had released by then is the record to read it
+            # against.
+            released = ""
+            if waiting:
+                which = _PIECE_SET_QUALIFIER[ACTIVITY_PIECES[activity_type]]
+                released = (
+                    f" ({progress.cut_pieces} de {progress.total_pieces}{which} "
+                    "cortadas)"
+                )
             self._audit_row(
                 order,
                 actor,
-                f"{label.capitalize()} en pausa: {PAUSE_REASON_LABELS[reason]}{detail}",
+                f"{label.capitalize()} en pausa: "
+                f"{PAUSE_REASON_LABELS[reason]}{released}{detail}",
                 now,
             )
             # Read before the commit: afterwards the order is expired and every
@@ -1177,20 +1210,93 @@ class OrderService(BranchScopedMixin):
             self.db.commit()
             self.db.refresh(order)
             self.db.refresh(activity)
-            # Best-effort, post-commit: the office is who can fix what stopped it.
-            notify_activity_paused(
-                self.db,
-                order,
-                activity=activity_type.value,
-                activity_label=label,
-                reason=reason.value,
-                reason_label=PAUSE_REASON_LABELS[reason],
-                branch_name=branch_name,
-                note=note,
-                owner_user_id=owner_id,
-                actor=actor,
-            )
+            # Best-effort, post-commit: the office is who can fix what stopped
+            # it. Not a wait: that is the line's own rhythm, it can happen
+            # several times an order and nobody in the office can hurry it.
+            if not waiting:
+                notify_activity_paused(
+                    self.db,
+                    order,
+                    activity=activity_type.value,
+                    activity_label=label,
+                    reason=reason.value,
+                    reason_label=PAUSE_REASON_LABELS[reason],
+                    branch_name=branch_name,
+                    note=note,
+                    owner_user_id=owner_id,
+                    actor=actor,
+                )
         return self._activity_result(order, activity)
+
+    def _check_pause_reason(
+        self, order: OrderModel, activity_type: ActivityType, reason: PauseReason
+    ) -> CuttingProgress:
+        """Raises unless ``reason`` can stop this activity right now.
+
+        Two different refusals: a reason that never stops this activity (the
+        bander is not out of boards), and waiting for pieces when none is owed
+        -- every piece of its set is cut and no banding stands in between.
+        Returns the progress of the activity's own set, which the caller's
+        history row quotes.
+        """
+        label = ACTIVITY_LABELS[activity_type]
+        if reason not in PAUSE_REASONS_BY_ACTIVITY[activity_type]:
+            raise ValidationError(
+                f"«{PAUSE_REASON_LABELS[reason]}» no es un motivo de pausa de {label}",
+                field="reason",
+            )
+        self._ensure_cutting_plan(order)
+        piece_set = ACTIVITY_PIECES[activity_type]
+        progress = self._set_progress(order.id)[piece_set]
+        if reason is PauseReason.waiting_for_pieces and not owes_pieces(
+            activity_type,
+            progress.total_pieces - progress.cut_pieces,
+            banding_is_open(order.activities),
+        ):
+            raise ValidationError(
+                f"Ya se cortaron todas las piezas{_PIECE_SET_QUALIFIER[piece_set]}: "
+                "no hay piezas que esperar",
+                field="reason",
+            )
+        return progress
+
+    def _lift_waiting(
+        self,
+        order: OrderModel,
+        actor: Actor,
+        now: datetime,
+        piece: Optional[OrderPlacedPieceModel] = None,
+    ) -> None:
+        """Ends the waits a piece just reached, in the caller's transaction.
+
+        ``piece``: the one just marked cut. ``None`` when what happened is the
+        banding closing, which delivers its pieces to whoever works after it.
+        A wait cannot outlive what it waits for: the stretch it takes out of the
+        worker's time ends at ``now``, the instant of that mark or that close.
+        Every other pause is left alone -- a piece coming off the saw does not
+        mend a machine.
+        """
+        banding_open = banding_is_open(order.activities)
+        for activity in order.activities:
+            if activity.pause_reason != PauseReason.waiting_for_pieces.value:
+                continue
+            activity_type = ActivityType(activity.type)
+            if piece is None:
+                arrived = activity_type in WAITS_ON_BANDING
+            else:
+                arrived = piece_arrives(
+                    activity_type,
+                    in_set=_PIECE_IN_SET[ACTIVITY_PIECES[activity_type]](piece),
+                    banded=_piece_is_banded(piece),
+                    banding_open=banding_open,
+                )
+            if not arrived:
+                continue
+            self._close_pause(activity, actor, now)
+            label = ACTIVITY_LABELS[activity_type]
+            self._audit_row(
+                order, actor, f"{label.capitalize()} reanudado: llegaron piezas", now
+            )
 
     def resume_activity(
         self,
@@ -1428,12 +1534,20 @@ class OrderService(BranchScopedMixin):
         self, order: OrderModel, activity: OrderActivityModel
     ) -> OrderActivityResponse:
         """One activity with the progress of ITS pieces (one aggregate query)."""
-        return _activity_responses([activity], self._set_progress(order.id))[0]
+        return _activity_responses(
+            [activity],
+            self._set_progress(order.id),
+            banding_is_open(order.activities),
+        )[0]
 
     def _activity_responses(self, order: OrderModel) -> List[OrderActivityResponse]:
         """Every activity of the order, with each one's piece progress."""
         self._ensure_activities(order)
-        return _activity_responses(order.activities, self._set_progress(order.id))
+        return _activity_responses(
+            order.activities,
+            self._set_progress(order.id),
+            banding_is_open(order.activities),
+        )
 
     def _ensure_cutting_plan(self, order: OrderModel) -> None:
         """Materializes the cutting plan from the snapshot if it doesn't exist yet.
@@ -1994,31 +2108,42 @@ def _build_activities(snapshot: dict) -> List[OrderActivityModel]:
 def _activity_responses(
     activities: List[OrderActivityModel],
     progress_by_set: dict[str, CuttingProgress],
+    banding_open: bool,
 ) -> List[OrderActivityResponse]:
     """Projects activity rows, each with the progress of ITS piece set.
 
     Takes the aggregates already computed by the caller instead of querying per
     activity: the board renders one card per order and would otherwise fire a
-    query per activity per row.
+    query per activity per row. ``banding_open`` is the ORDER's
+    (``banding_is_open``), passed in because ``activities`` may be one row of it.
     """
-    return [
-        OrderActivityResponse(
-            type=ActivityType(a.type),
-            status=ActivityStatus(a.status),
-            ready_at=a.ready_at,
-            started_at=a.started_at,
-            started_by=a.started_by,
-            started_by_label=a.started_by_label,
-            finished_at=a.finished_at,
-            finished_by=a.finished_by,
-            finished_by_label=a.finished_by_label,
-            paused_at=a.paused_at,
-            pause_reason=a.pause_reason,
-            pauses=a.pauses,
-            progress=progress_by_set[ACTIVITY_PIECES[ActivityType(a.type)]],
+    responses = []
+    for a in sorted(activities, key=lambda a: a.type):
+        activity_type = ActivityType(a.type)
+        progress = progress_by_set[ACTIVITY_PIECES[activity_type]]
+        responses.append(
+            OrderActivityResponse(
+                type=activity_type,
+                status=ActivityStatus(a.status),
+                ready_at=a.ready_at,
+                started_at=a.started_at,
+                started_by=a.started_by,
+                started_by_label=a.started_by_label,
+                finished_at=a.finished_at,
+                finished_by=a.finished_by,
+                finished_by_label=a.finished_by_label,
+                paused_at=a.paused_at,
+                pause_reason=a.pause_reason,
+                pauses=a.pauses,
+                pause_reasons=pause_reasons(
+                    activity_type,
+                    progress.total_pieces - progress.cut_pieces,
+                    banding_open,
+                ),
+                progress=progress,
+            )
         )
-        for a in sorted(activities, key=lambda a: a.type)
-    ]
+    return responses
 
 
 def _progress(pieces: List[OrderPlacedPieceModel]) -> CuttingProgress:
