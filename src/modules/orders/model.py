@@ -108,13 +108,21 @@ class PauseReason(str, Enum):
     """Why an activity in progress was stopped by something outside the worker.
 
     A pause takes its stretch out of the worker's time: an order waiting on
-    boards is not an operator being slow. Any reason is valid for any activity
-    -- the bander runs out of pieces when the saw runs out of boards.
+    boards is not an operator being slow. Each activity pauses only for what
+    can actually stop IT (``PAUSE_REASONS_BY_ACTIVITY``): the saw runs out of
+    boards, the bander out of tape -- and the bander whose saw ran out of
+    boards is not out of boards, they are ``waiting_for_pieces``.
+
+    The enum keeps every value ever stored: a row paused under the old "any
+    reason on any activity" rule still reads. Only a NEW pause is checked.
     """
 
     no_boards = "no_boards"
     no_edge_banding = "no_edge_banding"
     machine_failure = "machine_failure"
+    # The station before has not handed over more pieces. The only reason the
+    # system can check and lift by itself -- see ``orders/pauses.py``.
+    waiting_for_pieces = "waiting_for_pieces"
 
 
 # What the shop floor, the history and the notification read.
@@ -122,6 +130,7 @@ PAUSE_REASON_LABELS: dict["PauseReason", str] = {
     PauseReason.no_boards: "Sin tableros",
     PauseReason.no_edge_banding: "Sin canto",
     PauseReason.machine_failure: "Daño de máquina",
+    PauseReason.waiting_for_pieces: "Esperando piezas",
 }
 
 
@@ -148,6 +157,23 @@ ACTIVITY_ROLES: dict[ActivityType, tuple[UserRole, ...]] = {
     ActivityType.cutting: (UserRole.ADMIN, UserRole.OPERATOR),
     ActivityType.banding: (UserRole.ADMIN, UserRole.BANDER),
     ActivityType.additional: (UserRole.ADMIN, UserRole.BANDER),
+}
+
+# What can stop each activity, in the order the dialog offers them. The saw uses
+# no tape and the bander no boards; a machine can fail anywhere. Nothing is
+# upstream of the cut, so it never waits for pieces. ``waiting_for_pieces`` is
+# further gated on the pieces themselves (``pauses.owes_pieces``).
+PAUSE_REASONS_BY_ACTIVITY: dict[ActivityType, tuple[PauseReason, ...]] = {
+    ActivityType.cutting: (PauseReason.no_boards, PauseReason.machine_failure),
+    ActivityType.banding: (
+        PauseReason.waiting_for_pieces,
+        PauseReason.no_edge_banding,
+        PauseReason.machine_failure,
+    ),
+    ActivityType.additional: (
+        PauseReason.waiting_for_pieces,
+        PauseReason.machine_failure,
+    ),
 }
 
 # Which placed pieces each activity works on: every piece, only the banded ones,

@@ -323,7 +323,11 @@ class ActivityPauseRequest(CamelModel):
     """Pauses an activity in progress, with the reason it cannot go on."""
 
     reason: PauseReason = Field(
-        ..., description="no_boards | no_edge_banding | machine_failure"
+        ...,
+        description="One of the activity's ``pauseReasons``: no_boards | "
+        "no_edge_banding | machine_failure | waiting_for_pieces. A reason that "
+        "cannot stop THIS activity, or waiting for pieces with none owed, is a "
+        "422 on ``reason``",
     )
     note: Optional[str] = Field(default=None, max_length=255)
 
@@ -386,6 +390,13 @@ class OrderActivityResponse(CamelModel):
     )
     pauses: List[ActivityPauseResponse] = Field(
         default_factory=list, description="Every pause registered, oldest first"
+    )
+    pause_reasons: Optional[List[PauseReason]] = Field(
+        default=None,
+        description="The reasons THIS activity may pause for right now, in the "
+        "order to offer them: what can stop it, less 'waiting_for_pieces' once "
+        "no piece is owed to it. Filled where ``progress`` is (it is read off "
+        "the same counts); NULL on the order detail",
     )
     progress: Optional[CuttingProgress] = Field(
         default=None,
