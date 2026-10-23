@@ -2,8 +2,13 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Query
 
-from src.modules.users.dependencies import require_permission
+from src.modules.users.dependencies import get_current_user, require_permission
 from src.modules.users.enums import UserRole
+from src.modules.users.model import UserModel
+from src.modules.users.refresh_token_service import (
+    RefreshTokenService,
+    refresh_token_service,
+)
 from src.modules.users.schemas import UserCreate, UserResponse, UserUpdate
 from src.modules.users.service import UserService, user_service
 from src.shared.crud import ListSort
@@ -72,13 +77,20 @@ def get_user(user_id: int, svc: UserService = Depends(user_service)):
 
 @router.put("/{user_id}", response_model=DataResponse[UserResponse])
 def update_user(
-    user_id: int, data: UserUpdate, svc: UserService = Depends(user_service)
+    user_id: int,
+    data: UserUpdate,
+    current_user: UserModel = Depends(get_current_user),
+    svc: UserService = Depends(user_service),
+    refresh_svc: RefreshTokenService = Depends(refresh_token_service),
 ):
-    """Updates a user (includes password change and logical deactivation)."""
-    return ok(svc.update(user_id, data))
+    """Updates a user (includes password change and logical deactivation).
 
-
-@router.delete("/{user_id}", status_code=204)
-def delete_user(user_id: int, svc: UserService = Depends(user_service)):
-    """Deletes a user."""
-    svc.delete(user_id)
+    A user is never deleted: their name is the author of cut pieces, activities,
+    payments and history rows, and a delete nulls all of it out. ``isActive:
+    false`` is how one leaves. It also revokes their refresh tokens, so
+    reactivating them later doesn't bring an old session back.
+    """
+    user = svc.update(user_id, data, actor_id=current_user.id)
+    if not user.is_active:
+        refresh_svc.revoke_all_for_user(user.id)
+    return ok(user)

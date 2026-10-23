@@ -11,6 +11,7 @@ import pytest
 from src.modules.users.dependencies import get_branch_scope
 from src.modules.users.enums import UserRole, canonical_roles
 from src.modules.users.model import UserModel
+from src.modules.users.schemas import UserUpdate
 from src.modules.users.service import UserService
 from src.shared.exceptions import ValidationError
 
@@ -87,3 +88,24 @@ def test_the_apprentice_is_scoped_to_their_branch():
 @pytest.mark.parametrize("role", ["administrador", "vendedor"])
 def test_global_roles_see_every_branch(role):
     assert get_branch_scope(current_user=_user(role)) is None
+
+
+@pytest.mark.parametrize(
+    "changes,field",
+    [
+        ({"is_active": False, "password": "nueva-clave-1"}, "isActive"),
+        ({"roles": ["vendedor"], "full_name": "Otra"}, "roles"),
+    ],
+)
+def test_an_admin_cannot_lock_themselves_out(mock_session, changes, field):
+    """Refused before any field is assigned: the session holds the user untouched."""
+    admin = _user("administrador", branch_id=None)
+    mock_session.get.return_value = admin
+    with pytest.raises(ValidationError) as exc:
+        UserService(mock_session).update(1, UserUpdate(**changes), actor_id=1)
+    assert exc.value.field == field
+    assert admin.is_active is not False
+    assert admin.hashed_password == "x"
+    assert admin.roles == ["administrador"]
+    assert admin.full_name is None
+    mock_session.commit.assert_not_called()

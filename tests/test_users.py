@@ -289,16 +289,86 @@ def test_update_password_allows_login_with_new_password(client, auth):
     assert _login(client, "seller@empresa.com", "brand-new-pass").status_code == 200
 
 
-def test_delete_user(client, auth):
+def test_a_user_cannot_be_deleted_only_deactivated(client, auth):
+    """A delete nulls out the author of every piece, activity and history row the
+    user left behind, so the route is gone: the user is deactivated and stays."""
     admin = auth("administrador")
     created = _create_user(client, admin).json()["data"]
-    assert (
-        client.delete(f"/api/v1/users/{created['id']}", headers=admin).status_code
-        == 204
+    resp = client.delete(f"/api/v1/users/{created['id']}", headers=admin)
+    assert resp.status_code == 405
+
+    resp = client.put(
+        f"/api/v1/users/{created['id']}", json={"isActive": False}, headers=admin
     )
-    assert (
-        client.get(f"/api/v1/users/{created['id']}", headers=admin).status_code == 404
+    assert resp.status_code == 200
+    assert resp.json()["data"]["isActive"] is False
+    fetched = client.get(f"/api/v1/users/{created['id']}", headers=admin)
+    assert fetched.json()["data"]["isActive"] is False
+
+
+def test_deactivating_revokes_sessions_and_reactivating_does_not_revive_them(
+    client, auth
+):
+    admin = auth("administrador")
+    created = _create_user(client, admin).json()["data"]
+    session = _login(client, "seller@empresa.com", "supersecret").json()["data"]
+    url = f"/api/v1/users/{created['id']}"
+
+    client.put(url, json={"isActive": False}, headers=admin)
+    headers = _auth_header(session["accessToken"])
+    assert client.get("/api/v1/auth/me", headers=headers).status_code == 401
+    refresh = {"refreshToken": session["refreshToken"]}
+    assert client.post("/api/v1/auth/refresh", json=refresh).status_code == 401
+
+    # Back in: the old refresh stays dead, a fresh login works.
+    client.put(url, json={"isActive": True}, headers=admin)
+    assert client.post("/api/v1/auth/refresh", json=refresh).status_code == 401
+    assert _login(client, "seller@empresa.com", "supersecret").status_code == 200
+
+
+def test_admin_cannot_deactivate_themselves(client, auth):
+    admin = auth("administrador")
+    me = client.get("/api/v1/auth/me", headers=admin).json()["data"]
+    resp = client.put(
+        f"/api/v1/users/{me['id']}", json={"isActive": False}, headers=admin
     )
+    assert resp.status_code == 422
+    assert resp.json()["errors"][0]["field"] == "isActive"
+    assert client.get("/api/v1/auth/me", headers=admin).status_code == 200
+
+
+def test_admin_cannot_drop_their_own_admin_role(client, auth):
+    admin = auth("administrador")
+    me = client.get("/api/v1/auth/me", headers=admin).json()["data"]
+    resp = client.put(
+        f"/api/v1/users/{me['id']}",
+        json={"roles": ["vendedor"], "branchId": _BRANCH},
+        headers=admin,
+    )
+    assert resp.status_code == 422
+    assert resp.json()["errors"][0]["field"] == "roles"
+    assert client.get("/api/v1/auth/me", headers=admin).json()["data"]["roles"] == [
+        "administrador"
+    ]
+    # Editing oneself otherwise still works.
+    resp = client.put(
+        f"/api/v1/users/{me['id']}", json={"fullName": "Jefa"}, headers=admin
+    )
+    assert resp.status_code == 200
+
+
+def test_admin_can_deactivate_and_demote_another_admin(client, auth):
+    admin = auth("administrador")
+    other = _create_user(
+        client, admin, email="otra@empresa.com", role="administrador"
+    ).json()["data"]
+    url = f"/api/v1/users/{other['id']}"
+    resp = client.put(
+        url, json={"roles": ["vendedor"], "branchId": _BRANCH}, headers=admin
+    )
+    assert resp.status_code == 200
+    resp = client.put(url, json={"isActive": False}, headers=admin)
+    assert resp.status_code == 200
 
 
 def test_create_user_invalid_role_returns_422(client, auth):
@@ -531,11 +601,18 @@ def test_me_with_invalid_token_returns_401(client):
     assert resp.status_code == 401
 
 
-def test_me_with_token_of_deleted_user_returns_401(client, auth):
+def test_me_with_token_of_deactivated_user_returns_401(client, auth):
     admin = auth("administrador")
     created = _create_user(client, admin).json()["data"]
     token = _token(client, "seller@empresa.com", "supersecret")
-    client.delete(f"/api/v1/users/{created['id']}", headers=admin)
+    client.put(
+        f"/api/v1/users/{created['id']}", json={"isActive": False}, headers=admin
+    )
+    assert client.get("/api/v1/auth/me", headers=_auth_header(token)).status_code == 401
+
+
+def test_me_with_token_of_unknown_user_returns_401(client):
+    token = create_access_token(subject=999999, roles=["vendedor"])
     assert client.get("/api/v1/auth/me", headers=_auth_header(token)).status_code == 401
 
 
