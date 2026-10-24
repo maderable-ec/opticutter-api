@@ -92,7 +92,8 @@ def test_the_old_cutter_placeholders_are_gone():
 # The previous web build's paths, removed one release after their replacements
 # shipped: the misplaced URLs (moved 2026-10-05) and the first generation of the
 # analytics dashboard (superseded 2026-10-06), which filtered every figure by the
-# order's creation date.
+# order's creation date. Deleting a user (removed 2026-10-23) is gone for good, not
+# moved: it nulled out the author of everything the user left behind.
 _REMOVED_ROUTES = [
     ("GET", "/api/v1/analytics/low-stock"),
     ("GET", "/api/v1/orders/{order_id}/export"),
@@ -104,6 +105,7 @@ _REMOVED_ROUTES = [
     ("GET", "/api/v1/analytics/operations"),
     ("GET", "/api/v1/analytics/productivity"),
     ("GET", "/api/v1/analytics/users"),
+    ("DELETE", "/api/v1/users/{user_id}"),
 ]
 
 

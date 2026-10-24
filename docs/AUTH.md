@@ -81,6 +81,19 @@ Login is by `email` (unique). Passwords are stored only as a bcrypt hash.
   **Revokes all of the user's refresh tokens** (closes other sessions); the
   frontend should force a re-login after a `204`.
 
+## User management (admin)
+
+- Users are **never deleted**: there is no `DELETE /api/v1/users/{id}` (`405`).
+  A delete nulled out the author of every cut piece, activity, payment and
+  history row the user left behind, and erased their attendance. To take a user
+  out, `PUT /api/v1/users/{id}` with `{ isActive: false }`: login, refresh and
+  any access token stop working at once, and **all of their refresh tokens are
+  revoked**, so reactivating them later never brings an old session back.
+- An administrator cannot lock themselves out: deactivating their own user
+  (`422`, `field: "isActive"`) or dropping their own `administrador` role
+  (`422`, `field: "roles"`) is refused. Since only an administrator manages
+  users, there is always one active administrator left.
+
 ## Error semantics
 
 | Code | Meaning | Frontend action |

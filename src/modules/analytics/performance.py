@@ -86,8 +86,9 @@ from src.shared.exceptions import EntityNotFoundError
 from src.shared.work_schedule import WorkSchedule, seconds
 
 # The row of the work whose user is gone: ``cut_by``/``finished_by`` went NULL
-# when the user was deleted. Listed, so the role's total still matches the
-# branch comparison, which counts that work too.
+# when the user was deleted, back when users could be (they're only deactivated
+# now). Listed, so the role's total still matches the branch comparison, which
+# counts that work too.
 _NO_USER = "Sin usuario"
 
 

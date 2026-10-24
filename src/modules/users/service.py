@@ -75,14 +75,41 @@ class UserService(CRUDService[UserModel, UserCreate, UserUpdate]):
         )
         return self._persist(user)
 
-    def update(self, id: int, data: UserUpdate) -> UserModel:
-        """Updates a user; rehashes ``password`` when it's included."""
+    def _guard_self_lockout(self, user: UserModel, changes: dict) -> None:
+        """An administrator can't deactivate themselves nor drop their own admin role.
+
+        Only an administrator manages users, so an admin changing someone else
+        always leaves themselves untouched: refusing the self-inflicted cases is
+        enough to always keep one active administrator. Runs before any field is
+        assigned, so a refusal leaves the user unmodified in the session.
+        """
+        if changes.get("is_active") is False:
+            raise ValidationError(
+                "No puedes desactivar tu propio usuario.", field="isActive"
+            )
+        roles = changes.get("roles")
+        admin = UserRole.ADMIN.value
+        if roles is not None and admin in user.roles and admin not in roles:
+            raise ValidationError(
+                "No puedes quitarte el rol de administrador.", field="roles"
+            )
+
+    def update(
+        self, id: int, data: UserUpdate, actor_id: Optional[int] = None
+    ) -> UserModel:
+        """Updates a user; rehashes ``password`` when it's included.
+
+        ``actor_id`` is the user making the change: editing oneself can't lock
+        one out (``_guard_self_lockout``).
+        """
         obj = self.get_or_404(id)
         changes = data.model_dump(exclude_unset=True)
-        if "password" in changes:
-            obj.hashed_password = hash_password(changes.pop("password"))
         if changes.get("roles") is not None:
             changes["roles"] = self._normalize_roles(changes["roles"])
+        if id == actor_id:
+            self._guard_self_lockout(obj, changes)
+        if "password" in changes:
+            obj.hashed_password = hash_password(changes.pop("password"))
         for field, value in changes.items():
             setattr(obj, field, value)
         # Reconciles roles<->branch over the resulting state (covers roles and/or
