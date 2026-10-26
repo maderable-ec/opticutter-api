@@ -34,6 +34,15 @@ class SettingsModel(TimestampMixin, AuditMixin, Base):
     right_trim: Mapped[float] = mapped_column(Float)
     edge_banding_waste_factor: Mapped[float] = mapped_column(Float)
     half_board_markup_pct: Mapped[float] = mapped_column(Float)
+    # The cut rules (``optimizations/cut_rules.py``), whole millimetres like
+    # every piece measure: how much the saw cuts short per side with a hard
+    # tape, and how much larger on each measure it cuts every layer of an
+    # assembly, for the shop to square the glued block. Both move geometry, so
+    # they enter the optimization hash -- only for a quote with a row under
+    # the rule, which is what re-optimizes when one changes. An order keeps the
+    # values its plan was cut with (``cut_rules`` in its snapshot).
+    hard_edge_cut_mm: Mapped[int] = mapped_column(Integer, server_default="1")
+    assembly_allowance_mm: Mapped[int] = mapped_column(Integer, server_default="5")
 
     # Pre-orders (mutable quote): validity period and open-orders cap per client
     preorder_validity_days: Mapped[int] = mapped_column(Integer)

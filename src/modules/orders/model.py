@@ -779,6 +779,13 @@ class OrderPieceModel(TimestampMixin, AuditMixin, Base):
     hard_edge_cut: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default=text("true"), nullable=False
     )
+    # The ensamble rule (``assembly``): True = a layer of the assembly its
+    # ``assembly_code`` names, cut 5 mm large and alike its other layers. The
+    # export recomputes the cut size, so it has to know; False for every order
+    # frozen before the rule, whatever its codes.
+    assembly_allowance: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false"), nullable=False
+    )
     # Piece edge banding (nominal sides + product), e.g.
     # ``{"product_id": 42, "sides": ["top", "left"]}``. Null if not banded.
     edges: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)

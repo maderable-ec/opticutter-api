@@ -70,6 +70,8 @@ class SettingsService:
             right_trim=config.RIGHT_TRIM,
             edge_banding_waste_factor=config.EDGE_BANDING_WASTE_FACTOR,
             half_board_markup_pct=config.HALF_BOARD_MARKUP_PCT,
+            hard_edge_cut_mm=config.HARD_EDGE_CUT_MM,
+            assembly_allowance_mm=config.ASSEMBLY_ALLOWANCE_MM,
             preorder_validity_days=config.PREORDER_VALIDITY_DAYS,
             max_open_preorders_per_client=config.MAX_OPEN_PREORDERS_PER_CLIENT,
             tax_rate=config.TAX_RATE,

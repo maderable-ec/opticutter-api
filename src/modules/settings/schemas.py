@@ -23,6 +23,19 @@ class CuttingSettingsResponse(CamelModel):
         ge=0,
         description="Markup over price/2 when billing a half board (0.10 = +10%)",
     )
+    hard_edge_cut_mm: int = Field(
+        ...,
+        ge=0,
+        description="Millimetres cut short per side with a hard edge banding",
+    )
+    assembly_allowance_mm: int = Field(
+        ...,
+        ge=0,
+        description=(
+            "Millimetres every layer of an assembly is cut larger on each "
+            "measure, to square the glued block"
+        ),
+    )
 
 
 class CuttingSettingsUpdate(CamelModel):
@@ -35,6 +48,10 @@ class CuttingSettingsUpdate(CamelModel):
     right_trim: Optional[float] = Field(None, ge=0)
     edge_banding_waste_factor: Optional[float] = Field(None, ge=0)
     half_board_markup_pct: Optional[float] = Field(None, ge=0)
+    # Whole millimetres, bounded to what a shop could mean: a hard tape is
+    # 1-2 mm thick and the allowance squares a glued block, not a piece.
+    hard_edge_cut_mm: Optional[int] = Field(None, ge=0, le=3)
+    assembly_allowance_mm: Optional[int] = Field(None, ge=0, le=20)
 
 
 # --- Pre-orders (mutable quote) -------------------------------------------------

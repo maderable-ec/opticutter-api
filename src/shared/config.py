@@ -137,6 +137,11 @@ class Config:
     BOTTOM_TRIM = env.float("BOTTOM_TRIM", 0.0)
     LEFT_TRIM = env.float("LEFT_TRIM", 0.0)
     RIGHT_TRIM = env.float("RIGHT_TRIM", 0.0)
+    # The cut rules (``optimizations/cut_rules.py``), same seeding: millimetres
+    # cut short per side with a hard tape, and cut large on each measure for a
+    # layer of an assembly.
+    HARD_EDGE_CUT_MM = env.int("HARD_EDGE_CUT_MM", 1)
+    ASSEMBLY_ALLOWANCE_MM = env.int("ASSEMBLY_ALLOWANCE_MM", 5)
 
     # Edge banding: waste (offcut from the edge-banding machine) applied to the net
     # length before rounding up to the whole meter that gets billed. 0.10 = +10%.

@@ -29,11 +29,15 @@ from src.cutting.sheet_check import (
     realize_sheet,
 )
 from src.modules.clients.model import ClientModel
-from src.modules.optimizations.engine_info import backend_name
-from src.modules.optimizations.hard_edges import (
-    HARD_EDGE_CUT_MM,
-    requirement_cut_size,
+from src.modules.optimizations.assembly import (
+    AssemblyMismatchError,
+    assembly_groups,
+    assembly_issues,
+    requirement_cut_sizes,
+    requirement_layers,
 )
+from src.modules.optimizations.cut_rules import CutRules, rules_in_play
+from src.modules.optimizations.engine_info import backend_name
 from src.modules.optimizations.labels import SPECIAL_SIDE_ORDER, edge_notation
 from src.modules.optimizations.layout_adjustments import (
     EDITING,
@@ -129,17 +133,20 @@ def _requirement_dump(requirement: Requirement) -> dict:
     """A requirement as the hash and the cached payload both see it.
 
     The workshop codes are always left out, ``special_edges`` whenever it is
-    empty and ``hard_edge_cut`` while it is on -- the device ``skip_trim`` uses
-    in ``_compute_hash``: a piece at those defaults dumps byte-identically to
-    what it did before the fields existed, so the deploy invalidated no Redis
-    entry. An opted-out piece carries ``hard_edge_cut: false`` into the payload,
-    which is how the order freezes it.
+    empty, ``hard_edge_cut`` while it is on and ``assembly_allowance`` while it
+    is off -- the device ``skip_trim`` uses in ``_compute_hash``: a piece at
+    those defaults dumps byte-identically to what it did before the fields
+    existed, so the deploy invalidated no Redis entry. An opted-out piece
+    carries ``hard_edge_cut: false`` into the payload, and a layer of an
+    assembly ``assembly_allowance: true``, which is how the order freezes them.
     """
     exclude = set(WORKSHOP_CODE_FIELDS)
     if not requirement.special_edges:
         exclude.add("special_edges")
     if requirement.hard_edge_cut:
         exclude.add("hard_edge_cut")
+    if not requirement.assembly_allowance:
+        exclude.add("assembly_allowance")
     return requirement.model_dump(mode="json", exclude=exclude)
 
 
@@ -152,8 +159,19 @@ def hashable_requirements(requirements: Sequence[Requirement]) -> List[dict]:
     quote byte-identical to the one this hash produced before the codes existed
     -- a new ``null`` key would have invalidated every Redis entry on deploy.
     The special edges ARE in (they move metres and money), but only when set.
+
+    The assembly code is the one code that moves geometry (``assembly``): the
+    rows sharing it are cut alike. What the hash keeps of it is which rows go
+    together -- ``assembly_group``, an index by first appearance, only on the
+    marked rows -- never the text, so renaming an assembly re-runs nothing.
     """
-    return [_requirement_dump(r) for r in requirements]
+    groups = assembly_groups(requirement_layers(requirements))
+    return [
+        _requirement_dump(r)
+        if group is None
+        else {**_requirement_dump(r), "assembly_group": group}
+        for r, group in zip(requirements, groups)
+    ]
 
 
 def _exact_config() -> ExactConfig:
@@ -254,6 +272,13 @@ class _Prepared:
     pools: Dict[str, List[ResolvedMaterial]]
     eb_products: Dict[int, ProductModel]
     optimization_hash: str
+    # ``(height, width)`` the saw cuts for each requirement, parallel to
+    # ``requirements_by_key``: worked out once over the WHOLE cut list, since
+    # an assembly may span materials (``assembly``).
+    cut_sizes: Dict[str, List[Tuple[int, int]]]
+    # The cut rules some row is under, with the settings' values
+    # (``cut_rules.rules_in_play``): in the hash, and in the payload.
+    cut_rules: dict
 
     @property
     def pool_of(self) -> Dict[str, str]:
@@ -293,8 +318,14 @@ def _payload_fields(
     The one thing laid on top is each placed piece's workshop codes, from the
     ``requirements`` the response answers: they never enter the payload
     (``WORKSHOP_CODE_FIELDS``), and the seller's diagram prints them under the
-    canto the way the workshop canvas does.
+    canto the way the workshop canvas does -- with an assembly's ``MF`` under
+    them. On ``layout_groups`` too, since that is what the diagram draws: each
+    group's representative sheet gets its own pieces' codes.
     """
+    groups = payload["layout_groups"]
+    group_layouts = with_piece_workshop_codes(
+        [g["layout"] for g in groups], requirements, anchor_of
+    )
     return dict(
         variant=payload.get("variant", 0),
         total_boards_used=payload["total_boards_used"],
@@ -305,7 +336,10 @@ def _payload_fields(
         layouts=with_piece_workshop_codes(payload["layouts"], requirements, anchor_of),
         materials_summary=payload["materials_summary"],
         edge_bandings_summary=payload.get("edge_bandings_summary"),
-        layout_groups=payload["layout_groups"],
+        layout_groups=[
+            g if laid is g["layout"] else {**g, "layout": laid}
+            for g, laid in zip(groups, group_layouts)
+        ],
         layout_issues=payload.get("layout_issues") or [],
         adjustment_summary=payload.get("adjustment_summary"),
         layout_adjustments=payload.get("layout_adjustments"),
@@ -339,6 +373,14 @@ class OptimizationService:
         self.product_service = ProductService(db)
         self.material_resolver = MaterialResolver(db)
         self.settings_service = SettingsService(db)
+
+    def cut_rules(self) -> CutRules:
+        """The cut rules' millimetres, as the next computation will read them."""
+        settings = self.settings_service.get_or_init()
+        return CutRules(
+            hard_edge_cut_mm=settings.hard_edge_cut_mm,
+            assembly_allowance_mm=settings.assembly_allowance_mm,
+        )
 
     def optimize_response(
         self,
@@ -739,7 +781,10 @@ class OptimizationService:
         minted): a plan that leaves any piece uncut is refused with
         ``UnplacedPiecesError``, naming every piece, its board and why. Checked
         on the final plan, hand adjustments included, since a pending piece is
-        just as uncut as one the engine could not place.
+        just as uncut as one the engine could not place. An assembly that does
+        not hold together (``assembly_issues``) is refused first, with
+        ``AssemblyMismatchError``: it is read off the cut list alone, so no
+        search runs for a write that cannot go through.
 
         Timed from here — before the cache lookup, not around the search — because
         the question the log has to answer is "why was that quote slow", and a
@@ -747,6 +792,10 @@ class OptimizationService:
         ``RedisError``) turns every request into a cold compute without any other
         symptom.
         """
+        if require_complete:
+            issues = assembly_issues(requirement_layers(request.requirements))
+            if issues:
+                raise AssemblyMismatchError(" · ".join(issues))
         computed = self._compute(request, mode)
         if require_complete and computed.payload.get("unplaced"):
             raise UnplacedPiecesError(
@@ -793,8 +842,8 @@ class OptimizationService:
                 ),
                 # At the CUT size, the one ``unplaced`` is measured at.
                 rotatable=frozenset(
-                    requirement_cut_size(r, prepared.eb_products)
-                    for r in requirements
+                    cut
+                    for r, cut in zip(requirements, prepared.cut_sizes[key])
                     if r.can_rotate
                 ),
                 adjusted=key in adjusted,
@@ -830,6 +879,7 @@ class OptimizationService:
         )
         waste_factor = settings.edge_banding_waste_factor
         half_board_markup_pct = settings.half_board_markup_pct
+        rules = self.cut_rules()
 
         # Resolves only the materials actually referenced into dimensions+cost,
         # agnostic of source (catalog/offcut/manual). This is the only point that
@@ -854,6 +904,15 @@ class OptimizationService:
             pools[pool_key].append(rm)
 
         eb_products = self._resolve_edge_banding_products(request.requirements)
+        # Grouped exactly as ``_group_requirements_by_material_key`` groups the
+        # requirements (by key, in request order), so each list runs parallel.
+        cut_sizes: Dict[str, List[Tuple[int, int]]] = defaultdict(list)
+        for req, cut in zip(
+            request.requirements,
+            requirement_cut_sizes(request.requirements, eb_products, rules),
+        ):
+            cut_sizes[req.material_key].append(cut)
+        cut_rules = rules_in_play(request.requirements, eb_products, rules)
 
         optimization_hash = self._compute_hash(
             request,
@@ -862,6 +921,7 @@ class OptimizationService:
             eb_products,
             waste_factor,
             half_board_markup_pct,
+            cut_rules,
         )
         return _Prepared(
             requirements_by_key=requirements_by_key,
@@ -872,6 +932,8 @@ class OptimizationService:
             pools=pools,
             eb_products=eb_products,
             optimization_hash=optimization_hash,
+            cut_sizes=cut_sizes,
+            cut_rules=cut_rules,
         )
 
     def _base_payload(
@@ -902,7 +964,7 @@ class OptimizationService:
         finals: List[Dict[str, Tuple[int, int]]] = []
         for key, reqs in requirements_by_key.items():
             pieces, edge_map, net_map, pool_finals = self._build_pieces(
-                reqs, prepared.eb_products
+                reqs, prepared.cut_sizes[key]
             )
             if not pieces:
                 # Raised here so no domain error ever crosses a process boundary.
@@ -937,8 +999,10 @@ class OptimizationService:
 
         pool_results = run_pool_jobs(jobs)
         results = [
-            (edge_map, net_map, pool.layouts)
-            for (edge_map, net_map), pool in zip(maps, pool_results)
+            (edge_map, net_map, pool_finals, pool.layouts)
+            for (edge_map, net_map), pool_finals, pool in zip(
+                maps, finals, pool_results
+            )
         ]
 
         payload = self._build_result_payload(
@@ -948,6 +1012,7 @@ class OptimizationService:
             prepared.eb_products,
             prepared.waste_factor,
             self._build_unplaced(jobs, pool_results, finals),
+            prepared.cut_rules,
         )
         # Cached BEFORE the overrides: Redis has to hold the canonical payload
         # for this hash, or the next request with the flag off would be served a
@@ -1066,7 +1131,7 @@ class OptimizationService:
             if not reqs:
                 continue
             pieces, edge_map, net_map, finals = self._build_pieces(
-                reqs, prepared.eb_products
+                reqs, prepared.cut_sizes[key]
             )
             anchor = prepared.resolved[key]
             bins: Dict[Tuple[str, bool], SheetBin] = {
@@ -1087,9 +1152,9 @@ class OptimizationService:
             for offcut in prepared.pools.get(key) or ():
                 bins[(offcut.key, False)] = _sheet_bin(offcut, pooled=True)
 
-            def serialize(layout, edge_map=edge_map, net_map=net_map):
+            def serialize(layout, edge_map=edge_map, net_map=net_map, finals=finals):
                 return self._serialize_layout(
-                    layout, edge_map, net_map, prepared.eb_products
+                    layout, edge_map, net_map, prepared.eb_products, finals
                 )
 
             specs[key] = PoolSpec(
@@ -1247,6 +1312,7 @@ class OptimizationService:
         eb_products: Dict[int, ProductModel],
         waste_factor: float,
         half_board_markup_pct: float,
+        cut_rules: dict,
     ) -> str:
         """Deterministic sha256 hash of the inputs that affect the result.
 
@@ -1299,16 +1365,6 @@ class OptimizationService:
             for key, rm in resolved.items()
         }
         edge_bandings = edge_banding_salt(eb_products)
-        # A hard tape cuts its piece short (``hard_edges``): the tapes and their
-        # band types are already in the hash (the requirements and the salt),
-        # but the rule itself is not, and it moves the geometry. Emitted ONLY
-        # when some piece is actually cut short, like ``skip_trim``: every quote
-        # with no hard tape keeps its canonical JSON and its Redis entry, and
-        # ``ENGINE_VERSION`` stays put, since no hashed input changes its plan.
-        hard_edges = any(
-            requirement_cut_size(r, eb_products) != (r.height, r.width)
-            for r in request.requirements
-        )
         digest_input = {
             "materials": materials,
             "requirements": hashable_requirements(request.requirements),
@@ -1331,7 +1387,17 @@ class OptimizationService:
                 # Never moves a piece or a board, but it does decide the cut
                 # tree and therefore the leftovers this payload reports.
                 "min_usable_offcut": config.OPT_MIN_USABLE_OFFCUT_MM,
-                **({"hard_edge_cut_mm": HARD_EDGE_CUT_MM} if hard_edges else {}),
+                # The cut rules (``cut_rules``: the hard tape's millimetres, the
+                # assembly's allowance) move the geometry, and their values are
+                # settings. The tapes, their band types and which rows go
+                # together are already in (the requirements and the salt); the
+                # values go in ONLY for the rules some row is under, like
+                # ``skip_trim``: every quote with no hard tape and no marked row
+                # keeps its canonical JSON and its Redis entry, and
+                # ``ENGINE_VERSION`` stays put, since no hashed input changes its
+                # plan. A quote saved before the rule, whatever its codes, has
+                # no marked row.
+                **cut_rules,
             },
             "edge_bandings": edge_bandings,
         }
@@ -1389,7 +1455,7 @@ class OptimizationService:
         )
 
     def _build_pieces(
-        self, reqs: List[Requirement], eb_products: Dict[int, ProductModel]
+        self, reqs: List[Requirement], cuts: Sequence[Tuple[int, int]]
     ) -> Tuple[
         List[Piece],
         Dict[str, Requirement],
@@ -1411,12 +1477,15 @@ class OptimizationService:
         ``edge_map`` holds the whole requirement of every banded piece, since
         its banding is two fields (``edge_banding`` + ``special_edges``).
 
-        The piece is built at its CUT size: the final size the seller typed
-        minus 1 mm per side with a hard tape (``hard_edges.cut_size``), which
-        is what the engine packs and the editor checks. The net length stays
-        the final one -- the tape covers the finished edge. ``finals`` maps
-        the id of every piece the discount shrank to its final
-        ``(height, width)``, for whatever shows the piece as it was ordered.
+        The piece is built at its CUT size (``cuts``, parallel to ``reqs``,
+        from ``_Prepared.cut_sizes``): the final size the seller typed, short
+        per side with a hard tape (``hard_edges.cut_size``) and large on each
+        measure for a layer of an assembly (``assembly``), by the settings'
+        millimetres (``cut_rules``), which is what the engine packs and the
+        editor checks. The net length stays the final
+        one -- the tape covers the finished edge. ``finals`` maps the id of
+        every piece whose cut differs to its final ``(height, width)``, for
+        whatever shows the piece as it was ordered.
         """
         pieces: List[Piece] = []
         edge_map: Dict[str, Requirement] = {}
@@ -1424,7 +1493,7 @@ class OptimizationService:
         finals: Dict[str, Tuple[int, int]] = {}
         for i, uid in piece_instance_ids([(p.label, p.quantity) for p in reqs]):
             p = reqs[i]
-            height, width = requirement_cut_size(p, eb_products)
+            height, width = cuts[i]
             if (height, width) != (p.height, p.width):
                 finals[uid] = (p.height, p.width)
             try:
@@ -1548,29 +1617,31 @@ class OptimizationService:
         layout_dict: dict,
         edge_map: Dict[str, Requirement],
         eb_products: Dict[int, ProductModel],
+        finals: Optional[Dict[str, Tuple[int, int]]] = None,
     ) -> None:
         """Adds ``edges`` (geometric banded sides) to each placed piece.
 
         ``edge_map`` is indexed by the piece's unique id (see ``_build_pieces``), so
         the lookup uses the exact ``piece_id`` of the placed piece.
 
-        A piece a hard tape made smaller is placed at its cut size, and its
-        ``original_width``/``original_height`` would echo that: they are set
-        back to the size the seller typed, which is what every consumer reads
-        them as (the label, the hover, the review). ``width``/``height`` stay
-        the cut. Only a hard tape shrinks a piece and every banded piece is in
-        ``edge_map``, so the rest come out exactly as before.
+        A piece placed at a cut size other than its final one (a hard tape, a
+        layer of an assembly) would echo the cut in ``original_width``/
+        ``original_height``: they are set back to the size the seller typed
+        (``finals``), which is what every consumer reads them as (the label,
+        the hover, the review, the ``MF`` under an assembly code).
+        ``width``/``height`` stay the cut. Every other piece comes out exactly
+        as before.
         """
+        finals = finals or {}
         for placed in layout_dict.get("placed_pieces", []):
-            req = edge_map.get(str(placed.get("piece_id", "")))
+            piece_id = str(placed.get("piece_id", ""))
+            final = finals.get(piece_id)
+            if final is not None:
+                placed["original_height"] = float(final[0])
+                placed["original_width"] = float(final[1])
+            req = edge_map.get(piece_id)
             if req is None:
                 continue
-            if (placed["original_height"], placed["original_width"]) != (
-                req.height,
-                req.width,
-            ):
-                placed["original_width"] = float(req.width)
-                placed["original_height"] = float(req.height)
             placed["edges"] = self._geometric_edges(
                 req.edge_banding,
                 eb_products,
@@ -1701,16 +1772,18 @@ class OptimizationService:
         edge_map: Dict[str, Requirement],
         net_map: Dict[str, float],
         eb_products: Dict[int, ProductModel],
+        finals: Optional[Dict[str, Tuple[int, int]]] = None,
     ) -> dict:
         """One sheet as the payload carries it: geometry, edges and its metrics.
 
         The single serializer for a sheet, whether the engine or the seller laid
         it out: the cut metres come off its cuts (saw travel) and the edge-banding
-        metres off the net length of the pieces on it.
+        metres off the net length of the pieces on it. ``finals`` as
+        ``_build_pieces`` returns it.
         """
         layout_dict = layout.to_dict()
-        if edge_map:
-            self._enrich_layout_pieces(layout_dict, edge_map, eb_products)
+        if edge_map or finals:
+            self._enrich_layout_pieces(layout_dict, edge_map, eb_products, finals)
         eb_mm = sum(
             net_map.get(str(p.get("piece_id", "")), 0.0)
             for p in layout_dict.get("placed_pieces", [])
@@ -1724,21 +1797,33 @@ class OptimizationService:
         self,
         request: OptimizeRequest,
         results: List[
-            Tuple[Dict[str, EdgeBandingSpec], Dict[str, float], List[CuttingLayout]]
+            Tuple[
+                Dict[str, EdgeBandingSpec],
+                Dict[str, float],
+                Dict[str, Tuple[int, int]],
+                List[CuttingLayout],
+            ]
         ],
         resolved: Dict[str, ResolvedMaterial],
         eb_products: Dict[int, ProductModel],
         waste_factor: float,
         unplaced: Optional[List[dict]] = None,
+        cut_rules: Optional[dict] = None,
     ) -> dict:
         """Builds the cacheable/serializable payload for the optimization result.
 
         Same keys consumed by ``documents`` and the order snapshot. ``results``
-        groups by material as ``(edge_map, net_map, layouts)`` (maps indexed by the
-        unique piece id from ``_build_pieces``) to enrich each placed piece with its
-        banded sides and length without id collisions.
+        groups by material as ``(edge_map, net_map, finals, layouts)`` (maps
+        indexed by the unique piece id from ``_build_pieces``) to enrich each
+        placed piece with its banded sides, length and final size without id
+        collisions.
+
+        ``cut_rules`` (``cut_rules.rules_in_play``, the same dict the hash keys
+        on) is what the plan was cut with, for the PDF's legend and the order's
+        export; absent when no row is under either rule, so such a payload is
+        byte-identical to what it always was.
         """
-        all_layouts = [layout for _, _, layouts in results for layout in layouts]
+        all_layouts = [layout for *_, layouts in results for layout in layouts]
 
         # "Boards used" is what the client BUYS, so it counts catalog boards and
         # manual measurements. An offcut is material somebody already owns —
@@ -1763,13 +1848,13 @@ class OptimizationService:
         layout_dicts: List[dict] = []
         total_cut_linear_m = 0.0
         total_edge_banding_linear_m = 0.0
-        for edge_map, net_map, layouts in results:
+        for edge_map, net_map, finals, layouts in results:
             # Each `results` entry is one material's pool, so ordering inside
             # the loop puts a material's half board last without interleaving
             # two materials. See `order_sheets`.
             for layout in order_sheets(layouts):
                 layout_dict = self._serialize_layout(
-                    layout, edge_map, net_map, eb_products
+                    layout, edge_map, net_map, eb_products, finals
                 )
                 stats = layout_dict["statistics"]
                 total_cut_linear_m += stats["cut_linear_m"]
@@ -1802,6 +1887,7 @@ class OptimizationService:
             "edge_bandings_summary": edge_bandings_summary,
             "layout_groups": group_layouts(layout_dicts),
             "unplaced": unplaced or [],
+            **({"cut_rules": cut_rules} if cut_rules else {}),
         }
 
 

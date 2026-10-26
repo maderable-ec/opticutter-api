@@ -137,6 +137,17 @@ def _join(items: List[str]) -> str:
     return f"{', '.join(items[:-1])} y {items[-1]}"
 
 
+def _grown_note(entry: dict) -> str:
+    """Why a piece that would fit at its final size does not: a layer of an
+    assembly is cut 5 mm large (``assembly``), and that is the size that did
+    not fit. Empty for every other piece, whose message reads as before."""
+    height = entry.get("cut_height", entry["height"])
+    width = entry.get("cut_width", entry["width"])
+    if height <= entry["height"] and width <= entry["width"]:
+        return ""
+    return f" (se corta a {format_mm(height)}×{format_mm(width)} mm por el ensamble)"
+
+
 def unplaced_message(explained: Sequence[dict]) -> str:
     """One message for the whole plan, grouped by material and reason.
 
@@ -158,6 +169,7 @@ def unplaced_message(explained: Sequence[dict]) -> str:
             pieces.append(
                 f"{entry['quantity']}{named} de "
                 f"{format_mm(entry['height'])}×{format_mm(entry['width'])} mm"
+                + _grown_note(entry)
             )
         clause = _join(pieces)
         first = entries[0]

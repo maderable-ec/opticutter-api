@@ -10,7 +10,6 @@ import csv
 import io
 import xml.etree.ElementTree as ET
 
-from src.modules.optimizations import hard_edges
 from tests.order_helpers import _mint_order
 
 
@@ -123,7 +122,7 @@ def test_a_short_side_takes_the_millimetre_off_the_largo(client):
     assert (piece["originalHeight"], piece["originalWidth"]) == (600, 400)
 
 
-def test_a_soft_tape_leaves_the_piece_and_the_hash_as_they_were(client, monkeypatch):
+def test_a_soft_tape_leaves_the_piece_and_the_hash_as_they_were(client):
     client_id, board_id, hard, soft = _setup(client)
     soft_body = _request(client_id, board_id, soft, ["left", "right", "top"])
     hard_body = _request(client_id, board_id, hard, ["left", "right", "top"])
@@ -133,17 +132,19 @@ def test_a_soft_tape_leaves_the_piece_and_the_hash_as_they_were(client, monkeypa
     [piece] = soft_data["layouts"][0]["placedPieces"]
     assert (piece["height"], piece["width"]) == (600, 400)
 
-    # With the rule off, a soft quote hashes exactly as it does with it on (its
-    # Redis entry survives the deploy); a hard one does not.
-    monkeypatch.setattr(hard_edges, "HARD_EDGE_CUT_MM", 0)
+    # With another millimetre in the settings, a soft quote hashes exactly as
+    # before (its Redis entry survives); a hard one re-optimizes.
+    patched = client.patch("/api/v1/settings/cutting", json={"hardEdgeCutMm": 2})
+    assert patched.status_code == 200, patched.text
     assert (
         _optimize(client, soft_body)["optimizationHash"]
         == (soft_data["optimizationHash"])
     )
-    assert (
-        _optimize(client, hard_body)["optimizationHash"]
-        != (hard_data["optimizationHash"])
-    )
+    hard_again = _optimize(client, hard_body)
+    assert hard_again["optimizationHash"] != (hard_data["optimizationHash"])
+    [piece] = hard_again["layouts"][0]["placedPieces"]
+    assert (piece["height"], piece["width"]) == (598, 396)
+    assert (piece["originalHeight"], piece["originalWidth"]) == (600, 400)
 
 
 def test_a_piece_left_out_is_reported_at_the_size_the_seller_typed(client):

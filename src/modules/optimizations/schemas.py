@@ -538,6 +538,20 @@ class Requirement(CamelModel):
     division_code: Optional[str] = Field(
         default=None, max_length=32, description="División: workshop code"
     )
+    # The ensamble rule of ``assembly``: the rows sharing this assembly code are
+    # the layers of one assembled piece, cut alike and 5 mm large on each
+    # measure. Off by default, so a quote saved before the rule (codes with no
+    # mark) keeps its plan; the web marks every row whose code it writes. Left
+    # out of the hash and of the cached payload while it is off
+    # (``_requirement_dump``), so no existing quote moves.
+    assembly_allowance: bool = Field(
+        default=False,
+        description=(
+            "If true, this row is one layer of the assembly named by "
+            "`assemblyCode`: every layer is cut 5 mm large on each measure, less "
+            "the assembly's hard-edge discount, so all of them come out alike."
+        ),
+    )
 
     @field_validator(
         "hinging_code", "grooving_code", "assembly_code", "division_code", mode="before"
@@ -583,6 +597,17 @@ class Requirement(CamelModel):
             if remaining
             else None
         )
+        return self
+
+    @model_validator(mode="after")
+    def _no_assembly_without_a_code(self) -> "Requirement":
+        """The mark means nothing without the code that names the assembly.
+
+        Coerced, not rejected (pre-orders re-validate on every read): the row is
+        simply not a layer of anything, and its dump stays the unmarked one.
+        """
+        if self.assembly_allowance and self.assembly_code is None:
+            self.assembly_allowance = False
         return self
 
     def side_products(self) -> Dict[str, Optional[int]]:
@@ -834,14 +859,16 @@ class PlacedPiece(_QuietFlags):
         ...,
         description=(
             "Height of the placed piece (alto, after rotation) at its CUT size: "
-            "1 mm less per side with a hard tape"
+            "1 mm less per side with a hard tape, 5 mm more on each measure "
+            "for a layer of an assembly"
         ),
     )
     width: float = Field(
         ...,
         description=(
             "Width of the placed piece (ancho, after rotation) at its CUT size: "
-            "1 mm less per side with a hard tape"
+            "1 mm less per side with a hard tape, 5 mm more on each measure "
+            "for a layer of an assembly"
         ),
     )
     rotated: bool = Field(..., description="Indicates if the piece is rotated")
@@ -989,6 +1016,22 @@ class UnplacedPiece(_QuietFlags):
             "finite retazos ran out; `pending`: it fits, but the hand adjustment "
             "of its pool left it on no sheet"
         ),
+    )
+
+
+class CutRulesResponse(CamelModel):
+    """The millimetres the next optimization cuts with (``cut_rules``).
+
+    For the despiece's live hint (the cut size next to a measure, before
+    anything is optimized). The settings themselves are the admin's; the seller
+    only reads these two.
+    """
+
+    hard_edge_cut_mm: int = Field(
+        ..., description="Cut short per side with a hard edge banding"
+    )
+    assembly_allowance_mm: int = Field(
+        ..., description="Cut larger on each measure, for a layer of an assembly"
     )
 
 

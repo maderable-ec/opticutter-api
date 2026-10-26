@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends
 
 from src.modules.optimizations.schemas import (
+    CutRulesResponse,
     LayoutCandidatesRequest,
     LayoutCandidatesResponse,
     LayoutEvaluateResponse,
@@ -27,6 +28,17 @@ def optimize(
 ):
     """Runs a cutting optimization (cache-first) and returns the solution."""
     return ok(svc.optimize_response(request))
+
+
+@router.get("/cut-rules", response_model=DataResponse[CutRulesResponse])
+def cut_rules(svc: OptimizationService = Depends(optimization_service)):
+    """The millimetres the next optimization cuts with: short per side with a
+    hard tape, and larger on each measure for a layer of an assembly.
+
+    The values are cutting settings (``PATCH /settings/cutting``, admin only);
+    this is the seller's read of them, for the despiece's live cut size.
+    """
+    return ok(svc.cut_rules())
 
 
 @router.post("/layout/evaluate", response_model=DataResponse[LayoutEvaluateResponse])
