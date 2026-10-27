@@ -29,6 +29,7 @@ from src.modules.notifications.emitter import (
     notify_order_confirmed,
     notify_order_low_stock,
 )
+from src.modules.optimizations.assembly import AssemblyMismatchError
 from src.modules.optimizations.unplaced import UnplacedPiecesError
 from src.modules.orders.schemas import OrderCreate
 from src.modules.orders.service import OrderService
@@ -196,6 +197,13 @@ class PreOrderReviewService:
             # the pre-order stays open and the link active.
             raise BusinessRuleError(
                 "La cotización tiene piezas que no entran en el material y no se "
+                "puede confirmar todavía; contacta a ventas para corregirla."
+            )
+        except AssemblyMismatchError:
+            # Same for an assembly whose layers disagree: the staff message
+            # names codes and sizes the client never typed.
+            raise BusinessRuleError(
+                "La cotización tiene piezas de ensamble que no coinciden y no se "
                 "puede confirmar todavía; contacta a ventas para corregirla."
             )
 

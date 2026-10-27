@@ -1,13 +1,17 @@
-"""A hard tape cuts its piece 1 mm short per side, across the side it is on."""
+"""A hard tape cuts its piece short per side, across the side it is on.
+
+How much is a setting (``cut_rules``); these tests run at the default 1 mm
+unless they say otherwise.
+"""
 
 from types import SimpleNamespace
 
+from src.modules.optimizations import hard_edges
+from src.modules.optimizations.cut_rules import LEGACY_CUT_RULES, CutRules
 from src.modules.optimizations.hard_edges import (
-    HARD_EDGE_CUT_MM,
-    cut_size,
     frozen_band_types,
+    hard_edge_rule_applies,
     requirement_band_types,
-    requirement_cut_size,
 )
 from src.modules.optimizations.schemas import Requirement
 from src.modules.optimizations.visualization import _cut_short, _legend_entries
@@ -23,8 +27,26 @@ def _tape(band_type):
     return SimpleNamespace(attributes={"bandType": band_type} if band_type else {})
 
 
-def test_the_rule_is_one_millimetre_per_side():
-    assert HARD_EDGE_CUT_MM == 1
+_MM = LEGACY_CUT_RULES.hard_edge_cut_mm
+
+
+def cut_size(height, width, types, hard_mm=_MM):
+    return hard_edges.cut_size(height, width, types, hard_mm)
+
+
+def requirement_cut_size(req, tapes, hard_mm=_MM):
+    return hard_edges.requirement_cut_size(req, tapes, hard_mm)
+
+
+def test_the_default_is_one_millimetre_per_side():
+    assert LEGACY_CUT_RULES.hard_edge_cut_mm == 1
+
+
+def test_the_millimetres_are_the_settings():
+    both = {"left": "Hard", "right": "Hard", "top": "Hard"}
+    assert cut_size(600, 400, both, hard_mm=2) == (598, 396)
+    # 0 is "cut at the final size", tapes and all.
+    assert cut_size(600, 400, both, hard_mm=0) == (600, 400)
 
 
 def test_a_long_side_shortens_the_width_and_a_short_side_the_height():
@@ -73,6 +95,20 @@ def test_a_tape_with_no_product_yet_is_not_hard():
     assert requirement_cut_size(_req(), {1: _tape("Hard")}) == (600, 400)
 
 
+def test_the_rule_applies_to_a_hard_side_left_on_whatever_the_millimetres():
+    hard = _req(edgeBanding={"sides": ["left"], "productId": 1})
+    tapes = {1: _tape("Hard"), 2: _tape("Soft")}
+    assert hard_edge_rule_applies(hard, tapes)
+    assert not hard_edge_rule_applies(
+        _req(edgeBanding={"sides": ["left"], "productId": 2}), tapes
+    )
+    assert not hard_edge_rule_applies(
+        _req(edgeBanding={"sides": ["left"], "productId": 1}, hardEdgeCut=False),
+        tapes,
+    )
+    assert not hard_edge_rule_applies(_req(), tapes)
+
+
 def test_a_piece_the_seller_opted_out_is_cut_at_its_final_size():
     req = _req(edgeBanding={"sides": ["left", "right", "top"], "productId": 1})
     tapes = {1: _tape("Hard")}
@@ -114,19 +150,24 @@ def _placed(height, width, original_height, original_width, rotated=False):
 
 
 def test_a_piece_is_cut_short_when_its_placed_size_is_not_the_ordered_one():
-    assert _cut_short(_placed(600, 398, 600, 400))
+    assert _cut_short(_placed(600, 398, 600, 400), 5)
     # Rotated: the placed box is turned, the ordered size is not.
-    assert _cut_short(_placed(398, 600, 600, 400, rotated=True))
-    assert not _cut_short(_placed(400, 600, 600, 400, rotated=True))
-    assert not _cut_short(_placed(600, 400, 600, 400))
+    assert _cut_short(_placed(398, 600, 600, 400, rotated=True), 5)
+    assert not _cut_short(_placed(400, 600, 600, 400, rotated=True), 5)
+    assert not _cut_short(_placed(600, 400, 600, 400), 5)
     # A snapshot with no ``original_*`` at all is not cut short.
-    assert not _cut_short({"height": 600, "width": 400})
+    assert not _cut_short({"height": 600, "width": 400}, 5)
 
 
 def test_the_hard_entry_names_the_discount_only_when_it_was_taken():
-    def hard_text(cut_short):
-        [entry] = [e for e in _legend_entries({"Hard"}, cut_short) if e[4] == "hatch"]
+    def hard_text(cut_short, rules=LEGACY_CUT_RULES):
+        entries = _legend_entries({"Hard"}, cut_short, rules=rules)
+        [entry] = [e for e in entries if e[4] == "hatch"]
         return entry[3]
 
     assert hard_text(False) == "Canto duro"
     assert hard_text(True) == "Canto duro (corte -1 mm por lado)"
+    # By the millimetres the plan was cut with.
+    assert hard_text(True, CutRules(hard_edge_cut_mm=2, assembly_allowance_mm=5)) == (
+        "Canto duro (corte -2 mm por lado)"
+    )

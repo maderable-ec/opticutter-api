@@ -4,11 +4,15 @@ A hard tape (``BandType.HARD``, PVC 1-1.5 mm) makes the piece thicker across
 the side it is glued on, so the saw has to cut that side short for the piece
 to come out at the size the seller typed. The seller always enters the FINAL
 size; this module is the one place that turns it into the size the saw cuts.
+How much per side is a setting (``settings.hard_edge_cut_mm``, 1 mm by
+default; see ``cut_rules``), not the tape's own thickness: a 1.5 mm tape takes
+off the same.
 
 The axis is the physical one: a tape on a long side (``left``/``right``, the
 ``L`` of the notation, sides of length ``height``) adds its thickness across
 the WIDTH, and one on a short side (``top``/``bottom``, ``C``) across the
-HEIGHT. A 600×400 piece with ``2L CD`` is cut 600×398; with ``1C CD``, 599×400.
+HEIGHT. At 1 mm, a 600×400 piece with ``2L CD`` is cut 600×398; with ``1C CD``,
+599×400.
 
 What makes a side hard is the tape's PRODUCT (its ``bandType``), the same
 source that hatches the side in the diagram and prints ``CD`` -- so what reads
@@ -25,34 +29,38 @@ from src.modules.optimizations.schemas import Requirement
 from src.modules.products.model import ProductModel
 from src.modules.products.types.edge_banding import BandType
 
-# Millimetres the saw cuts short per side with a hard tape. A fixed shop rule,
-# not the tape's own thickness: a 1.5 mm tape still takes 1 mm off.
-HARD_EDGE_CUT_MM = 1
-
 _HEIGHT_SIDES = ("top", "bottom")  # the tape on these adds across the height
 _WIDTH_SIDES = ("left", "right")  # ... and on these across the width
 
 
-def _shorten(size: int, hard_sides: int) -> int:
-    cut = size - hard_sides * HARD_EDGE_CUT_MM
+def _shorten(size: int, hard_sides: int, hard_mm: int) -> int:
+    cut = size - hard_sides * hard_mm
     # A piece too small to take its discount keeps its size: coerced, never
     # raised, because pre-orders re-validate on every read (a 422 there is a
     # 500). No real piece is 2 mm wide; this only keeps ``Piece`` positive.
     return cut if cut > 0 else size
 
 
+def _hard_sides(side_band_types: Mapping[str, Optional[str]]) -> set:
+    return {side for side, bt in side_band_types.items() if bt == BandType.HARD.value}
+
+
 def cut_size(
-    height: int, width: int, side_band_types: Mapping[str, Optional[str]]
+    height: int,
+    width: int,
+    side_band_types: Mapping[str, Optional[str]],
+    hard_mm: int,
 ) -> Tuple[int, int]:
     """``(height, width)`` the saw cuts, from the final size and each side's tape.
 
     ``side_band_types`` maps a NOMINAL side to its tape's band type (``Hard``,
-    ``Soft`` or ``None`` for an unknown tape); only ``Hard`` takes anything off.
+    ``Soft`` or ``None`` for an unknown tape); only ``Hard`` takes anything off,
+    ``hard_mm`` per side (``settings.hard_edge_cut_mm``, see ``cut_rules``).
     """
-    hard = {side for side, bt in side_band_types.items() if bt == BandType.HARD.value}
+    hard = _hard_sides(side_band_types)
     return (
-        _shorten(height, sum(1 for s in _HEIGHT_SIDES if s in hard)),
-        _shorten(width, sum(1 for s in _WIDTH_SIDES if s in hard)),
+        _shorten(height, sum(1 for s in _HEIGHT_SIDES if s in hard), hard_mm),
+        _shorten(width, sum(1 for s in _WIDTH_SIDES if s in hard), hard_mm),
     )
 
 
@@ -90,8 +98,18 @@ def frozen_band_types(edges: Optional[Mapping]) -> Dict[str, Optional[str]]:
     return types
 
 
-def requirement_cut_size(
+def hard_edge_rule_applies(
     req: Requirement, eb_products: Mapping[int, ProductModel]
+) -> bool:
+    """The rule decides this piece's cut: some side has a hard tape and the
+    seller left the rule on for it. Whatever the millimetres are, 0 included."""
+    return req.hard_edge_cut and bool(
+        _hard_sides(requirement_band_types(req, eb_products))
+    )
+
+
+def requirement_cut_size(
+    req: Requirement, eb_products: Mapping[int, ProductModel], hard_mm: int
 ) -> Tuple[int, int]:
     """``(height, width)`` the saw cuts for a live requirement.
 
@@ -100,4 +118,6 @@ def requirement_cut_size(
     """
     if not req.hard_edge_cut:
         return req.height, req.width
-    return cut_size(req.height, req.width, requirement_band_types(req, eb_products))
+    return cut_size(
+        req.height, req.width, requirement_band_types(req, eb_products), hard_mm
+    )

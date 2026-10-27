@@ -491,6 +491,8 @@ class OrderService(BranchScopedMixin):
                 can_rotate=r.get("can_rotate", True),
                 # Dumped only when the seller turned it off (``_requirement_dump``).
                 hard_edge_cut=r.get("hard_edge_cut", True),
+                # Dumped only on a layer of an assembly (``_requirement_dump``).
+                assembly_allowance=r.get("assembly_allowance", False),
                 edges=_piece_edges(r),
                 **{f: r.get(f) for f in WORKSHOP_CODE_FIELDS},
             )

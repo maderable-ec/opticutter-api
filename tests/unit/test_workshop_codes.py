@@ -115,6 +115,7 @@ def test_the_codes_never_reach_the_hash():
     # Younger than the codes and left out the same way while at their default.
     legacy.pop("special_edges")
     legacy.pop("hard_edge_cut")
+    legacy.pop("assembly_allowance")
     for field in WORKSHOP_CODE_FIELDS:
         legacy.pop(field)
         assert field not in with_codes[0]

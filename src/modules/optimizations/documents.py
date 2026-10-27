@@ -400,7 +400,9 @@ class DocumentService:
         buffer = io.BytesIO()
         pdf = canvas.Canvas(buffer, pagesize=LANDSCAPE_SIZE)
         for group, board_name in _diagram_pages(carrier):
-            image = VisualizationService.render_layout(group, board_name=board_name)
+            image = VisualizationService.render_layout(
+                group, board_name=board_name, cut_rules=carrier.cut_rules
+            )
             img_w, img_h = image.size
             # The landscape frame is wider (770pt vs 523pt) but *shorter* (522pt
             # vs 769pt) than a portrait one, so both bounds are applied or a tall

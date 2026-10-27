@@ -3,6 +3,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from PIL import Image, ImageColor, ImageDraw, ImageFont
 
+from src.modules.optimizations.cut_rules import LEGACY_CUT_RULES, CutRules
 from src.modules.optimizations.patterns import base_label
 
 # Font paths to try in order (macOS first, then Linux/Docker).
@@ -296,24 +297,43 @@ def _fit_label(
     return (truncated + "…") if truncated else None
 
 
-def _cut_short(piece: dict) -> bool:
-    """A hard tape made this piece smaller than the size it was ordered at.
+def _resize(piece: dict) -> Tuple[float, float]:
+    """``(cut - final)`` per measure, in the piece's own frame.
 
     The placed size is the cut one and ``original_*`` the ordered one
     (``OptimizationService._enrich_layout_pieces``); an order frozen before the
-    rule has the two equal, and so reads ``False``.
+    rules has the two equal, and so reads ``(0, 0)``.
     """
     height, width = piece.get("height"), piece.get("width")
     if piece.get("rotated"):
         height, width = width, height
-    return (height, width) != (
-        piece.get("original_height", height),
-        piece.get("original_width", width),
+    return (
+        height - piece.get("original_height", height),
+        width - piece.get("original_width", width),
     )
 
 
+def _cut_short(piece: dict, allowance_mm: int) -> bool:
+    """A hard tape took millimetres off this piece's cut.
+
+    Read off the two sizes alone, since the rules are the only things that
+    move them: a hard tape takes its millimetres per side off (a negative
+    measure), and on a layer of an assembly it eats into the allowance (a
+    measure that grew by less than ``allowance_mm``).
+    """
+    return any(d < 0 or 0 < d < allowance_mm for d in _resize(piece))
+
+
+def _enlarged(piece: dict) -> bool:
+    """A layer of an assembly: cut larger than it was ordered (``assembly``)."""
+    return any(d > 0 for d in _resize(piece))
+
+
 def _legend_entries(
-    band_types: Set[str], cut_short: bool = False
+    band_types: Set[str],
+    cut_short: bool = False,
+    enlarged: bool = False,
+    rules: CutRules = LEGACY_CUT_RULES,
 ) -> List[Tuple[str, str, int, str, str]]:
     """The legend's entries: ``(fill, outline, width, text, swatch)``.
 
@@ -323,8 +343,11 @@ def _legend_entries(
     thing that tells them apart, so it has to be spelled out.
 
     ``cut_short``: some piece of the pattern is drawn and measured at its cut
-    size, 1 mm short per hard side (``hard_edges``). The hard-edge entry says
-    so, since the numbers on those pieces are not the ones the client ordered.
+    size, short per hard side (``hard_edges``). The hard-edge entry says so,
+    since the numbers on those pieces are not the ones the client ordered.
+    ``enlarged``: some piece is a layer of an assembly, large on each measure
+    (``assembly``), and gets an entry of its own for the same reason. Both say
+    by how much, with the values the plan was cut with (``rules``).
     """
     entries = [
         (COLOR_PIECE_FILL, COLOR_INK, PIECE_OUTLINE_WIDTH, "Pieza", ""),
@@ -340,8 +363,23 @@ def _legend_entries(
     if "Soft" in band_types:
         entries.append((COLOR_INK, COLOR_INK, 1, "Canto suave", ""))
     if "Hard" in band_types:
-        text = "Canto duro (corte -1 mm por lado)" if cut_short else "Canto duro"
+        text = (
+            f"Canto duro (corte -{rules.hard_edge_cut_mm} mm por lado)"
+            if cut_short
+            else "Canto duro"
+        )
         entries.append(("white", COLOR_INK, 1, text, "hatch"))
+    if enlarged:
+        entries.append(
+            (
+                COLOR_PIECE_FILL,
+                COLOR_INK,
+                PIECE_OUTLINE_WIDTH,
+                f"Ensamble (+{rules.assembly_allowance_mm} mm por medida para "
+                "rectificar)",
+                "",
+            )
+        )
     return entries
 
 
@@ -409,6 +447,7 @@ class VisualizationService:
         group: dict,
         target_long: int = 2000,
         board_name: Optional[str] = None,
+        cut_rules: CutRules = LEGACY_CUT_RULES,
     ) -> Image.Image:
         """Draws a single cutting pattern filling the whole canvas.
 
@@ -431,6 +470,9 @@ class VisualizationService:
         the saw: on a multi-material job the operator has to know WHICH board this
         pattern is cut on. Falls back to the old label when the name is unknown —
         a snapshot from before the summary carried it, say.
+
+        ``cut_rules`` are the millimetres the plan was cut with
+        (``cut_rules.payload_cut_rules``), which the legend spells out.
         """
         layout = group.get("layout", group)
         count = group.get("count", 1)
@@ -480,8 +522,12 @@ class VisualizationService:
         # Laid out once and handed to the drawing below: the legend's own height
         # is what sets the band, so measuring it here and letting ``_draw_legend``
         # measure it again is both wasted work and two places to disagree.
+        placed = layout.get("placed_pieces", [])
         legend = _legend_entries(
-            band_types, any(_cut_short(p) for p in layout.get("placed_pieces", []))
+            band_types,
+            any(_cut_short(p, cut_rules.assembly_allowance_mm) for p in placed),
+            any(_enlarged(p) for p in placed),
+            cut_rules,
         )
         legend_positions, legend_bottom = _legend_layout(
             legend, legend_font, MARGIN, LEGEND_TOP, canvas_width - MARGIN

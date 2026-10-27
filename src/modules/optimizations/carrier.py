@@ -2,6 +2,12 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import List, Optional
 
+from src.modules.optimizations.cut_rules import (
+    LEGACY_CUT_RULES,
+    CutRules,
+    payload_cut_rules,
+)
+
 
 @dataclass
 class DocumentCarrier:
@@ -25,6 +31,9 @@ class DocumentCarrier:
     edge_bandings_summary: List[dict] = field(default_factory=list)
     layouts: List[dict] = field(default_factory=list)
     layout_groups: List[dict] = field(default_factory=list)
+    # The millimetres the plan was cut with (``cut_rules``), for the diagram's
+    # legend: the plan's own, never the settings of the day.
+    cut_rules: CutRules = LEGACY_CUT_RULES
     total_boards_used: int = 0
     total_boards_cost: float = 0.0
     total_edge_banding_cost: float = 0.0
@@ -97,6 +106,7 @@ class DocumentCarrier:
             edge_bandings_summary=payload.get("edge_bandings_summary") or [],
             layouts=payload.get("layouts") or [],
             layout_groups=payload.get("layout_groups") or [],
+            cut_rules=payload_cut_rules(payload),
             total_boards_used=payload.get("total_boards_used", 0),
             total_boards_cost=payload.get("total_boards_cost", 0.0),
             total_edge_banding_cost=payload.get("total_edge_banding_cost", 0.0),

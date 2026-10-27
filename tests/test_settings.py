@@ -54,6 +54,27 @@ def test_get_cutting_seeds_from_config(client):
     assert data["topTrim"] == config.TOP_TRIM
     assert data["edgeBandingWasteFactor"] == config.EDGE_BANDING_WASTE_FACTOR
     assert data["halfBoardMarkupPct"] == config.HALF_BOARD_MARKUP_PCT
+    assert data["hardEdgeCutMm"] == config.HARD_EDGE_CUT_MM == 1
+    assert data["assemblyAllowanceMm"] == config.ASSEMBLY_ALLOWANCE_MM == 5
+
+
+def test_patch_cutting_bounds_the_cut_rules(client):
+    """Whole millimetres within what a shop could mean: a hard tape is 1-2 mm
+    thick, and the allowance squares a glued block."""
+    url = "/api/v1/settings/cutting"
+    for body in (
+        {"hardEdgeCutMm": -1},
+        {"hardEdgeCutMm": 4},
+        {"hardEdgeCutMm": 1.5},
+        {"assemblyAllowanceMm": 21},
+    ):
+        assert client.patch(url, json=body).status_code == 422, body
+    resp = client.patch(url, json={"hardEdgeCutMm": 0, "assemblyAllowanceMm": 20})
+    assert resp.status_code == 200
+    assert (resp.json()["data"]["hardEdgeCutMm"], resp.json()["data"]["kerf"]) == (
+        0,
+        config.KERF,
+    )
 
 
 def test_patch_cutting_persists_and_is_partial(client):

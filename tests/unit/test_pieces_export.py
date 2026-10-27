@@ -5,14 +5,23 @@ import io
 import xml.etree.ElementTree as ET
 from types import SimpleNamespace
 
+from src.modules.optimizations.cut_rules import LEGACY_CUT_RULES
 from src.modules.optimizations.labels import edge_notation, workshop_codes_line
+from src.modules.orders import pieces_export
 from src.modules.orders.pieces_export import (
     CSV_COLUMNS,
     customer_name,
     piece_etiqueta,
-    pieces_csv,
-    pieces_xml,
 )
+
+
+def pieces_csv(pieces):
+    return pieces_export.pieces_csv(pieces, LEGACY_CUT_RULES)
+
+
+def pieces_xml(pieces, customer=None):
+    return pieces_export.pieces_xml(pieces, LEGACY_CUT_RULES, customer)
+
 
 # The tags of one <row>, in order, as the commercial program writes them (read
 # off its own files; they live in ``pruebas/``, which git ignores).
@@ -57,6 +66,7 @@ def _piece(id=1, **kw):
         grooving_code=None,
         assembly_code=None,
         division_code=None,
+        assembly_allowance=False,
     )
     fields.update(kw)
     return SimpleNamespace(**fields)
