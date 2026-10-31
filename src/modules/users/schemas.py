@@ -13,8 +13,8 @@ class UserBase(CamelModel):
     branch_id: Optional[int] = Field(
         default=None,
         description=(
-            "Assigned branch (required for vendedor/operador/canteador). The "
-            "administrador is global: ignored and left null."
+            "Assigned branch (required for vendedor/operador/canteador/"
+            "proyectista). The administrador is global: ignored and left null."
         ),
     )
 
@@ -27,7 +27,8 @@ class UserCreate(UserBase):
         min_length=1,
         description=(
             "Roles (the permissions are their union). Only operador and "
-            "canteador combine; administrador and vendedor are exclusive."
+            "canteador combine; administrador, vendedor and proyectista are "
+            "exclusive."
         ),
     )
     password: str = Field(..., min_length=8, max_length=128, description="Password")

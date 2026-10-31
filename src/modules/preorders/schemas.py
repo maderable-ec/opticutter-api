@@ -66,6 +66,13 @@ class PreOrderCreate(CamelModel):
     )
     notes: Optional[str] = Field(default=None, max_length=512)
     source: Optional[str] = Field(default="web", max_length=32)
+    project_id: Optional[int] = Field(
+        default=None,
+        description=(
+            "The designer's project this quote is made from. It must be ready "
+            "(or already quoted); creating the quote marks it quoted."
+        ),
+    )
     branch_id: Optional[int] = Field(
         default=None,
         description=(
@@ -156,6 +163,9 @@ class PreOrderResponse(CamelModel):
     order_code: Optional[str] = Field(
         default=None, description="Code of that order, so the link can be labelled"
     )
+    project_id: Optional[int] = Field(
+        default=None, description="The designer's project it was quoted from"
+    )
     created_at: datetime
     updated_at: datetime
     sent_at: Optional[datetime] = None
@@ -200,6 +210,7 @@ class PreOrderSummaryResponse(CamelModel):
     source: Optional[str] = None
     order_id: Optional[int] = None
     order_code: Optional[str] = None
+    project_id: Optional[int] = None
     created_at: datetime
     updated_at: datetime
     expires_at: Optional[datetime] = None

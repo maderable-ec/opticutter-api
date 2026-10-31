@@ -33,6 +33,7 @@ from src.modules.products.family_router import (
     router as product_families_router,
 )
 from src.modules.products.router import router as products_router
+from src.modules.projects.router import router as projects_router
 from src.modules.settings.router import router as settings_router
 from src.modules.system.router import router as system_router
 from src.modules.users.auth_router import router as auth_router
@@ -114,6 +115,7 @@ app.include_router(clients_router, prefix="/api/v1")
 app.include_router(additional_services_router, prefix="/api/v1")
 app.include_router(optimizations_router, prefix="/api/v1")
 app.include_router(optimization_drafts_router, prefix="/api/v1")
+app.include_router(projects_router, prefix="/api/v1")
 app.include_router(orders_router, prefix="/api/v1")
 app.include_router(print_router, prefix="/api/v1")
 app.include_router(preorders_router, prefix="/api/v1")

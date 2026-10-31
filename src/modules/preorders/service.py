@@ -31,6 +31,12 @@ from src.modules.preorders.schemas import (
     PreOrderCreate,
     PreOrderUpdate,
 )
+from src.modules.projects.model import (
+    QUOTABLE_STATUSES,
+    STATUS_LABELS,
+    ProjectModel,
+    ProjectStatus,
+)
 from src.modules.settings.service import SettingsService
 from src.shared.audit import Actor, system_actor
 from src.shared.branch_scope import BranchScopedMixin
@@ -180,10 +186,15 @@ class PreOrderService(BranchScopedMixin):
 
         A quote whose plan leaves a piece uncut is refused (``_require_complete``);
         only ``duplicate`` turns that off, see there.
+
+        ``project_id`` links the quote to the designer's project it was made
+        from, which must be ready (``_quotable_project``) and becomes ``quoted``
+        in the same commit.
         """
         actor = actor or system_actor()
         if self.db.get(ClientModel, data.client_id) is None:
             raise EntityNotFoundError("Client", data.client_id)
+        project = self._quotable_project(data.project_id)
         branch_id = resolve_branch_for_create(
             self.db, branch_scope, data.branch_id, default_branch_id
         )
@@ -226,17 +237,43 @@ class PreOrderService(BranchScopedMixin):
             ),
             source=data.source,
             notes=data.notes,
+            project_id=data.project_id,
             created_at=now,
             expires_at=now + timedelta(days=validity_days),
             created_by=actor.user_id,
         )
         self._record_transition(preorder, None, PreOrderStatus.draft, actor, note=note)
+        if project is not None and project.status == ProjectStatus.ready.value:
+            project.status = ProjectStatus.quoted.value
+            if actor.user_id is not None:
+                project.updated_by = actor.user_id
         self.db.add(preorder)
         self.db.flush()  # assigns the id needed to build the readable code
         preorder.code = f"PRE-{now.year}-{preorder.id:04d}"
         self.db.commit()
         self.db.refresh(preorder)
         return preorder
+
+    def _quotable_project(self, project_id: Optional[int]) -> Optional[ProjectModel]:
+        """The project a quote is made from, checked before anything is written.
+
+        It must have been handed to the sellers (``ready``) or quoted already (a
+        rejected quote is re-quoted from the same project). One in progress is
+        still being drawn, and an archived one was shelved by its designer.
+        """
+        if project_id is None:
+            return None
+        project = self.db.get(ProjectModel, project_id)
+        if project is None:
+            raise EntityNotFoundError("Project", project_id)
+        status = ProjectStatus(project.status)
+        if status not in QUOTABLE_STATUSES:
+            raise ValidationError(
+                f"El proyecto está {STATUS_LABELS[status]}: solo se cotiza un "
+                "proyecto listo.",
+                field="projectId",
+            )
+        return project
 
     def duplicate(
         self,

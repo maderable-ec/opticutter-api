@@ -50,6 +50,7 @@ def test_unknown_role_is_rejected():
         ["canteador"],
         ["vendedor"],
         ["administrador"],
+        ["proyectista"],
         ["canteador", "operador"],
     ],
 )
@@ -64,6 +65,8 @@ def test_allowed_role_sets(mock_session, roles):
         ["administrador", "operador"],
         ["vendedor", "operador"],
         ["vendedor", "canteador"],
+        ["proyectista", "vendedor"],
+        ["proyectista", "operador"],
     ],
 )
 def test_global_roles_never_combine(mock_session, roles):
@@ -109,3 +112,15 @@ def test_an_admin_cannot_lock_themselves_out(mock_session, changes, field):
     assert admin.roles == ["administrador"]
     assert admin.full_name is None
     mock_session.commit.assert_not_called()
+
+
+def test_the_designer_is_last_in_the_canonical_order():
+    """Added at the end, so no stored list of the existing roles reorders."""
+    assert list(UserRole)[-1] is UserRole.DESIGNER
+    assert canonical_roles(["proyectista"]) == ["proyectista"]
+
+
+def test_the_designer_needs_a_base_branch(mock_session):
+    with pytest.raises(ValidationError) as exc:
+        UserService(mock_session)._normalize_branch(["proyectista"], None)
+    assert exc.value.field == "branchId"
