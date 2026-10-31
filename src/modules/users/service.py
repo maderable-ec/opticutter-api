@@ -29,7 +29,8 @@ class UserService(CRUDService[UserModel, UserCreate, UserUpdate]):
         Only the workshop roles combine (a bander learning to cut is
         ``operador`` + ``canteador``). The admin already holds every permission
         and a seller who also worked the shop floor would need a branch scope
-        nobody has defined, so both stay exclusive. Lives here and not in the
+        nobody has defined, so both stay exclusive; so does the designer, whose
+        projects are scoped by owner, not by branch. Lives here and not in the
         table, so the rule can be relaxed without a migration.
         """
         values = canonical_roles(roles)
@@ -49,14 +50,15 @@ class UserService(CRUDService[UserModel, UserCreate, UserUpdate]):
         """Reconciles roles and branch: global admin (None); staff requires a valid one.
 
         The administrator sees and operates all branches, so its ``branch_id`` is
-        forced to ``None``. Seller/operator/bander must have an existing branch.
+        forced to ``None``. Seller/operator/bander/designer must have an existing
+        branch (the designer's is only a base: their projects are not scoped by it).
         """
         if UserRole.ADMIN.value in roles:
             return None
         if branch_id is None:
             raise ValidationError(
-                "El vendedor, operador o canteador requiere una sucursal "
-                "asignada (branchId).",
+                "El vendedor, operador, canteador o proyectista requiere una "
+                "sucursal asignada (branchId).",
                 field="branchId",
             )
         if self.db.get(BranchModel, branch_id) is None:

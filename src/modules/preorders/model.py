@@ -69,6 +69,8 @@ class PreOrderModel(TimestampMixin, AuditMixin, Base):
         # order came from through this column, once per order listing page. A FK
         # is not indexed on its own, and this one was only ever read forwards.
         Index("ix_preorders_order_id", "order_id"),
+        # Read backwards too: a project lists the quotes made from it.
+        Index("ix_preorders_project_id", "project_id"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
@@ -117,6 +119,12 @@ class PreOrderModel(TimestampMixin, AuditMixin, Base):
     # SET NULL so removing an order doesn't block on the back-reference.
     order_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("orders.id", ondelete="SET NULL"), nullable=True
+    )
+
+    # The designer's project this quote was made from (``projects``), if any.
+    # SET NULL, though projects are archived rather than deleted.
+    project_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("projects.id", ondelete="SET NULL"), nullable=True
     )
 
     sent_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)

@@ -772,8 +772,26 @@ def test_permission_matrix_reflects_roles():
     # The low-stock report is what the admin reorders from: admin only, apart
     # from the stock check a seller runs while quoting.
     assert RESOURCE_ROLES["inventory:low-stock"] == (UserRole.ADMIN,)
-    assert RESOURCE_ROLES["inventory:check"] == (UserRole.ADMIN, UserRole.SELLER)
-    assert RESOURCE_ROLES["products:read"] == (UserRole.ADMIN, UserRole.SELLER)
+    # The stock check and the catalog are part of building a cut list, which the
+    # designer does too.
+    assert RESOURCE_ROLES["inventory:check"] == (
+        UserRole.ADMIN,
+        UserRole.SELLER,
+        UserRole.DESIGNER,
+    )
+    assert RESOURCE_ROLES["products:read"] == (
+        UserRole.ADMIN,
+        UserRole.SELLER,
+        UserRole.DESIGNER,
+    )
+    # The designer works in the optimizer but keeps out of the branch drafts and
+    # of everything commercial: a seller quotes their projects.
+    assert UserRole.DESIGNER in RESOURCE_ROLES["optimizer"]
+    assert RESOURCE_ROLES["optimizer:drafts"] == (UserRole.ADMIN, UserRole.SELLER)
+    assert RESOURCE_ROLES["projects:write"] == (UserRole.ADMIN, UserRole.DESIGNER)
+    assert UserRole.SELLER in RESOURCE_ROLES["projects:read"]
+    for area in ("clients:manage", "preorders", "orders:read", "orders:write"):
+        assert UserRole.DESIGNER not in RESOURCE_ROLES[area], area
     # The catalog sync is deliberately its own key: the seller pulls fresh prices
     # (it is what loads price_2/price_3) without gaining product CRUD.
     assert RESOURCE_ROLES["products:sync"] == (UserRole.ADMIN, UserRole.SELLER)

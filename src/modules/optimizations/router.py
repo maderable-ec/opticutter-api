@@ -12,7 +12,7 @@ from src.modules.optimizations.service import OptimizationService, optimization_
 from src.modules.users.dependencies import require_permission
 from src.shared.responses import ERROR_RESPONSES, DataResponse, ok
 
-# Optimizer: "administrador" and "vendedor" (RESOURCE_ROLES["optimizer"]).
+# Optimizer: administrador, vendedor and proyectista (RESOURCE_ROLES["optimizer"]).
 router = APIRouter(
     prefix="/optimize",
     tags=["optimize"],

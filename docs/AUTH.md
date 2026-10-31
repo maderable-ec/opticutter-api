@@ -13,10 +13,13 @@ Auth contract for the Cutter API, consumed by the Maderable web dashboard
 | `vendedor`       | Sales: product catalog (read), additional-services catalog (full CRUD), clients, optimizer, pre-orders, orders. |
 | `operador`       | Workshop (cutting): reads orders, drives the cutting plan, marks pieces cut. |
 | `canteador`      | Workshop (edge banding): the shared shop-floor board, the start/finish banding actions, and completing orders; does **not** see order detail. |
+| `proyectista`    | Design: the optimizer, the catalog (read) and **their own** projects (`/projects`), which they hand to a seller to quote. No clients, pre-orders or orders. |
 
 `operador` and `canteador` are workshop roles bound to a single branch;
 `administrador` and `vendedor` are global (see
-[`MULTI_BRANCH.md`](MULTI_BRANCH.md)).
+[`MULTI_BRANCH.md`](MULTI_BRANCH.md)). `proyectista` is neither: it needs a
+base branch like a seller, but its projects are scoped by **owner**, not by
+branch.
 
 ### Several roles per user
 
@@ -27,11 +30,11 @@ permissions, at every layer: the area matrix below, `TRANSITION_ROLES` and
 the cutting, banding and additional work.
 
 - **Only the workshop roles combine** (`operador` + `canteador`).
-  `administrador` and `vendedor` are exclusive; any other combination, or an
+  `administrador`, `vendedor` and `proyectista` are exclusive; any other combination, or an
   empty list, is a `422` with `field: "roles"`. So a user with several roles is
   always a workshop user, bound to their branch.
 - `roles` comes back in **canonical order** (`administrador`, `vendedor`,
-  `operador`, `canteador`), whatever order it was sent in.
+  `operador`, `canteador`, `proyectista`), whatever order it was sent in.
 - `?role=` filters (users listing, analytics) match a user **holding** that role.
 - `roles` is **required** on `POST /users`. The single `role` of the first
   contract is gone (migration 016): no response carries it, and a body sending
@@ -109,32 +112,35 @@ Source of truth: `src/modules/users/permissions.py` (`RESOURCE_ROLES`). Every
 route is protected with `Depends(require_permission("<key>"))`, which passes
 when **any** of the user's roles is in the row.
 
-| Area (`key`)        | administrador | vendedor | operador | canteador | Endpoints |
-|----------------------|:---:|:---:|:---:|:---:|---|
-| `users:manage`       | ✅ | ❌ | ❌ | ❌ | `/users/*` |
-| `settings:manage`    | ✅ | ❌ | ❌ | ❌ | `/settings/*` |
-| `branches:manage`    | ✅ | ❌ | ❌ | ❌ | `POST/PUT/DELETE /branches/*` |
-| `branches:read`      | ✅ | ✅ | ✅ | ✅ | `GET /branches/*` |
-| `analytics`          | ✅ | ❌ | ❌ | ❌ | `/analytics/*` |
-| `inventory:check`    | ✅ | ✅ | ❌ | ❌ | `POST /inventory/stock-check` (the alert beside a quote) |
-| `inventory:low-stock` | ✅ | ❌ | ❌ | ❌ | `GET /inventory/low-stock` (the report the admin reorders from) |
-| `products:read`      | ✅ | ✅ | ❌ | ❌ | `GET /products/*` |
-| `products:write`     | ✅ | ❌ | ❌ | ❌ | `POST/PUT/DELETE /products/*` |
-| `additional_services:read`  | ✅ | ✅ | ❌ | ❌ | `GET /additional-services/*` |
-| `additional_services:write` | ✅ | ✅ | ❌ | ❌ | `POST/PUT/DELETE /additional-services/*` |
-| `clients:manage`     | ✅ | ✅ | ❌ | ❌ | `/clients/*` |
-| `optimizer`          | ✅ | ✅ | ❌ | ❌ | `/optimize/*`, `/optimization-drafts/*` |
-| `preorders`          | ✅ | ✅ | ❌ | ❌ | `/preorders/*` (internal; the client-facing flow is public, see below) |
-| `orders:read`        | ✅ | ✅ | ✅ | ❌ | `GET /orders`, `GET /orders/{id}`, `GET /orders/{id}/document` (the order's ONLY pdf: document + diagram + annexes) |
-| `orders:write`       | ✅ | ✅ | ❌ | ❌ | `PATCH /orders/{id}/invoice`, `GET /orders/{id}/billing-export`, `PATCH /orders/{id}/branch`, `PATCH /orders/{id}/priority`, `POST/DELETE /orders/{id}/attachments[/{aid}]`, `POST /orders/{id}/payments` (a payment against the order's credit) |
-| `orders:payments-void` | ✅ | ❌ | ❌ | ❌ | `POST /orders/{id}/payments/{pid}/void` (takes a payment back off the books; the row stays) |
-| `orders:transition`  | ✅ | ✅ | ✅* | ✅* | `PATCH /orders/{id}/status` (narrowed per-transition by `TRANSITION_ROLES`) |
-| `cutting_plan`       | ✅ | ✅ | ✅ | ❌ | `GET /orders/{id}/cutting-plan` |
-| `orders:cut`         | ✅ | ❌ | ✅ | ❌ | `PATCH /orders/{id}/cutting-plan/pieces/{id}` |
-| `orders:activities`  | ✅ | ❌ | ✅* | ✅* | `PATCH /orders/{id}/activities/{type}`, `POST /orders/{id}/activities/{type}/pause` and `/resume` (narrowed per-activity by `ACTIVITY_ROLES`) |
-| `orders:workshop`    | ✅ | ❌ | ✅ | ✅ | `GET /orders/workshop-queue` (shared shop-floor board) |
-| `consumables:register` | ✅ | ❌ | ✅* | ✅* | `GET /consumables/status`, `POST /consumables/changes`, `POST /consumables/changes/{id}/void` for one's own change of a moment ago (narrowed per-consumable by `CONSUMABLE_ROLES`: the operator changes the saw and scoring blades, the `canteador` loads the glue) |
-| `consumables:manage` | ✅ | ❌ | ❌ | ❌ | `changedAt` on `POST /consumables/changes` (a change somebody forgot) and voiding any change, with a reason. The yield report is `GET /analytics/consumables` (`analytics`) |
+| Area (`key`)        | administrador | vendedor | operador | canteador | proyectista | Endpoints |
+|----------------------|:---:|:---:|:---:|:---:|:---:|---|
+| `users:manage`       | ✅ | ❌ | ❌ | ❌ | ❌ | `/users/*` |
+| `settings:manage`    | ✅ | ❌ | ❌ | ❌ | ❌ | `/settings/*` |
+| `branches:manage`    | ✅ | ❌ | ❌ | ❌ | ❌ | `POST/PUT/DELETE /branches/*` |
+| `branches:read`      | ✅ | ✅ | ✅ | ✅ | ✅ | `GET /branches/*` |
+| `analytics`          | ✅ | ❌ | ❌ | ❌ | ❌ | `/analytics/*` |
+| `inventory:check`    | ✅ | ✅ | ❌ | ❌ | ✅ | `POST /inventory/stock-check` (the alert beside a quote) |
+| `inventory:low-stock` | ✅ | ❌ | ❌ | ❌ | ❌ | `GET /inventory/low-stock` (the report the admin reorders from) |
+| `products:read`      | ✅ | ✅ | ❌ | ❌ | ✅ | `GET /products/*` |
+| `products:write`     | ✅ | ❌ | ❌ | ❌ | ❌ | `POST/PUT/DELETE /products/*` |
+| `additional_services:read`  | ✅ | ✅ | ❌ | ❌ | ❌ | `GET /additional-services/*` |
+| `additional_services:write` | ✅ | ✅ | ❌ | ❌ | ❌ | `POST/PUT/DELETE /additional-services/*` |
+| `clients:manage`     | ✅ | ✅ | ❌ | ❌ | ❌ | `/clients/*` |
+| `optimizer`          | ✅ | ✅ | ❌ | ❌ | ✅ | `/optimize/*` (optimize, cut rules, the layout editor) |
+| `optimizer:drafts`   | ✅ | ✅ | ❌ | ❌ | ❌ | `/optimization-drafts/*` (the branch's work in progress) |
+| `projects:read`      | ✅ | ✅ | ❌ | ❌ | ✅** | `GET /projects`, `GET /projects/{id}` |
+| `projects:write`     | ✅ | ❌ | ❌ | ❌ | ✅** | `POST /projects`, `PUT /projects/{id}`, `PATCH /projects/{id}/status` |
+| `preorders`          | ✅ | ✅ | ❌ | ❌ | ❌ | `/preorders/*` (internal; the client-facing flow is public, see below) |
+| `orders:read`        | ✅ | ✅ | ✅ | ❌ | ❌ | `GET /orders`, `GET /orders/{id}`, `GET /orders/{id}/document` (the order's ONLY pdf: document + diagram + annexes) |
+| `orders:write`       | ✅ | ✅ | ❌ | ❌ | ❌ | `PATCH /orders/{id}/invoice`, `GET /orders/{id}/billing-export`, `PATCH /orders/{id}/branch`, `PATCH /orders/{id}/priority`, `POST/DELETE /orders/{id}/attachments[/{aid}]`, `POST /orders/{id}/payments` (a payment against the order's credit) |
+| `orders:payments-void` | ✅ | ❌ | ❌ | ❌ | ❌ | `POST /orders/{id}/payments/{pid}/void` (takes a payment back off the books; the row stays) |
+| `orders:transition`  | ✅ | ✅ | ✅* | ✅* | ❌ | `PATCH /orders/{id}/status` (narrowed per-transition by `TRANSITION_ROLES`) |
+| `cutting_plan`       | ✅ | ✅ | ✅ | ❌ | ❌ | `GET /orders/{id}/cutting-plan` |
+| `orders:cut`         | ✅ | ❌ | ✅ | ❌ | ❌ | `PATCH /orders/{id}/cutting-plan/pieces/{id}` |
+| `orders:activities`  | ✅ | ❌ | ✅* | ✅* | ❌ | `PATCH /orders/{id}/activities/{type}`, `POST /orders/{id}/activities/{type}/pause` and `/resume` (narrowed per-activity by `ACTIVITY_ROLES`) |
+| `orders:workshop`    | ✅ | ❌ | ✅ | ✅ | ❌ | `GET /orders/workshop-queue` (shared shop-floor board) |
+| `consumables:register` | ✅ | ❌ | ✅* | ✅* | ❌ | `GET /consumables/status`, `POST /consumables/changes`, `POST /consumables/changes/{id}/void` for one's own change of a moment ago (narrowed per-consumable by `CONSUMABLE_ROLES`: the operator changes the saw and scoring blades, the `canteador` loads the glue) |
+| `consumables:manage` | ✅ | ❌ | ❌ | ❌ | ❌ | `changedAt` on `POST /consumables/changes` (a change somebody forgot) and voiding any change, with a reason. The yield report is `GET /analytics/consumables` (`analytics`) |
 
 \* Both starred rows are coarse gates, narrowed by a table in
 `src/modules/orders/model.py`: `TRANSITION_ROLES` per (from, to) transition and
@@ -143,6 +149,34 @@ the additional work). `operador`/`canteador` hold `orders:transition` only for
 the order's closing, which normally happens by itself when the last activity is
 closed — every other transition stays shut to them, and dispatch is
 admin/vendedor only.
+
+\*\* The `proyectista` reaches only **their own** projects: another's is a
+uniform `404`, never a `403`. The `vendedor` reads every project but writes
+none.
+
+### Projects (`/projects`)
+
+A project is a cut list the `proyectista` draws with the optimizer: `name`,
+`clientName` (free text: the seller picks the real client when quoting),
+`notes` and an opaque `payload` (the optimizer's form state, the same contract
+as a draft's). Its owner is whoever creates it.
+
+| Status | Who moves it | To |
+|--------|--------------|----|
+| `in_progress` | the owner or an admin | `ready` (stamps `readyAt`), `archived` |
+| `ready` | the owner or an admin | `in_progress` (reopen), `archived` |
+| `archived` | the owner or an admin | `in_progress` |
+| `quoted` | nobody (`PATCH /status` is a `422`) | — read-only |
+
+- `PUT /projects/{id}` edits only an `in_progress` project (`422`,
+  `field: "status"`, otherwise). There is no `DELETE`: a project is archived.
+- **The hand-off**: a seller lists the queue (`GET /projects?status=ready`),
+  loads the `payload` into the wizard and creates the quote with
+  `POST /preorders` + `projectId`. The project must be `ready` or `quoted`
+  (`422`, `field: "projectId"`, otherwise; an unknown id is a `404`), and it
+  becomes `quoted` in the same commit. A `quoted` project can be quoted again,
+  so one project may list several quotes (`quotes`, in the listing and in its detail). The quote
+  carries `projectId`; `duplicate` does not copy it.
 
 ### Order status transitions and roles
 

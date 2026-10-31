@@ -27,12 +27,12 @@ from src.shared.responses import (
     page,
 )
 
-# Optimizer drafts: "administrador" and "vendedor" (RESOURCE_ROLES["optimizer"]).
+# Optimizer drafts: "administrador" and "vendedor" (RESOURCE_ROLES["optimizer:drafts"]).
 router = APIRouter(
     prefix="/optimization-drafts",
     tags=["optimization-drafts"],
     responses=ERROR_RESPONSES,
-    dependencies=[Depends(require_permission("optimizer"))],
+    dependencies=[Depends(require_permission("optimizer:drafts"))],
 )
 
 
