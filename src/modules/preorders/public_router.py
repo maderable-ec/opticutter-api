@@ -12,7 +12,7 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Request
 
-from src.modules.optimizations.labels import edge_notation
+from src.modules.optimizations.labels import edge_notation, payload_reads_by_length
 from src.modules.optimizations.service import CCW_ROTATION
 from src.modules.preorders.model import PreOrderModel, PreOrderStatus
 from src.modules.preorders.review_service import (
@@ -88,14 +88,16 @@ def _to_review_special(
 
 
 def _to_review_cut_edges(
-    requirement: dict, eb_by_id: dict
+    requirement: dict, eb_by_id: dict, by_length: bool = False
 ) -> Optional[ReviewCutPieceEdges]:
     """Projects a cut-list piece's banding; drops the catalog identifiers.
 
     No rotation here, unlike ``_to_review_edges``: these sides come from the
     requirement's own ``EdgeBandingSpec`` and are nominal already. A canto
     especial adds its side to ``sides`` and takes it from the auto tape, whose
-    name is dropped when it no longer bands any side.
+    name is dropped when it no longer bands any side. ``by_length``
+    (``labels.payload_reads_by_length``) reads ``L`` off the piece's own
+    measures, as the diagram's placed pieces froze it.
     """
     edges = requirement.get("edge_banding") or {}
     special = requirement.get("special_edges") or []
@@ -114,6 +116,8 @@ def _to_review_cut_edges(
             edges.get("band_type"),
             edges.get("alias"),
             special,
+            height=requirement.get("height") if by_length else None,
+            width=requirement.get("width") if by_length else None,
         )
         or None,
         special=_to_review_special(special, eb_by_id),
@@ -245,6 +249,7 @@ def _to_review_response(
         for s in preorder.additional_services or []
     ]
     eb_by_id = _edge_banding_index(payload)
+    by_length = payload_reads_by_length(payload)
     pieces = [
         ReviewPieceResponse(
             label=r.get("label"),
@@ -253,7 +258,7 @@ def _to_review_response(
             height=r["height"],
             width=r["width"],
             quantity=r["quantity"],
-            edges=_to_review_cut_edges(r, eb_by_id),
+            edges=_to_review_cut_edges(r, eb_by_id, by_length),
         )
         for r in payload.get("requirements", [])
     ]
@@ -283,6 +288,7 @@ def _to_review_response(
         additional_services=services,
         pieces=pieces,
         layout_groups=_to_review_layouts(payload),
+        edge_notation_by_length=by_length,
     )
 
 

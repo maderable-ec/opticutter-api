@@ -52,13 +52,16 @@ CSV_COLUMNS = (
 _SIDES = ("top", "left", "bottom", "right")
 
 
-def piece_etiqueta(piece: OrderPieceModel) -> str:
+def piece_etiqueta(piece: OrderPieceModel, by_length: bool = False) -> str:
     """The piece's label for the other program: banding, own text, then codes.
 
     ``1L1C CS BLN Puerta Abis X1 Div D1``. The banding comes first because that
     is where the shop writes it and where the web import reads it back from.
     Everything is joined by spaces -- the shop's own ``1L CD 1C CS`` -- so the
-    label stays ASCII; the program's files carry nothing else.
+    label stays ASCII; the program's files carry nothing else. ``by_length``
+    (``labels.payload_reads_by_length`` of the order's snapshot) reads ``L``
+    off the piece's longer measure, as the shop does; an order frozen before
+    the rule keeps the reading it was printed with.
     """
     edges = piece.edges or {}
     banding = edge_notation(
@@ -67,6 +70,8 @@ def piece_etiqueta(piece: OrderPieceModel) -> str:
         edges.get("alias"),
         edges.get("special_edges") or (),
         sep=" ",
+        height=piece.height if by_length else None,
+        width=piece.width if by_length else None,
     )
     codes = workshop_codes_line(
         {f: getattr(piece, f) for f in WORKSHOP_CODE_FIELDS}, sep=" "
@@ -120,11 +125,14 @@ def _ordered(pieces: Iterable[OrderPieceModel]) -> List[OrderPieceModel]:
     return sorted(pieces, key=lambda p: p.id or 0)
 
 
-def pieces_csv(pieces: Iterable[OrderPieceModel], rules: CutRules) -> bytes:
+def pieces_csv(
+    pieces: Iterable[OrderPieceModel], rules: CutRules, by_length: bool = False
+) -> bytes:
     """The cut list as the web's CSV export writes it, BOM included for Excel.
 
     ``rules``: the millimetres the order's plan was cut with
-    (``cut_rules.payload_cut_rules`` of its snapshot)."""
+    (``cut_rules.payload_cut_rules`` of its snapshot); ``by_length`` as in
+    ``piece_etiqueta``."""
     buffer = io.StringIO()
     writer = csv.writer(buffer)  # QUOTE_MINIMAL, CRLF
     writer.writerow(CSV_COLUMNS)
@@ -136,7 +144,7 @@ def pieces_csv(pieces: Iterable[OrderPieceModel], rules: CutRules) -> bytes:
                 width,
                 piece.quantity,
                 "",
-                piece_etiqueta(piece),
+                piece_etiqueta(piece, by_length),
                 "sí" if piece.can_rotate else "no",
             )
         )
@@ -153,6 +161,7 @@ def pieces_xml(
     pieces: Iterable[OrderPieceModel],
     rules: CutRules,
     customer: Optional[str] = None,
+    by_length: bool = False,
 ) -> bytes:
     """The cut list as the commercial program saves it.
 
@@ -160,7 +169,7 @@ def pieces_xml(
     ``<tag></tag>`` for an empty one -- never ``<tag />``, which that program
     does not write. ``length`` is the height: the first measurement, along the
     grain. ``customer``, empty in the shop's own files, carries the client.
-    ``rules`` as in ``pieces_csv``.
+    ``rules`` and ``by_length`` as in ``pieces_csv``.
     """
     root = ET.Element("data")
     parts = ET.SubElement(root, "parts")
@@ -171,7 +180,7 @@ def pieces_xml(
         _child(row, "quantity", str(piece.quantity))
         _child(row, "grain", "0")
         _child(row, "allow_rotation", "1" if piece.can_rotate else "0")
-        _child(row, "label", piece_etiqueta(piece))
+        _child(row, "label", piece_etiqueta(piece, by_length))
         _child(row, "material", _material(piece))
         _child(row, "customer", customer or "")
         edge_band = ET.SubElement(row, "edge_band")

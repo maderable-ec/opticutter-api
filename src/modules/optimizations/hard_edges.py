@@ -8,11 +8,12 @@ How much per side is a setting (``settings.hard_edge_cut_mm``, 1 mm by
 default; see ``cut_rules``), not the tape's own thickness: a 1.5 mm tape takes
 off the same.
 
-The axis is the physical one: a tape on a long side (``left``/``right``, the
-``L`` of the notation, sides of length ``height``) adds its thickness across
-the WIDTH, and one on a short side (``top``/``bottom``, ``C``) across the
-HEIGHT. At 1 mm, a 600×400 piece with ``2L CD`` is cut 600×398; with ``1C CD``,
-599×400.
+The axis is the physical one: a tape on a side along the height
+(``left``/``right``) adds its thickness across the WIDTH, and one on a side
+along the width (``top``/``bottom``) across the HEIGHT. Which pair the notation
+calls ``L`` is the longer one (``labels.long_sides``), so the long sides always
+shorten the SHORT measure: at 1 mm, a 600×400 piece with ``2L CD`` is cut
+600×398 (with ``1C CD``, 599×400), and a 400×600 one with ``2L CD`` 398×600.
 
 What makes a side hard is the tape's PRODUCT (its ``bandType``), the same
 source that hatches the side in the diagram and prints ``CD`` -- so what reads

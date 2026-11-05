@@ -521,6 +521,12 @@ class OrderResponse(CamelModel):
     )
     lines: List[OrderLineResponse] = Field(default_factory=list)
     pieces: List[OrderPieceResponse] = Field(default_factory=list)
+    edge_notation_by_length: bool = Field(
+        default=False,
+        description="True if the pieces' edge notation reads L as the sides along "
+        "their LONGER measure; false on an order made before that rule, whose "
+        "L is the pair along the height (its first measure)",
+    )
     history: List[OrderStatusHistoryResponse] = Field(default_factory=list)
 
 

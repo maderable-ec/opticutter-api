@@ -7,6 +7,7 @@ from src.modules.optimizations.cut_rules import (
     CutRules,
     payload_cut_rules,
 )
+from src.modules.optimizations.labels import payload_reads_by_length
 
 
 @dataclass
@@ -34,6 +35,10 @@ class DocumentCarrier:
     # The millimetres the plan was cut with (``cut_rules``), for the diagram's
     # legend: the plan's own, never the settings of the day.
     cut_rules: CutRules = LEGACY_CUT_RULES
+    # Whether the pieces table reads ``L`` off each piece's longer measure
+    # (``labels.payload_reads_by_length``): off on an order frozen before the
+    # rule, which keeps printing what the shop already read.
+    edge_notation_by_length: bool = False
     total_boards_used: int = 0
     total_boards_cost: float = 0.0
     total_edge_banding_cost: float = 0.0
@@ -107,6 +112,7 @@ class DocumentCarrier:
             layouts=payload.get("layouts") or [],
             layout_groups=payload.get("layout_groups") or [],
             cut_rules=payload_cut_rules(payload),
+            edge_notation_by_length=payload_reads_by_length(payload),
             total_boards_used=payload.get("total_boards_used", 0),
             total_boards_cost=payload.get("total_boards_cost", 0.0),
             total_edge_banding_cost=payload.get("total_edge_banding_cost", 0.0),

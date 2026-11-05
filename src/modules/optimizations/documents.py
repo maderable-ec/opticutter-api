@@ -669,7 +669,10 @@ class DocumentService:
                 f"{req.get('width', 0)} mm",
                 str(req.get("quantity", 1)),
                 req.get("product_code") or "N/A",
-                Paragraph(_edge_banding_notation(req), cell_style),
+                Paragraph(
+                    _edge_banding_notation(req, carrier.edge_notation_by_length),
+                    cell_style,
+                ),
             ]
             if with_workshop:
                 # Free text the seller typed: ``Paragraph`` reads mini-HTML.
@@ -1068,20 +1071,27 @@ def pdf_response(
     )
 
 
-def _edge_banding_notation(req: dict) -> str:
+def _edge_banding_notation(req: dict, by_length: bool = False) -> str:
     """Workshop notation for a piece's edge banding (``2L1C CS CSH``), or ``-`` if none.
 
     ``band_type``/``alias`` are frozen into the requirement at compute time
     (see ``OptimizationService._dump_requirement``), on the auto banding and on
     each canto especial (``1L1C CS CSH · 1L CD BLN``); snapshots predating
-    either simply render without that part.
+    either simply render without that part. ``by_length`` reads ``L`` off the
+    piece's own measures (``labels.long_sides``), as the plan's placed pieces
+    froze it; without it, the old reading an unmarked payload printed.
     """
     spec = req.get("edge_banding") or {}
     special = req.get("special_edges") or []
     if not spec and not special:
         return "-"
     text = edge_notation(
-        spec.get("sides") or [], spec.get("band_type"), spec.get("alias"), special
+        spec.get("sides") or [],
+        spec.get("band_type"),
+        spec.get("alias"),
+        special,
+        height=req.get("height") if by_length else None,
+        width=req.get("width") if by_length else None,
     )
     if special:
         # The column is sized for one ``2L1C CS CSH``: let it wrap between tapes

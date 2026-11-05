@@ -38,7 +38,13 @@ from src.modules.optimizations.assembly import (
 )
 from src.modules.optimizations.cut_rules import CutRules, rules_in_play
 from src.modules.optimizations.engine_info import backend_name
-from src.modules.optimizations.labels import SPECIAL_SIDE_ORDER, edge_notation
+from src.modules.optimizations.labels import (
+    EDGE_NOTATION_BY_LENGTH,
+    SPECIAL_SIDE_ORDER,
+    edge_notation,
+    length_changes_notation,
+    payload_reads_by_length,
+)
 from src.modules.optimizations.layout_adjustments import (
     EDITING,
     LENIENT,
@@ -148,6 +154,24 @@ def _requirement_dump(requirement: Requirement) -> dict:
     if not requirement.assembly_allowance:
         exclude.add("assembly_allowance")
     return requirement.model_dump(mode="json", exclude=exclude)
+
+
+def notation_reads_by_length(requirements: Sequence[Requirement]) -> bool:
+    """Whether some row's notation reads otherwise now that ``L`` is the longer
+    side (``labels.length_changes_notation``); each canto especial is told
+    apart by its product, which is all the comparison needs of a tape."""
+    return any(
+        length_changes_notation(
+            [s.value for s in r.edge_banding.sides] if r.edge_banding else [],
+            [
+                {"side": e.side.value, "alias": str(e.product_id)}
+                for e in r.special_edges
+            ],
+            r.height,
+            r.width,
+        )
+        for r in requirements
+    )
 
 
 def hashable_requirements(requirements: Sequence[Requirement]) -> List[dict]:
@@ -343,6 +367,7 @@ def _payload_fields(
         layout_issues=payload.get("layout_issues") or [],
         adjustment_summary=payload.get("adjustment_summary"),
         layout_adjustments=payload.get("layout_adjustments"),
+        edge_notation_by_length=payload_reads_by_length(payload),
     )
 
 
@@ -1398,6 +1423,20 @@ class OptimizationService:
                 # plan. A quote saved before the rule, whatever its codes, has
                 # no marked row.
                 **cut_rules,
+                # The ``L`` of the notation is the pair of sides along the
+                # LONGER measure (``labels.long_sides``), and the payload bakes
+                # the notation into every placed piece. It used to be the pair
+                # along the height, so a quote cached before that reads such a
+                # row the old way. Only a quote with a row the two readings
+                # write differently emits this (``notation_reads_by_length``),
+                # like ``skip_trim``: every other quote keeps its canonical JSON
+                # and its Redis entry, and ``ENGINE_VERSION`` stays put, since
+                # no piece moves.
+                **(
+                    {"edge_notation": EDGE_NOTATION_BY_LENGTH}
+                    if notation_reads_by_length(request.requirements)
+                    else {}
+                ),
             },
             "edge_bandings": edge_bandings,
         }
@@ -1520,6 +1559,8 @@ class OptimizationService:
         eb_products: Dict[int, ProductModel],
         rotated: bool,
         special: Sequence[SpecialEdge] = (),
+        height: Optional[int] = None,
+        width: Optional[int] = None,
     ) -> dict:
         """Translates the nominal sides to the geometric sides of the drawn piece.
 
@@ -1535,6 +1576,8 @@ class OptimizationService:
         requested measurements and the ``L``/``C`` notation refer to). A consumer
         that shows a piece as the client ordered it wants the latter — deriving
         it from ``sides`` means re-implementing this rotation convention.
+        ``height``/``width`` are the piece's final measures, which decide which
+        pair of sides the notation calls ``L`` (``labels.long_sides``).
 
         Cantos especiales (``special``) add their sides to both frames, and each
         one ships in ``special`` with its own product fields, since a side can
@@ -1584,6 +1627,8 @@ class OptimizationService:
                 (product.alias if product else None),
                 # The notation speaks the piece's own frame, like ``auto``.
                 [{**e, "side": e["nominal_side"]} for e in special_edges],
+                height=height,
+                width=width,
             ),
         }
         if special_edges:
@@ -1647,6 +1692,8 @@ class OptimizationService:
                 eb_products,
                 bool(placed.get("rotated")),
                 req.special_edges,
+                req.height,
+                req.width,
             )
 
     def _build_edge_bandings_summary(
@@ -1822,6 +1869,13 @@ class OptimizationService:
         on) is what the plan was cut with, for the PDF's legend and the order's
         export; absent when no row is under either rule, so such a payload is
         byte-identical to what it always was.
+
+        ``edge_notation`` marks a plan with some row that reads ``L`` by length
+        otherwise than by height (the same test the hash keys on). It is what
+        lets an order frozen before the rule keep printing what the shop read:
+        whatever rebuilds a notation from a payload's sides reads by length
+        only on a marked one (``labels.payload_reads_by_length``). Absent
+        everywhere the two readings agree, so such a payload is byte-identical.
         """
         all_layouts = [layout for *_, layouts in results for layout in layouts]
 
@@ -1888,6 +1942,11 @@ class OptimizationService:
             "layout_groups": group_layouts(layout_dicts),
             "unplaced": unplaced or [],
             **({"cut_rules": cut_rules} if cut_rules else {}),
+            **(
+                {"edge_notation": EDGE_NOTATION_BY_LENGTH}
+                if notation_reads_by_length(request.requirements)
+                else {}
+            ),
         }
 
 
