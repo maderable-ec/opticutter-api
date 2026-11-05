@@ -90,7 +90,9 @@ class EdgeSide(str, Enum):
     """Nominal sides of a piece (unrotated frame).
 
     ``top``/``bottom`` are the sides of length ``width``; ``left``/``right``
-    are the sides of length ``height``.
+    are the sides of length ``height``. The physical frame: which pair the
+    notation calls ``L`` (the long sides) depends on which measure is longer
+    (``labels.long_sides``), so a ``1L`` on a 300×600 piece is ``top``.
     """
 
     top = "top"
@@ -1102,6 +1104,15 @@ class OptimizeResponse(CamelModel):
     layout_adjustments: Optional[List[LayoutAdjustment]] = Field(
         default=None,
         description="The hand adjustments actually applied to this plan",
+    )
+    edge_notation_by_length: bool = Field(
+        default=False,
+        description=(
+            "True if the plan's edge notation reads L as the sides along each "
+            "piece's LONGER measure where that differs from reading it by the "
+            "height; false where both readings agree, and on an order frozen "
+            "before the rule, whose L is the pair along the height"
+        ),
     )
 
 

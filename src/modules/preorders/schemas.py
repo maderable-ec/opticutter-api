@@ -470,3 +470,9 @@ class ReviewPreOrderResponse(CamelModel):
         description="Cutting patterns of the quote's optimization (the order's "
         "once confirmed), for the diagram",
     )
+    edge_notation_by_length: bool = Field(
+        default=False,
+        description="True if the edge notation reads L as the sides along each "
+        "piece's LONGER measure where that differs from reading it by the height; "
+        "false where both agree, and on an order frozen before the rule",
+    )

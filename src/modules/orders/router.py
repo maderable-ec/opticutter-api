@@ -8,6 +8,7 @@ from fastapi.responses import Response, StreamingResponse
 from src.modules.optimizations.carrier import DocumentCarrier
 from src.modules.optimizations.cut_rules import payload_cut_rules
 from src.modules.optimizations.documents import build_order_packet, pdf_response
+from src.modules.optimizations.labels import payload_reads_by_length
 from src.modules.orders import attachment_storage
 from src.modules.orders.attachment_service import (
     AttachmentService,
@@ -597,12 +598,17 @@ def export_order_pieces(
     the piece's own text and its workshop codes in the label.
     """
     order = svc.get_scoped_or_404(order_id, branch_scope)
-    # The millimetres the order's plan was cut with, not today's settings.
-    rules = payload_cut_rules(order.optimization_snapshot or {})
+    # The millimetres the order's plan was cut with, not today's settings, and
+    # the reading of ``L`` it was printed with.
+    snapshot = order.optimization_snapshot or {}
+    rules = payload_cut_rules(snapshot)
+    by_length = payload_reads_by_length(snapshot)
     if format == "csv":
-        content = pieces_csv(order.pieces, rules)
+        content = pieces_csv(order.pieces, rules, by_length)
     else:
-        content = pieces_xml(order.pieces, rules, customer_name(order.client))
+        content = pieces_xml(
+            order.pieces, rules, customer_name(order.client), by_length
+        )
     filename = f"piezas_{order.code or order.id}.{format}"
     return Response(
         content,

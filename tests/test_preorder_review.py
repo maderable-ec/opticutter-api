@@ -199,8 +199,9 @@ def test_public_review_layout_carries_both_edge_frames(client):
     edges = piece["edges"]
     assert edges["sides"] == ["top"]  # CW: left→top
     assert edges["nominalSides"] == ["left"]
-    # left = a height side = long ⇒ 1L, and Soft ⇒ CS. Unchanged by the rotation.
-    assert edges["notation"] == "1L CS"
+    # left = a height side, and the 1000 height is the SHORTER measure ⇒ 1C;
+    # Soft ⇒ CS. Unchanged by the rotation.
+    assert edges["notation"] == "1C CS"
 
 
 def test_public_review_layout_hides_production_internals(client):

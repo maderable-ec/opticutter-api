@@ -32,7 +32,8 @@ def test_the_xml_is_the_cut_list_with_its_client(client, db_session):
     assert fields["width"] == "1000"
     assert fields["quantity"] == "1"
     assert fields["allow_rotation"] == "1"
-    assert fields["label"] == "2C CS Costado"
+    # 500×1000 banded on top+bottom: the two sides of 1000, the long ones.
+    assert fields["label"] == "2L CS Costado"
     assert fields["material"] == order["pieces"][0]["productName"]
     assert fields["customer"] == "Ada Lovelace"
 
@@ -64,7 +65,7 @@ def test_the_csv_is_the_web_imports_layout(client, db_session):
             "1000",
             "1",
             "",
-            "2C CS Costado",
+            "2L CS Costado",
             "sí",
         ]
     ]

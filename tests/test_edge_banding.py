@@ -1,5 +1,7 @@
 """Tests for edge banding: linear meters, validation, rotation rule and order charges."""
 
+import xml.etree.ElementTree as ET
+
 import pytest
 
 from src.modules.optimizations.labels import edge_banding_notation
@@ -538,7 +540,8 @@ def test_placed_piece_notation_includes_band_type(client):
     b = _create_board(client)
     eb = _create_edge_banding(client, band_type="Soft")
 
-    # height=500, width=1000, not rotated: left+right = 2 long, top = 1 short; Soft → CS.
+    # height=500, width=1000, not rotated: the width is the longer measure, so
+    # top is the 1 long side and left+right the 2 short ones; Soft → CS.
     req = _requirement(eb["id"], ["left", "right", "top"])
     req["canRotate"] = False
     resp = client.post(
@@ -552,7 +555,7 @@ def test_placed_piece_notation_includes_band_type(client):
     placed = resp.json()["data"]["layouts"][0]["placedPieces"][0]
     assert placed["rotated"] is False
     # The fixture configures no alias, so only the CS suffix rides along.
-    assert placed["edges"]["notation"] == "2L1C CS"
+    assert placed["edges"]["notation"] == "1L2C CS"
     # The canonical type travels with the placed piece (soft/hard distinction in the diagram).
     # ``edges`` is a raw dict → the key is serialized as-is (snake_case).
     assert placed["edges"]["band_type"] == "Soft"
@@ -583,7 +586,8 @@ def test_alias_is_frozen_across_the_optimize_payload(client):
     data = resp.json()["data"]
 
     placed = data["layouts"][0]["placedPieces"][0]
-    assert placed["edges"]["notation"] == "2L1C CS CSH"
+    # 500×1000: top is the long side, left+right the short ones.
+    assert placed["edges"]["notation"] == "1L2C CS CSH"
     assert placed["edges"]["alias"] == "CSH"
     assert data["edgeBandingsSummary"][0]["alias"] == "CSH"
 
@@ -726,8 +730,10 @@ def _with_special(requirement, *special):
 
 
 def test_a_special_edge_bills_its_side_to_its_own_tape(client):
-    """``2L1C`` on the soft tape with ``L1`` special: the soft tape keeps one
-    long side and the short one, the hard tape bills the long side it took."""
+    """``left``+``right``+``top`` on the soft tape with ``left`` special: the
+    soft tape keeps ``right`` and ``top``, the hard tape bills the side it took.
+    On this 500×1000 piece ``top`` is the long side, so the hard tape's
+    ``left`` is a short one (``1C``)."""
     c = _create_client(client)
     b = _create_board(client)
     soft = _create_edge_banding(client, code="SOFT", band_type="Soft", alias="CSH")
@@ -755,7 +761,7 @@ def test_a_special_edge_bills_its_side_to_its_own_tape(client):
     assert data["totalEdgeBandingLinearM"] == pytest.approx(2.0)
 
     [placed] = data["layouts"][0]["placedPieces"]
-    assert placed["edges"]["notation"] == "1L1C CS CSH · 1L CD BLN"
+    assert placed["edges"]["notation"] == "1L1C CS CSH · 1C CD BLN"
     assert placed["edges"]["special"][0]["nominal_side"] == "left"
     assert placed["edges"]["special"][0]["band_type"] == "Hard"
 
@@ -916,3 +922,112 @@ def test_a_preorder_keeps_its_special_edges(client):
     assert read["requirements"][0]["specialEdges"] == [
         {"side": "left", "productId": hard["id"]}
     ]
+
+
+# --------------------------------------------------------------------------- #
+# ``L`` is the longer side: what an order prints
+# --------------------------------------------------------------------------- #
+def _export_label(client, order_id):
+    url = f"/api/v1/orders/{order_id}/pieces/export"
+    body = client.get(url, params={"format": "xml"}).content
+    return ET.fromstring(body).find("parts/row/label").text
+
+
+def test_an_order_reads_l_off_the_longer_measure(client, db_session):
+    """300×600 banded on ``top``: the long side, a ``1L`` on every surface."""
+    c = _create_client(client)
+    b = _create_board(client)
+    eb = _create_edge_banding(client, band_type="Soft")
+    order = OrderService(db_session).create(
+        OrderCreate.model_validate(
+            {
+                "clientId": c["id"],
+                "branchId": 1,
+                "materials": _materials(b["id"]),
+                "requirements": [
+                    _requirement(eb["id"], ["top"], height=300, width=600)
+                ],
+            }
+        )
+    )
+    assert order.optimization_snapshot["edge_notation"] == "by_length"
+    [placed] = order.optimization_snapshot["layouts"][0]["placed_pieces"]
+    assert placed["edges"]["notation"] == "1L CS"
+
+    data = client.get(f"/api/v1/orders/{order.id}").json()["data"]
+    assert data["edgeNotationByLength"] is True
+    assert _export_label(client, order.id) == "1L CS Costado"
+
+
+def test_an_order_made_before_the_rule_keeps_its_reading(client, db_session):
+    """Its snapshot carries no mark: the export prints what the shop read."""
+    c = _create_client(client)
+    b = _create_board(client)
+    eb = _create_edge_banding(client, band_type="Soft")
+    order = OrderService(db_session).create(
+        OrderCreate.model_validate(
+            {
+                "clientId": c["id"],
+                "branchId": 1,
+                "materials": _materials(b["id"]),
+                "requirements": [
+                    _requirement(eb["id"], ["top"], height=300, width=600)
+                ],
+            }
+        )
+    )
+    snapshot = dict(order.optimization_snapshot)
+    del snapshot["edge_notation"]
+    order.optimization_snapshot = snapshot
+    db_session.commit()
+
+    data = client.get(f"/api/v1/orders/{order.id}").json()["data"]
+    assert data["edgeNotationByLength"] is False
+    assert _export_label(client, order.id) == "1C CS Costado"
+
+
+def test_a_plan_where_both_readings_agree_carries_no_mark(client, db_session):
+    c = _create_client(client)
+    b = _create_board(client)
+    eb = _create_edge_banding(client)
+    order = OrderService(db_session).create(
+        OrderCreate.model_validate(
+            {
+                "clientId": c["id"],
+                "branchId": 1,
+                "materials": _materials(b["id"]),
+                "requirements": [
+                    # The height is the longer measure, and 1L1C reads the same.
+                    _requirement(eb["id"], ["left"], height=600, width=300),
+                    _requirement(eb["id"], ["top", "left"], height=300, width=600),
+                ],
+            }
+        )
+    )
+    assert "edge_notation" not in order.optimization_snapshot
+    assert (
+        client.get(f"/api/v1/orders/{order.id}").json()["data"]["edgeNotationByLength"]
+        is False
+    )
+
+
+def test_the_response_says_how_its_plan_reads_l(client):
+    """The seller's diagram counts a canto especial's sides itself, so it is told."""
+    c = _create_client(client)
+    b = _create_board(client)
+    eb = _create_edge_banding(client)
+
+    def optimize(height, width):
+        return client.post(
+            "/api/v1/optimize/",
+            json={
+                "clientId": c["id"],
+                "materials": _materials(b["id"]),
+                "requirements": [
+                    _requirement(eb["id"], ["top"], height=height, width=width)
+                ],
+            },
+        ).json()["data"]
+
+    assert optimize(300, 600)["edgeNotationByLength"] is True
+    assert optimize(600, 300)["edgeNotationByLength"] is False

@@ -17,6 +17,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from src.modules.optimizations.labels import payload_reads_by_length
 from src.modules.users.enums import UserRole
 from src.shared.database import Base
 from src.shared.mixins import AuditMixin, TimestampMixin
@@ -528,6 +529,14 @@ class OrderModel(TimestampMixin, AuditMixin, Base):
         ``additional_services_total`` is a column. Empty for pre-feature orders.
         """
         return (self.optimization_snapshot or {}).get("additional_services") or []
+
+    @property
+    def edge_notation_by_length(self) -> bool:
+        """Whether the notation of these pieces reads ``L`` off their longer
+        measure (``labels.payload_reads_by_length`` of the snapshot). False on
+        an order frozen before the rule, which keeps the reading it was
+        printed with."""
+        return payload_reads_by_length(self.optimization_snapshot or {})
 
 
 class OrderActivityModel(TimestampMixin, AuditMixin, Base):
