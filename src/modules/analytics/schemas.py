@@ -7,6 +7,8 @@ time series are parallel arrays over the same ``buckets`` axis.
 from datetime import date, datetime
 from typing import List, Literal, Optional
 
+from pydantic import Field
+
 from src.modules.orders.model import ActivityType, PauseReason, PaymentMethod
 from src.modules.orders.production import SheetCredit, SheetKind
 from src.shared.schemas import CamelModel
@@ -102,10 +104,22 @@ class OrderFigures(CamelModel):
     finished: int
 
 
+class SheetCounts(CamelModel):
+    """The sheets behind a board count, one by one: whole boards, half boards
+    and retazos. ``boards`` is their equivalent, ``whole + half / 2`` (a retazo
+    weighs 0); this says what it is made of, retazos included -- the saw cuts
+    them too."""
+
+    whole: int = 0
+    half: int = 0
+    offcut: int = 0
+
+
 class ProductionFigures(CamelModel):
     """The saw's work in range, read off the cutting events.
 
-    ``boards`` weighs a whole board 1, a half 0.5 and a retazo 0; the cut metres
+    ``boards`` weighs a whole board 1, a half 0.5 and a retazo 0 (the
+    equivalent the rates divide), and ``sheets`` counts them by kind; the cut metres
     are the saw travel of every sheet finished, and the banded metres the net
     tape of every banding closed (no waste factor). ``orders_banded`` and
     ``orders_additional`` count the bandings and additional works closed in
@@ -124,6 +138,7 @@ class ProductionFigures(CamelModel):
     """
 
     boards: float
+    sheets: SheetCounts = Field(default_factory=SheetCounts)
     cut_linear_m: float
     banded_linear_m: float
     orders_banded: int
@@ -178,6 +193,7 @@ class ProductionDay(CamelModel):
     effective_hours: float  # ``work_hours`` under its old name, for one release
     paused_hours: float  # working time in a registered pause of the cut
     boards: float
+    sheets: SheetCounts = Field(default_factory=SheetCounts)
     cut_linear_m: float
     banded_linear_m: float  # bandings closed that day
     orders_banded: int  # bandings closed that day
@@ -380,12 +396,14 @@ class OperatorFigures(CamelModel):
 
     A sheet is credited to whoever marked its last piece, and a stretch of the
     cut's time to whoever closed it (the mark, or the pause, at its end). The
-    hours split like the branch's: loading, sawing and their sum.
+    hours split like the branch's: loading, sawing and their sum. ``boards``
+    is the equivalent and ``sheets`` the sheets credited, by kind.
     ``effective_hours`` is ``work_hours`` under its old name, for one release.
     """
 
     pieces_cut: int
     boards: float
+    sheets: SheetCounts = Field(default_factory=SheetCounts)
     cut_linear_m: float
     work_hours: float = 0.0
     loading_hours: float = 0.0
@@ -473,8 +491,9 @@ class OperatorOrderTime(CamelModel):
 class OperatorBoardsReport(CamelModel):
     """The ledger behind one operator's row: every sheet they touched in range.
 
-    ``boards`` and ``pieces_cut`` are the row's own figures, and add up from
-    ``sheets``: the weights of the credited ones, the in-range marks of all.
+    ``boards``, ``sheet_counts`` and ``pieces_cut`` are the row's own figures,
+    and add up from ``sheets``: the weights and the kinds of the credited ones,
+    the in-range marks of all.
 
     ``orders`` is the same for the hours: order by order, what the row's time
     is made of. They add up to the row except where two orders were open at
@@ -485,6 +504,8 @@ class OperatorBoardsReport(CamelModel):
     user_id: int
     full_name: str
     boards: float
+    # The row's ``sheets``: here that name is the ledger's list.
+    sheet_counts: SheetCounts = Field(default_factory=SheetCounts)
     credited_count: int
     pieces_cut: int
     sheets: List[OperatorBoard]

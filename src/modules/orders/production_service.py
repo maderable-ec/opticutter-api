@@ -27,9 +27,11 @@ from src.modules.orders.model import (
 )
 from src.modules.orders.pieces_export import customer_name
 from src.modules.orders.production import (
+    SHEET_WEIGHT,
     ActivityLiveState,
     EventKind,
     LiveState,
+    SheetKind,
     TimelineEvent,
     WorkSegment,
     activity_live_state,
@@ -38,6 +40,7 @@ from src.modules.orders.production import (
     cut_segments,
     live_state,
     run_start,
+    sheet_kind,
 )
 from src.modules.orders.schemas import (
     ActivityLiveStatus,
@@ -124,10 +127,15 @@ class ProcessedBoard:
     order_id: int
     branch_id: int
     done_at: datetime
-    weight: float
+    kind: SheetKind
     cut_linear_m: float
     # Who marked the last piece: the operator the sheet is credited to.
     cut_by: Optional[int]
+
+    @property
+    def weight(self) -> float:
+        """What it adds to the board count: 1, 0.5 or 0 (``SHEET_WEIGHT``)."""
+        return SHEET_WEIGHT[self.kind]
 
 
 @dataclass(frozen=True)
@@ -524,7 +532,7 @@ class ProductionService:
                 order_id=b.order_id,
                 branch_id=b.branch_id,
                 done_at=done_at[b.id],
-                weight=board_weight(
+                kind=sheet_kind(
                     b.half_board, sources.get((b.order_id, b.material_key))
                 ),
                 cut_linear_m=cut_length_m(b.cuts),
