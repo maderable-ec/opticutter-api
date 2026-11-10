@@ -8,6 +8,7 @@ still the previous evening.
 from datetime import date, datetime, timedelta
 
 from src.modules.orders.production import (
+    SHEET_WEIGHT,
     ActivityLiveState,
     EventKind,
     LiveState,
@@ -64,6 +65,12 @@ def test_the_kind_says_what_the_weight_weighs():
     assert sheet_kind(False, "catalog") is SheetKind.whole
     assert sheet_kind(True, "manual") is SheetKind.half
     assert sheet_kind(True, "companyOffcut") is SheetKind.offcut
+    # The statistics count the sheets by kind next to the equivalent: one table.
+    assert SHEET_WEIGHT == {
+        SheetKind.whole: 1.0,
+        SheetKind.half: 0.5,
+        SheetKind.offcut: 0.0,
+    }
 
 
 # ----------------------------------------------------------------- the ledger

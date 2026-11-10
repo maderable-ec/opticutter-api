@@ -363,6 +363,11 @@ def test_production_weighs_the_sheets_and_splits_the_cut_time(client, db_session
     production = _get(client, "branch-comparison")["branches"][0]["production"]
 
     assert production["boards"] == 1.5  # whole 1 + half 0.5 + retazo 0
+    # The sheets behind the equivalent, the retazo too; the board with a piece
+    # still pending is not processed.
+    sheets = production["sheets"]
+    assert sheets == {"whole": 1, "half": 1, "offcut": 1}
+    assert production["boards"] == sheets["whole"] + sheets["half"] / 2
     assert production["cutLinearM"] == 5.38  # 3.66 + 1.22 + 0.50
     assert production["loadingHours"] == 0.08  # 07:55 take to the 08:00 piece
     assert production["sawingHours"] == 0.83  # 08:00 to 08:50
@@ -409,6 +414,7 @@ def test_the_total_recomputes_its_rates_from_its_sums(client, db_session):
     total = data["total"]["production"]
 
     assert total["boards"] == 2.5
+    assert total["sheets"] == {"whole": 2, "half": 1, "offcut": 1}
     assert total["workHours"] == 1.0  # 55 + 5 minutes
     assert total["boardsPerHour"] == 2.5  # 2.5 / 1.0, not the mean of the two
     # Both branches cut on the 10th: one calendar day.
@@ -447,6 +453,7 @@ def test_production_report_lists_days_and_material(client, db_session):
     assert day["workHours"] == day["effectiveHours"] == 0.92
     assert day["pausedHours"] == 0
     assert day["boards"] == 1.5
+    assert day["sheets"] == {"whole": 1, "half": 1, "offcut": 1}
     assert day["boardsPerHour"] == 1.64
     assert day["ordersFinished"] == 1
     # Stops used to be derived from the gaps between marks; a quiet stretch is
@@ -506,8 +513,10 @@ def test_a_sheet_is_credited_to_who_cut_its_last_piece(client, db_session):
     rows = {r["fullName"]: r for r in data["operators"]}
 
     assert rows["Op Uno"]["boards"] == 1.0  # the whole one; the retazo weighs 0
+    assert rows["Op Uno"]["sheets"] == {"whole": 1, "half": 0, "offcut": 1}
     assert rows["Op Uno"]["piecesCut"] == 5
     assert rows["Op Dos"]["boards"] == 0.5  # closed the half
+    assert rows["Op Dos"]["sheets"] == {"whole": 0, "half": 1, "offcut": 0}
     assert rows["Op Dos"]["piecesCut"] == 1
     # A stretch belongs to who closes it: the 30 minutes up to the 08:40 piece
     # are Op Dos's, the other 25 (the load included) are Op Uno's.
@@ -519,6 +528,7 @@ def test_a_sheet_is_credited_to_who_cut_its_last_piece(client, db_session):
         0.33,
     )
     assert data["total"]["boards"] == 1.5
+    assert data["total"]["sheets"] == {"whole": 1, "half": 1, "offcut": 1}
     assert data["total"]["workHours"] == 0.92  # the branch's own 55 minutes
     assert data["total"]["ordersCut"] == 1
 
@@ -725,8 +735,10 @@ def test_a_deleted_users_sheets_stay_in_a_row_of_their_own(client, db_session):
     assert [r["fullName"] for r in named] == ["Op Uno"]
     assert gone["userId"] is None and gone["fullName"] == "Sin usuario"
     assert (gone["boards"], gone["piecesCut"]) == (1.0, 2)
+    assert gone["sheets"] == {"whole": 1, "half": 0, "offcut": 0}
     comparison = _get(client, "branch-comparison")["total"]["production"]
     assert data["total"]["boards"] == comparison["boards"] == 2.5
+    assert data["total"]["sheets"] == comparison["sheets"]
 
 
 def test_the_ledger_adds_up_to_the_operators_row(client, db_session):
@@ -754,6 +766,9 @@ def test_the_ledger_adds_up_to_the_operators_row(client, db_session):
 
     assert ledger["fullName"] == "Op Uno"
     assert ledger["boards"] == row["boards"] == 1.0
+    assert (
+        ledger["sheetCounts"] == row["sheets"] == {"whole": 1, "half": 0, "offcut": 1}
+    )
     assert ledger["piecesCut"] == row["piecesCut"] == 6
     assert ledger["creditedCount"] == 2  # the whole board and the retazo
     by_status = defaultdict(list)

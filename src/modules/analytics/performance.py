@@ -7,7 +7,7 @@ The cutting rules (the cut's time, board weight, saw metres) are the shop
 floor's own, in ``orders/production.py``, read through ``ProductionService``.
 """
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Iterable, Optional
@@ -49,6 +49,7 @@ from src.modules.analytics.schemas import (
     SellerPendingOrder,
     SellerReport,
     SellerRow,
+    SheetCounts,
 )
 from src.modules.branches.model import BranchModel
 from src.modules.clients.model import ClientModel
@@ -65,6 +66,7 @@ from src.modules.orders.payments import collected_expr, credit_balance_expr, has
 from src.modules.orders.pieces_export import customer_name
 from src.modules.orders.production import (
     SheetCredit,
+    SheetKind,
     WorkSegment,
     activity_seconds,
     paused_by_day,
@@ -138,10 +140,20 @@ class _WorkDay:
         self.last_at = at if self.last_at is None else max(self.last_at, at)
 
 
+def _sheet_counts(sheets: Counter) -> SheetCounts:
+    """A ``Counter`` of ``SheetKind`` as the response's whole/half/offcut."""
+    return SheetCounts(
+        whole=sheets[SheetKind.whole],
+        half=sheets[SheetKind.half],
+        offcut=sheets[SheetKind.offcut],
+    )
+
+
 @dataclass
 class _Production:
     days: list[_WorkDay] = field(default_factory=list)
     boards: float = 0.0
+    sheets: Counter = field(default_factory=Counter)  # SheetKind -> sheets
     cut_linear_m: float = 0.0
     banded_linear_m: float = 0.0
     orders_banded: int = 0
@@ -149,6 +161,7 @@ class _Production:
 
     def add_board(self, board: ProcessedBoard) -> None:
         self.boards += board.weight
+        self.sheets[board.kind] += 1
         self.cut_linear_m += board.cut_linear_m
 
     def add_closed(self, activity: "_ClosedActivity") -> None:
@@ -161,6 +174,7 @@ class _Production:
     def merge(self, other: "_Production") -> None:
         self.days += other.days
         self.boards += other.boards
+        self.sheets += other.sheets
         self.cut_linear_m += other.cut_linear_m
         self.banded_linear_m += other.banded_linear_m
         self.orders_banded += other.orders_banded
@@ -205,6 +219,7 @@ def _production_figures(acc: _Production) -> ProductionFigures:
     boards_per_hour, meters_per_hour = _rates(acc.boards, acc.cut_linear_m, work)
     return ProductionFigures(
         boards=round(acc.boards, 2),
+        sheets=_sheet_counts(acc.sheets),
         cut_linear_m=round(acc.cut_linear_m, 2),
         banded_linear_m=round(acc.banded_linear_m, 2),
         orders_banded=acc.orders_banded,
@@ -400,6 +415,7 @@ class PerformanceService:
         day_rows: dict[tuple[int, date], dict] = defaultdict(
             lambda: {
                 "boards": 0.0,
+                "sheets": Counter(),
                 "meters": 0.0,
                 "banded": 0.0,
                 "orders_banded": 0,
@@ -413,6 +429,7 @@ class PerformanceService:
         for board in self.production.processed_boards(dr.start, dr.end, branch_id):
             row = day_rows[(board.branch_id, local_date(board.done_at))]
             row["boards"] += board.weight
+            row["sheets"][board.kind] += 1
             row["meters"] += board.cut_linear_m
         for activity in self._closed_activities(dr, branch_id):
             row = day_rows[(activity.branch_id, local_date(activity.finished_at))]
@@ -456,6 +473,7 @@ class PerformanceService:
                     effective_hours=_hours(workday.work_seconds),
                     paused_hours=_hours(workday.paused_seconds),
                     boards=round(row["boards"], 2),
+                    sheets=_sheet_counts(row["sheets"]),
                     cut_linear_m=round(row["meters"], 2),
                     banded_linear_m=round(row["banded"], 2),
                     orders_banded=row["orders_banded"],
@@ -800,6 +818,7 @@ class PerformanceService:
                     branch_name=branch_names.get(user.branch_id) if user else None,
                     pieces_cut=pieces[uid],
                     boards=round(acc.boards, 2),
+                    sheets=_sheet_counts(acc.sheets),
                     cut_linear_m=round(acc.cut_linear_m, 2),
                     work_hours=_hours(loading + sawing),
                     loading_hours=_hours(loading),
@@ -817,6 +836,7 @@ class PerformanceService:
         )
 
         total_boards = sum(b.boards for b in boards.values())
+        total_sheets = sum((b.sheets for b in boards.values()), Counter())
         total_meters = sum(b.cut_linear_m for b in boards.values())
         total_work = total_loading + total_sawing
         boards_per_hour, meters_per_hour = _rates(
@@ -829,6 +849,7 @@ class PerformanceService:
             total=OperatorFigures(
                 pieces_cut=sum(pieces.values()),
                 boards=round(total_boards, 2),
+                sheets=_sheet_counts(total_sheets),
                 cut_linear_m=round(total_meters, 2),
                 work_hours=_hours(total_work),
                 loading_hours=_hours(total_loading),
@@ -900,6 +921,7 @@ class PerformanceService:
             user_id=user.id,
             full_name=user.full_name or user.email,
             boards=round(sum(r.weight for r in credited), 2),
+            sheet_counts=_sheet_counts(Counter(r.kind for r in credited)),
             credited_count=len(credited),
             pieces_cut=sum(r.pieces_mine_in_range for r in rows),
             sheets=rows,

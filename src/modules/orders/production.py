@@ -35,18 +35,6 @@ from src.shared.work_schedule import Interval, WorkSchedule
 OFFCUT_SOURCES = frozenset({"companyOffcut", "clientOffcut"})
 
 
-def board_weight(half_board: bool, source: Optional[str]) -> float:
-    """How much one physical sheet counts as a "tablero procesado".
-
-    A whole board is 1 and a half board 0.5, so boards per hour compare across
-    branches; a retazo is 0. ``manual`` (a hand-measured sheet) is a purchased
-    sheet and counts like the catalog's.
-    """
-    if source in OFFCUT_SOURCES:
-        return 0.0
-    return 0.5 if half_board else 1.0
-
-
 class SheetKind(str, Enum):
     """What a sheet is, as the board count weighs it (``board_weight``)."""
 
@@ -55,10 +43,23 @@ class SheetKind(str, Enum):
     offcut = "offcut"
 
 
+# How much one sheet of each kind counts as a "tablero procesado". A whole
+# board is 1 and a half board 0.5, so boards per hour compare across branches;
+# a retazo is 0. The statistics show the equivalent AND the sheets of each kind
+# (whole, half, retazo), both read off this one table so they cannot drift.
+SHEET_WEIGHT = {SheetKind.whole: 1.0, SheetKind.half: 0.5, SheetKind.offcut: 0.0}
+
+
 def sheet_kind(half_board: bool, source: Optional[str]) -> SheetKind:
+    """``manual`` (a hand-measured sheet) is a purchased sheet, like the catalog's."""
     if source in OFFCUT_SOURCES:
         return SheetKind.offcut
     return SheetKind.half if half_board else SheetKind.whole
+
+
+def board_weight(half_board: bool, source: Optional[str]) -> float:
+    """How much one physical sheet counts as a "tablero procesado" (``SHEET_WEIGHT``)."""
+    return SHEET_WEIGHT[sheet_kind(half_board, source)]
 
 
 class SheetCredit(str, Enum):
